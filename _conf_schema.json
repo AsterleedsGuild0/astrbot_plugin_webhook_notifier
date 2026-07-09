@@ -2,14 +2,14 @@
   "enabled": {
     "description": "是否启用 Webhook Notifier",
     "type": "bool",
-    "hint": "当前版本仅提供插件骨架和状态命令，尚未启动 Webhook 服务。",
+    "hint": "启用后创建 endpoint 时将自动启动 HTTP 服务。",
     "default": true
   },
   "render_mode": {
     "description": "默认渲染模式",
     "type": "string",
     "options": ["text", "html_image"],
-    "hint": "text 为纯文本；html_image 后续将通过 AstrBot 配置的 T2I 服务渲染为卡片图片。",
+    "hint": "MS1 仅支持 text。若选择 html_image 将自动降级为 text。",
     "default": "text"
   },
   "fallback_to_text": {
@@ -18,24 +18,33 @@
     "default": true
   },
   "webhook_token": {
-    "description": "Webhook Bearer Token",
+    "description": "[已废弃] 旧版全局 Bearer Token",
     "type": "string",
-    "hint": "建议填写高强度随机值。外部系统应通过 Authorization: Bearer <token> 发送。不要把 token 放入 URL。",
+    "hint": "⚠ 该配置已不再使用。请使用 /whn token new 命令创建 managed endpoint。此处保留仅为兼容旧配置，不参与 Webhook 鉴权。",
     "default": ""
   },
+  "server": {
+    "description": "Webhook HTTP 服务器配置",
+    "type": "text",
+    "editor_mode": true,
+    "editor_language": "json",
+    "editor_theme": "vs-dark",
+    "hint": "JSON 格式服务器配置。host 默认 127.0.0.1；port 默认 18080；base_path 默认 /webhook；public_base_url 可选公网地址；body_limit_bytes 默认 262144 (256 KiB)。",
+    "default": "{\n  \"host\": \"127.0.0.1\",\n  \"port\": 18080,\n  \"base_path\": \"/webhook\",\n  \"public_base_url\": \"\",\n  \"body_limit_bytes\": 262144\n}"
+  },
   "targets": {
-    "description": "默认推送目标",
+    "description": "默认推送目标（参考配置）",
     "type": "text",
     "editor_mode": true,
     "editor_language": "yaml",
     "editor_theme": "vs-dark",
-    "hint": "预留配置。后续将支持配置多个 AstrBot UMO 目标，例如 QQ 群聊或私聊。",
+    "hint": "参考配置。运行时 endpoint 目标白名单通过命令行创建和管理。",
     "default": "# 示例：\n# - name: default_group\n#   umo: aiocqhttp:GroupMessage:123456789\n# - name: owner_private\n#   umo: aiocqhttp:FriendMessage:10001\n"
   },
   "templates_dir": {
     "description": "自定义 HTML 模板目录",
     "type": "string",
-    "hint": "预留配置。后续将从该目录读取受信任的 HTML 模板文件。",
+    "hint": "预留配置。后续 MS2 将从该目录读取受信任的 HTML 模板文件。",
     "default": "templates"
   },
   "render_options": {
@@ -44,7 +53,7 @@
     "editor_mode": true,
     "editor_language": "json",
     "editor_theme": "vs-dark",
-    "hint": "传给 AstrBot html_render / T2I 服务的截图参数。",
+    "hint": "MS2 时使用。传给 AstrBot html_render / T2I 服务的截图参数。",
     "default": "{\n  \"full_page\": true,\n  \"type\": \"png\",\n  \"quality\": 90,\n  \"timeout\": 5000,\n  \"viewport_width\": 900,\n  \"device_scale_factor_level\": \"high\",\n  \"wait_until\": \"domcontentloaded\"\n}"
   }
 }

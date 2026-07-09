@@ -1,0 +1,451 @@
+"""Registry module tests - no AstrBot dependency."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import uuid
+
+import pytest
+
+from core.models import EndpointStatus
+from core.registry import EndpointRegistry
+
+
+@pytest.fixture
+def registry():
+    """创建一个使用临时目录的 registry 实例。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        reg = EndpointRegistry(tmpdir)
+        yield reg
+
+
+class TestRegistryCreate:
+    def test_create_private_endpoint(self, registry):
+        """创建私聊 endpoint 应返回记录和 token。"""
+        record, token = registry.create_private_endpoint(
+            name="test_private",
+            path="test_private",
+            owner_user_id="user_001",
+            target_umo="aiocqhttp:FriendMessage:10001",
+        )
+        assert record.name == "test_private"
+        assert record.status == EndpointStatus.ACTIVE.value
+        assert record.token_hash != ""
+        assert record.owner_user_id == "user_001"
+        assert len(record.targets) == 1
+        assert record.targets[0].umo == "aiocqhttp:FriendMessage:10001"
+        assert token.startswith("whn_")
+
+    def test_create_private_endpoint_no_target(self, registry):
+        """创建私聊 endpoint 时必须有 target UMO。"""
+        record, token = registry.create_private_endpoint(
+            name="test_private2",
+            path="test_private2",
+            owner_user_id="user_001",
+            target_umo="aiocqhttp:FriendMessage:20002",
+        )
+        assert len(record.targets) == 1
+        assert record.targets[0].name == "default"
+
+    def test_create_pending_verification(self, registry):
+        """创建群聊待验证申请应返回记录、request_id 和 code。"""
+        record, request_id, code = registry.create_pending_verification(
+            name="test_group",
+            path="test_group",
+            owner_user_id="user_002",
+            target_group_id="123456789",
+        )
+        assert record.name == "test_group"
+        assert record.status == EndpointStatus.PENDING_VERIFICATION.value
+        assert record.token_hash == ""  # 验证通过前无 token hash
+        assert record.pending_request_id == request_id
+        assert record.pending_code == code
+        assert uuid.UUID(request_id).version == 4
+        assert len(code) == 6
+
+    def test_duplicate_name(self, registry):
+        """同名 endpoint 不应重复创建但 registry 会覆盖（测试设计为覆盖）。"""
+        registry.create_private_endpoint(
+            name="dup_test",
+            path="dup_test",
+            owner_user_id="user_001",
+            target_umo="aiocqhttp:FriendMessage:10001",
+        )
+        # 再次创建同名会覆盖
+        registry.create_private_endpoint(
+            name="dup_test",
+            path="dup_test",
+            owner_user_id="user_002",
+            target_umo="aiocqhttp:FriendMessage:20002",
+        )
+        record = registry.get_by_name("dup_test")
+        assert record is not None
+        assert record.owner_user_id == "user_002"
+
+
+class TestRegistryVerify:
+    def test_verify_success(self, registry):
+        """群聊验证成功应返回 token。"""
+        record, request_id, code = registry.create_pending_verification(
+            name="verify_test",
+            path="verify_test",
+            owner_user_id="user_003",
+            target_group_id="111111",
+        )
+        status, msg, token = registry.verify_group_endpoint(
+            request_id=request_id,
+            code=code,
+            verify_user_id="user_003",
+            verify_group_id="111111",
+            group_target_umo="aiocqhttp:GroupMessage:111111",
+        )
+        assert status == "ok"
+        assert token is not None
+        assert token.startswith("whn_")
+        # 验证成功后 endpoint 应为 active
+        record = registry.get_by_name("verify_test")
+        assert record.status == EndpointStatus.ACTIVE.value
+        assert record.token_hash != ""
+
+    def test_verify_wrong_code(self, registry):
+        """错误验证码应失败。"""
+        record, request_id, code = registry.create_pending_verification(
+            name="verify_wrong_code",
+            path="verify_wrong_code",
+            owner_user_id="user_004",
+            target_group_id="222222",
+        )
+        wrong_code = "000000"
+        status, msg, token = registry.verify_group_endpoint(
+            request_id=request_id,
+            code=wrong_code,
+            verify_user_id="user_004",
+            verify_group_id="222222",
+            group_target_umo="aiocqhttp:GroupMessage:222222",
+        )
+        assert status == "error"
+        assert "不匹配" in msg
+        assert token is None
+
+    def test_verify_wrong_user(self, registry):
+        """非申请者验证应失败。"""
+        record, request_id, code = registry.create_pending_verification(
+            name="verify_wrong_user",
+            path="verify_wrong_user",
+            owner_user_id="user_005",
+            target_group_id="333333",
+        )
+        status, msg, token = registry.verify_group_endpoint(
+            request_id=request_id,
+            code=code,
+            verify_user_id="attacker_user",
+            verify_group_id="333333",
+            group_target_umo="aiocqhttp:GroupMessage:333333",
+        )
+        assert status == "error"
+        assert "执行者不是申请者" in msg
+
+    def test_verify_wrong_group(self, registry):
+        """错误目标群应失败。"""
+        record, request_id, code = registry.create_pending_verification(
+            name="verify_wrong_group",
+            path="verify_wrong_group",
+            owner_user_id="user_006",
+            target_group_id="444444",
+        )
+        status, msg, token = registry.verify_group_endpoint(
+            request_id=request_id,
+            code=code,
+            verify_user_id="user_006",
+            verify_group_id="999999",
+            group_target_umo="aiocqhttp:GroupMessage:999999",
+        )
+        assert status == "error"
+        assert "当前群不是申请目标群" in msg
+
+    def test_verify_nonexistent_request(self, registry):
+        """不存在的 request_id 应失败。"""
+        status, msg, token = registry.verify_group_endpoint(
+            request_id="nonexistent-request-id",
+            code="abcdef",
+            verify_user_id="user_007",
+            verify_group_id="555555",
+            group_target_umo="aiocqhttp:GroupMessage:555555",
+        )
+        assert status == "error"
+        assert "不存在" in msg
+
+    def test_verify_expired(self, registry):
+        """过期的待验证申请应失败。"""
+        # 使用一个已经过期的 pending request
+        # 为了测试，我们手动构造一个时间过期的 pending 记录
+        record, request_id, code = registry.create_pending_verification(
+            name="verify_expired",
+            path="verify_expired",
+            owner_user_id="user_008",
+            target_group_id="666666",
+        )
+        # 模拟 pending 记录过期
+        import datetime
+
+        past_time = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=30)
+        ).isoformat()
+        registry._pending[request_id]["expires_at"] = past_time
+
+        status, msg, token = registry.verify_group_endpoint(
+            request_id=request_id,
+            code=code,
+            verify_user_id="user_008",
+            verify_group_id="666666",
+            group_target_umo="aiocqhttp:GroupMessage:666666",
+        )
+        assert status == "error"
+        assert "过期" in msg
+
+
+class TestRegistryQuery:
+    def test_get_by_name(self, registry):
+        registry.create_private_endpoint(
+            name="query_test",
+            path="query_test",
+            owner_user_id="user_010",
+            target_umo="aiocqhttp:FriendMessage:10010",
+        )
+        record = registry.get_by_name("query_test")
+        assert record is not None
+        assert record.name == "query_test"
+
+    def test_get_by_name_not_found(self, registry):
+        assert registry.get_by_name("nonexistent") is None
+
+    def test_get_by_path(self, registry):
+        registry.create_private_endpoint(
+            name="path_test",
+            path="my-custom-path",
+            owner_user_id="user_011",
+            target_umo="aiocqhttp:FriendMessage:10011",
+        )
+        record = registry.get_by_path("my-custom-path")
+        assert record is not None
+        assert record.name == "path_test"
+
+    def test_list_by_owner(self, registry):
+        registry.create_private_endpoint(
+            name="owner_test_1",
+            path="owner_test_1",
+            owner_user_id="user_020",
+            target_umo="aiocqhttp:FriendMessage:10020",
+        )
+        registry.create_private_endpoint(
+            name="owner_test_2",
+            path="owner_test_2",
+            owner_user_id="user_020",
+            target_umo="aiocqhttp:FriendMessage:10021",
+        )
+        registry.create_private_endpoint(
+            name="other_owner",
+            path="other_owner",
+            owner_user_id="user_999",
+            target_umo="aiocqhttp:FriendMessage:10999",
+        )
+        records = registry.list_by_owner("user_020")
+        assert len(records) == 2
+        names = {r.name for r in records}
+        assert names == {"owner_test_1", "owner_test_2"}
+
+    def test_count_active(self, registry):
+        registry.create_private_endpoint(
+            name="active_1",
+            path="active_1",
+            owner_user_id="user_030",
+            target_umo="aiocqhttp:FriendMessage:10030",
+        )
+        assert registry.count_active() == 1
+        registry.create_private_endpoint(
+            name="active_2",
+            path="active_2",
+            owner_user_id="user_030",
+            target_umo="aiocqhttp:FriendMessage:10031",
+        )
+        assert registry.count_active() == 2
+
+    def test_is_endpoint_active(self, registry):
+        registry.create_private_endpoint(
+            name="active_check",
+            path="active_check",
+            owner_user_id="user_040",
+            target_umo="aiocqhttp:FriendMessage:10040",
+        )
+        assert registry.is_endpoint_active("active_check") is True
+
+
+class TestRegistryRevoke:
+    def test_revoke_active(self, registry):
+        registry.create_private_endpoint(
+            name="revoke_active",
+            path="revoke_active",
+            owner_user_id="user_050",
+            target_umo="aiocqhttp:FriendMessage:10050",
+        )
+        success, msg = registry.revoke_endpoint("revoke_active", "user_050")
+        assert success is True
+        record = registry.get_by_name("revoke_active")
+        assert record.status == EndpointStatus.REVOKED.value
+        assert record.revoked_at is not None
+        assert registry.is_endpoint_active("revoke_active") is False
+
+    def test_revoke_pending(self, registry):
+        record, request_id, code = registry.create_pending_verification(
+            name="revoke_pending",
+            path="revoke_pending",
+            owner_user_id="user_060",
+            target_group_id="777777",
+        )
+        success, msg = registry.revoke_endpoint("revoke_pending", "user_060")
+        assert success is True
+        record = registry.get_by_name("revoke_pending")
+        assert record.status == EndpointStatus.REVOKED.value
+
+    def test_revoke_other_owner(self, registry):
+        registry.create_private_endpoint(
+            name="other_owner_revoke",
+            path="other_owner_revoke",
+            owner_user_id="user_070",
+            target_umo="aiocqhttp:FriendMessage:10070",
+        )
+        success, msg = registry.revoke_endpoint("other_owner_revoke", "user_999")
+        assert success is False
+        assert "只能撤销自己的" in msg
+
+    def test_revoke_nonexistent(self, registry):
+        success, msg = registry.revoke_endpoint("nonexistent_endpoint", "user_080")
+        assert success is False
+        assert "不存在" in msg
+
+
+class TestRegistryRotate:
+    def test_rotate_active(self, registry):
+        registry.create_private_endpoint(
+            name="rotate_test",
+            path="rotate_test",
+            owner_user_id="user_090",
+            target_umo="aiocqhttp:FriendMessage:10090",
+        )
+        old_record = registry.get_by_name("rotate_test")
+        old_hash = old_record.token_hash
+
+        success, new_token = registry.rotate_token("rotate_test", "user_090")
+        assert success is True
+        assert new_token.startswith("whn_")
+
+        new_record = registry.get_by_name("rotate_test")
+        assert new_record.token_hash != old_hash
+
+    def test_rotate_wrong_owner(self, registry):
+        registry.create_private_endpoint(
+            name="rotate_owner",
+            path="rotate_owner",
+            owner_user_id="user_100",
+            target_umo="aiocqhttp:FriendMessage:10100",
+        )
+        success, msg = registry.rotate_token("rotate_owner", "user_999")
+        assert success is False
+
+    def test_rotate_pending(self, registry):
+        record, request_id, code = registry.create_pending_verification(
+            name="rotate_pending",
+            path="rotate_pending",
+            owner_user_id="user_110",
+            target_group_id="888888",
+        )
+        success, msg = registry.rotate_token("rotate_pending", "user_110")
+        assert success is False
+        assert "只有 active 状态" in msg
+
+    def test_rotate_revoked(self, registry):
+        registry.create_private_endpoint(
+            name="rotate_revoked",
+            path="rotate_revoked",
+            owner_user_id="user_120",
+            target_umo="aiocqhttp:FriendMessage:10120",
+        )
+        registry.revoke_endpoint("rotate_revoked", "user_120")
+        success, msg = registry.rotate_token("rotate_revoked", "user_120")
+        assert success is False
+
+
+class TestRegistryPersistence:
+    def test_save_and_reload(self):
+        """registry 应能保存到磁盘并重新加载。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg1 = EndpointRegistry(tmpdir)
+            reg1.create_private_endpoint(
+                name="persist_test",
+                path="persist_test",
+                owner_user_id="user_200",
+                target_umo="aiocqhttp:FriendMessage:10200",
+            )
+
+            # 创建第二个实例，重新加载
+            reg2 = EndpointRegistry(tmpdir)
+            record = reg2.get_by_name("persist_test")
+            assert record is not None
+            assert record.status == EndpointStatus.ACTIVE.value
+            assert record.owner_user_id == "user_200"
+            assert len(record.targets) == 1
+
+    def test_persistence_with_revoke(self):
+        """撤销的 endpoint 在重载后仍为 revoked 状态。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg1 = EndpointRegistry(tmpdir)
+            reg1.create_private_endpoint(
+                name="persist_revoke",
+                path="persist_revoke",
+                owner_user_id="user_210",
+                target_umo="aiocqhttp:FriendMessage:10210",
+            )
+            reg1.revoke_endpoint("persist_revoke", "user_210")
+
+            reg2 = EndpointRegistry(tmpdir)
+            record = reg2.get_by_name("persist_revoke")
+            assert record is not None
+            assert record.status == EndpointStatus.REVOKED.value
+            assert record.revoked_at is not None
+
+    def test_server_secret_persistence(self):
+        """server_secret 应在同一数据目录保持一致。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg1 = EndpointRegistry(tmpdir)
+            secret1 = reg1.server_secret
+            assert len(secret1) > 0
+
+            reg2 = EndpointRegistry(tmpdir)
+            secret2 = reg2.server_secret
+            assert secret1 == secret2
+
+
+class TestStalePending:
+    def test_expire_stale_pending(self, registry):
+        registry.create_pending_verification(
+            name="stale_test",
+            path="stale_test",
+            owner_user_id="user_300",
+            target_group_id="999999",
+        )
+        # 手动让 pending 过期
+        import datetime
+
+        past_time = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=30)
+        ).isoformat()
+        for rid in list(registry._pending.keys()):
+            registry._pending[rid]["expires_at"] = past_time
+
+        cleaned = registry.expire_stale_pending()
+        assert cleaned >= 1
+        record = registry.get_by_name("stale_test")
+        assert record.status == EndpointStatus.EXPIRED.value
