@@ -190,6 +190,46 @@ class TestNormalizeOmpPayload:
         if model_fields:
             assert model_fields[0]["value"] == "claude-4"
 
+    def test_session_model_object_uses_name(self):
+        """session.model 为对象时优先展示 name。"""
+        body = {
+            "session": {
+                "id": "sess_model_object",
+                "model": {
+                    "provider": "openai",
+                    "id": "gpt-5.5",
+                    "name": "GPT-5.5",
+                },
+            },
+        }
+        event = normalize_omp_payload(body)
+        model_fields = [f for f in event.fields if f["label"] == "模型"]
+        assert model_fields[0]["value"] == "GPT-5.5"
+
+    def test_session_model_object_fallback_to_id(self):
+        """session.model 对象缺少 name 时使用 id。"""
+        body = {
+            "session": {
+                "id": "sess_model_object",
+                "model": {
+                    "provider": "openai",
+                    "id": "gpt-5.5",
+                },
+            },
+        }
+        event = normalize_omp_payload(body)
+        model_fields = [f for f in event.fields if f["label"] == "模型"]
+        assert model_fields[0]["value"] == "gpt-5.5"
+
+    def test_turn_id_zero_is_preserved(self):
+        """round.turnId 为 0 时应保留并参与 event.id。"""
+        body = {
+            "session": {"id": "sess_zero_turn"},
+            "round": {"turnId": 0},
+        }
+        event = normalize_omp_payload(body)
+        assert event.id == "sess_zero_turn:0"
+
     def test_duration_calculation(self):
         """durationMs 缺失时由 startedAt 和 endedAt 计算。"""
         body = {

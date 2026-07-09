@@ -466,6 +466,8 @@ metadata.version
 metadata.eventName
 ```
 
+`session.model` 可能是字符串，也可能是包含 `provider`、`id`、`name` 的对象。通知展示模型名时，对象优先使用 `name`，其次使用 `id`，避免直接展示完整对象。
+
 默认不在群聊通知中展示完整 `round.prompt`，避免泄露敏感输入或造成刷屏。
 
 如需要展示 prompt，应通过配置显式开启，并限制最大长度。

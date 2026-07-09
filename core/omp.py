@@ -83,11 +83,11 @@ def normalize_omp_payload(
 
     # 提取 session 信息
     session = body.get("session", {}) or {}
-    session_name = session.get("name") or ""
-    session_file = session.get("file") or ""
-    session_cwd = session.get("cwd") or ""
-    session_model = session.get("model") or ""
-    session_id = session.get("id") or ""
+    session_name = _string_or_empty(session.get("name"))
+    session_file = _string_or_empty(session.get("file"))
+    session_cwd = _string_or_empty(session.get("cwd"))
+    session_model = _model_display_name(session.get("model"))
+    session_id = _string_or_empty(session.get("id"))
 
     # session.name 缺失时使用 session.file basename
     if not session_name and session_file:
@@ -95,9 +95,9 @@ def normalize_omp_payload(
 
     # 提取 round 信息
     round_data = body.get("round", {}) or {}
-    turn_id = round_data.get("turnId") or ""
-    started_at = round_data.get("startedAt") or ""
-    ended_at = round_data.get("endedAt") or ""
+    turn_id = _string_or_empty(round_data.get("turnId"))
+    started_at = _string_or_empty(round_data.get("startedAt"))
+    ended_at = _string_or_empty(round_data.get("endedAt"))
     duration_ms = round_data.get("durationMs")
     prompt = round_data.get("prompt") or ""
     prompt_length = round_data.get("promptLength")
@@ -108,9 +108,9 @@ def normalize_omp_payload(
 
     # session.model 缺失时使用 round.lastAssistant.model
     last_assistant = round_data.get("lastAssistant", {}) or {}
-    assistant_model = last_assistant.get("model") or ""
-    assistant_stop_reason = last_assistant.get("stopReason") or ""
-    assistant_timestamp = last_assistant.get("timestamp") or ""
+    assistant_model = _model_display_name(last_assistant.get("model"))
+    assistant_stop_reason = _string_or_empty(last_assistant.get("stopReason"))
+    assistant_timestamp = _string_or_empty(last_assistant.get("timestamp"))
     assistant_duration_ms = last_assistant.get("durationMs")
 
     if not session_model and assistant_model:
@@ -231,6 +231,33 @@ def _basename(path: str) -> str:
     if not path:
         return ""
     return path.rstrip("/").split("/")[-1] or path
+
+
+def _string_or_empty(value: Any) -> str:
+    """将字段安全转换为字符串，同时保留 0 这类有效值。"""
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _model_display_name(model: Any) -> str:
+    """提取 OMP 模型展示名。
+
+    OMP 客户端可能发送字符串模型名，也可能发送形如
+    {"provider": "openai", "id": "gpt-5.5", "name": "GPT-5.5"} 的对象。
+    对象按 name -> id 顺序回退，避免把整个 dict 展示到群聊通知中。
+    """
+    if model is None:
+        return ""
+    if isinstance(model, dict):
+        name = model.get("name")
+        if name:
+            return str(name)
+        model_id = model.get("id")
+        if model_id:
+            return str(model_id)
+        return ""
+    return str(model)
 
 
 def _format_duration(duration_ms: int | None | float) -> str:

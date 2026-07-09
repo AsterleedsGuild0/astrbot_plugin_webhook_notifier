@@ -668,10 +668,18 @@ metadata.version
 metadata.eventName
 ```
 
+`session.model` 支持两种形态：
+
+- 字符串，例如 `"gpt-5.5"`。
+- 对象，例如 `{ "provider": "openai", "id": "gpt-5.5", "name": "GPT-5.5" }`。
+
+标准化为通知展示值时，对象形态优先使用 `name`，其次使用 `id`；若 `session.model` 无法得到展示值，再回退到 `round.lastAssistant.model`。
+
 ### 字段缺失处理
 
 - `session.name` 缺失时使用 `session.file` basename。
 - `session.model` 缺失时使用 `round.lastAssistant.model`。
+- `round.turnId` 允许为数字 `0`，实现不得用 truthy 判断将其视为缺失；生成事件 ID 时应保留为字符串 `"0"`。
 - `round.durationMs` 缺失时尝试由 `startedAt` 和 `endedAt` 计算。
 - `promptLength` 缺失但 `prompt` 存在时可用字符串长度计算。
 - `imageCount` 缺失时显示为 `0` 或 `未知`，实现阶段按模板策略确定。
