@@ -196,8 +196,8 @@ class TestNormalizeOmpPayload:
             f["label"] == "模型" and f["value"] == "cpa/GPT-5.5" for f in event.fields
         )
 
-    def test_session_name_fallback_to_file(self):
-        """session.name 缺失时使用 session.file basename。"""
+    def test_session_file_is_not_used_as_session_name_fallback(self):
+        """session.name 缺失时不使用 session.file basename 污染默认通知。"""
         body = {
             "session": {
                 "file": "/home/user/session.json",
@@ -206,8 +206,8 @@ class TestNormalizeOmpPayload:
         event = normalize_omp_payload(body)
         fields = event.fields
         session_fields = [f for f in fields if f["label"] == "会话"]
-        if session_fields:
-            assert session_fields[0]["value"] == "session.json"
+        assert session_fields == []
+        assert event.raw.get("session.file") == "/home/user/session.json"
 
     def test_session_model_fallback(self):
         """session.model 缺失时使用 round.lastAssistant.model。"""

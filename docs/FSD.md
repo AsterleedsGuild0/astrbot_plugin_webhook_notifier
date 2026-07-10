@@ -695,7 +695,7 @@ metadata.eventName
 
 ### 字段缺失处理
 
-- `session.name` 缺失时使用 `session.file` basename。
+- `session.name` 缺失时不使用 `session.file` basename 作为会话名兜底，避免把机器生成的 `.jsonl` 文件名暴露到默认通知；`session.file` 可保留在 `raw["session.file"]` 供高级模板显式使用。
 - `session.model` 缺失时使用 `round.lastAssistant.model`。
 - `round.turnId` 允许为数字 `0`，实现不得用 truthy 判断将其视为缺失；生成事件 ID 时应保留为字符串 `"0"`。
 - `round.durationMs` 缺失时尝试由 `startedAt` 和 `endedAt` 计算。
@@ -779,7 +779,7 @@ MVP 中支持读取但未映射为 `fields` 的 OMP 字段，默认保留在 `ra
 
 以下字段默认映射为通知字段：
 
-- `session.name` 或 `session.file` basename → 会话。
+- `session.name` → 会话；缺失时不输出会话字段。
 - `session.cwd` → cwd。
 - `session.model` 或 `round.lastAssistant.model` → 模型；模型对象优先展示 `provider/name`，其次展示 `provider/id`，缺少 provider 时退化为模型名。
 - `round.startedAt` → 开始时间，默认格式化为本地时间加 UTC 偏移，例如 `2026-07-08 19:59:00 UTC+08:00`。

@@ -84,13 +84,8 @@ def normalize_omp_payload(
     # 提取 session 信息
     session = body.get("session", {}) or {}
     session_name = _string_or_empty(session.get("name"))
-    session_file = _string_or_empty(session.get("file"))
     session_cwd = _string_or_empty(session.get("cwd"))
     session_id = _string_or_empty(session.get("id"))
-
-    # session.name 缺失时使用 session.file basename
-    if not session_name and session_file:
-        session_name = _basename(session_file)
 
     # 提取 round 信息
     round_data = body.get("round", {}) or {}
@@ -204,6 +199,8 @@ def normalize_omp_payload(
 
     # 构建 raw
     raw: dict[str, Any] = {}
+    if session.get("file"):
+        raw["session.file"] = session["file"]
     metadata = body.get("metadata", {}) or {}
     if metadata.get("version"):
         raw["metadata.version"] = metadata["version"]
@@ -229,13 +226,6 @@ def normalize_omp_payload(
         links=[],
         raw=raw,
     )
-
-
-def _basename(path: str) -> str:
-    """返回路径的文件名部分（不含目录），安全处理空字符串。"""
-    if not path:
-        return ""
-    return path.rstrip("/").split("/")[-1] or path
 
 
 def _string_or_empty(value: Any) -> str:

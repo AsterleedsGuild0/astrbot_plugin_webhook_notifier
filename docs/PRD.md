@@ -473,6 +473,8 @@ metadata.eventName
 
 默认文本通知展示 `session.cwd` 与格式化后的 `round.startedAt`，便于定位任务上下文与开始时间；时间格式为本地时间加 UTC 偏移，例如 `2026-07-08 19:59:00 UTC+08:00`。`round.endedAt` 默认不展示，仅在 `round.durationMs` 缺失时参与耗时计算。后续 HTML 渲染模板可以自行选择展示或隐藏这些字段。
 
+`session.file` 不作为默认会话名兜底，避免在 `session.name` 缺失时把机器生成的 `.jsonl` 文件名展示到群聊通知中；如后续 HTML 模板确实需要，可通过高级模板显式读取 raw 字段。
+
 默认不在群聊通知中展示完整 `round.prompt`，避免泄露敏感输入或造成刷屏。
 
 如需要展示 prompt，应通过配置显式开启，并限制最大长度。
@@ -810,6 +812,7 @@ MVP 需要有基础日志：
 - 每个 Webhook 请求生成 request id，并贯穿响应、日志、渲染和发送结果。
 - MVP 不要求 OMP payload 提供稳定 `status` 字段；`omp.session_stop` 默认视为 `success`，后续如果 payload 提供状态再映射。
 - 默认通知展示完整 `session.cwd` 和格式化后的 `round.startedAt`，不展示完整 `session.file`、`round.prompt` 与 `round.endedAt`；后续 HTML 模板可自行选择展示或隐藏字段。
+- `session.name` 缺失时默认不输出会话字段，不使用 `session.file` basename 兜底。
 - HTML 模板默认自包含，不支持任意本地静态资源目录。
 - 群聊 token 验证使用群内验证命令；MVP 不依赖适配器原生群成员查询。
 
