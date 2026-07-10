@@ -421,7 +421,7 @@ html_image
     {"label": "会话", "value": "Add post-conversation HTTP hook"},
     {"label": "cwd", "value": "/home/user/project"},
     {"label": "模型", "value": "openai/gpt-5.5"},
-    {"label": "开始时间", "value": "2026-07-08T11:59:00.000Z"},
+    {"label": "开始时间", "value": "2026-07-08 19:59:00 UTC+08:00"},
     {"label": "耗时", "value": "57.7s"},
     {"label": "输入", "value": "977 字 / 1 张图"},
     {"label": "消息变化", "value": "+2"}
@@ -471,7 +471,7 @@ metadata.eventName
 
 `session.model` 可能是字符串，也可能是包含 `provider`、`id`、`name` 的对象。通知展示模型名时，对象优先使用 `provider/name`，其次使用 `provider/id`，缺少 provider 时退化为模型名，避免直接展示完整对象。若 `session.model` 缺失，则回退到 `round.lastAssistant.model`，并可使用 `round.lastAssistant.provider` 拼接 provider。
 
-默认文本通知展示 `session.cwd` 与 `round.startedAt`，便于定位任务上下文与开始时间；`round.endedAt` 默认不展示，仅在 `round.durationMs` 缺失时参与耗时计算。后续 HTML 渲染模板可以自行选择展示或隐藏这些字段。
+默认文本通知展示 `session.cwd` 与格式化后的 `round.startedAt`，便于定位任务上下文与开始时间；时间格式为本地时间加 UTC 偏移，例如 `2026-07-08 19:59:00 UTC+08:00`。`round.endedAt` 默认不展示，仅在 `round.durationMs` 缺失时参与耗时计算。后续 HTML 渲染模板可以自行选择展示或隐藏这些字段。
 
 默认不在群聊通知中展示完整 `round.prompt`，避免泄露敏感输入或造成刷屏。
 
@@ -489,7 +489,7 @@ MVP 默认文本通知示例：
 会话：Add post-conversation HTTP hook
 cwd：/home/user/project
 模型：openai/gpt-5.5
-开始时间：2026-07-08T11:59:00.000Z
+开始时间：2026-07-08 19:59:00 UTC+08:00
 耗时：57.7s
 输入：977 字 / 1 张图
 消息变化：+2
@@ -809,7 +809,7 @@ MVP 需要有基础日志：
 - token 哈希使用 HMAC-SHA256，token 轮换后旧 token 立即失效。
 - 每个 Webhook 请求生成 request id，并贯穿响应、日志、渲染和发送结果。
 - MVP 不要求 OMP payload 提供稳定 `status` 字段；`omp.session_stop` 默认视为 `success`，后续如果 payload 提供状态再映射。
-- 默认通知展示完整 `session.cwd` 和 `round.startedAt`，不展示完整 `session.file`、`round.prompt` 与 `round.endedAt`；后续 HTML 模板可自行选择展示或隐藏字段。
+- 默认通知展示完整 `session.cwd` 和格式化后的 `round.startedAt`，不展示完整 `session.file`、`round.prompt` 与 `round.endedAt`；后续 HTML 模板可自行选择展示或隐藏字段。
 - HTML 模板默认自包含，不支持任意本地静态资源目录。
 - 群聊 token 验证使用群内验证命令；MVP 不依赖适配器原生群成员查询。
 

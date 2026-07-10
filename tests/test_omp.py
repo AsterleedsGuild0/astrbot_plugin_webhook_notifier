@@ -156,7 +156,12 @@ class TestNormalizeOmpPayload:
             elif field["label"] == "模型":
                 assert field["value"] == "openai/gpt-5.5"
             elif field["label"] == "开始时间":
-                assert field["value"] == "2026-07-08T11:59:00.000Z"
+                assert field["value"].startswith("2026-07-08 ")
+                assert "2026-07-08T" not in field["value"]
+                assert (
+                    field["value"].endswith(("UTC+00:00", "UTC+08:00"))
+                    or "UTC" in field["value"]
+                )
             elif field["label"] == "耗时":
                 assert "s" in field["value"] or "ms" in field["value"]
             elif field["label"] == "输入":
@@ -286,6 +291,17 @@ class TestNormalizeOmpPayload:
         duration_fields = [f for f in event.fields if f["label"] == "耗时"]
         if duration_fields:
             assert duration_fields[0]["value"] != ""
+
+    def test_started_at_invalid_format_falls_back_to_raw_value(self):
+        """startedAt 无法解析时应回退展示原始值。"""
+        body = {
+            "round": {
+                "startedAt": "not-a-time",
+            },
+        }
+        event = normalize_omp_payload(body)
+        started_fields = [f for f in event.fields if f["label"] == "开始时间"]
+        assert started_fields[0]["value"] == "not-a-time"
 
     def test_empty_session(self):
         """session 为空时不崩溃。"""

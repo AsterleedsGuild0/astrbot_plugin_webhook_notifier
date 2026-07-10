@@ -95,7 +95,7 @@ class TestRenderTextDefault:
                 {"label": "模型", "value": "openai/gpt-5.5", "short": True},
                 {
                     "label": "开始时间",
-                    "value": "2026-07-08T11:59:00.000Z",
+                    "value": "2026-07-08 19:59:00 UTC+08:00",
                     "short": True,
                 },
                 {"label": "耗时", "value": "57.7s", "short": True},
@@ -113,7 +113,7 @@ class TestRenderTextDefault:
             "模型" not in line or line == "模型：openai/gpt-5.5" for line in lines
         )
         assert "cwd：/home/user/project" in lines
-        assert "开始时间：2026-07-08T11:59:00.000Z" in lines
+        assert "开始时间：2026-07-08 19:59:00 UTC+08:00" in lines
 
 
 class TestRenderTextJinja2:

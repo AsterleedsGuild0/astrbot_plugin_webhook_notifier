@@ -782,7 +782,7 @@ MVP 中支持读取但未映射为 `fields` 的 OMP 字段，默认保留在 `ra
 - `session.name` 或 `session.file` basename → 会话。
 - `session.cwd` → cwd。
 - `session.model` 或 `round.lastAssistant.model` → 模型；模型对象优先展示 `provider/name`，其次展示 `provider/id`，缺少 provider 时退化为模型名。
-- `round.startedAt` → 开始时间。
+- `round.startedAt` → 开始时间，默认格式化为本地时间加 UTC 偏移，例如 `2026-07-08 19:59:00 UTC+08:00`。
 - `round.durationMs` → 耗时。
 - `round.promptLength` 与 `round.imageCount` → 输入规模。
 - `round.messageCountDelta` → 消息变化。
@@ -924,7 +924,7 @@ OMP 示例：
 会话：Add post-conversation HTTP hook
 cwd：/home/user/project
 模型：openai/gpt-5.5
-开始时间：2026-07-08T11:59:00.000Z
+开始时间：2026-07-08 19:59:00 UTC+08:00
 耗时：57.7s
 输入：977 字 / 1 张图
 消息变化：+2
