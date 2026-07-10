@@ -27,10 +27,10 @@ COMMAND = "whn"
     "astrbot_plugin_webhook_notifier",
     "AsterleedsGuild0",
     "接收外部 Webhook 事件并推送到指定 AstrBot 会话",
-    "v0.1.0",
+    "v0.2.0",
 )
 class WebhookNotifierPlugin(Star):
-    """AstrBot Webhook Notifier Milestone 1：文本链路 MVP。"""
+    """AstrBot Webhook Notifier Milestone 2：支持 HTML 卡片图片。"""
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
@@ -550,6 +550,8 @@ class WebhookNotifierPlugin(Star):
                 config=self._server_config,
                 registry=self._registry,
                 sender=self._sender,
+                html_render=self.html_render,
+                plugin_config=dict(self.config),
             )
             await self._server.start()
         except Exception as e:
@@ -576,10 +578,8 @@ class WebhookNotifierPlugin(Star):
     def _get_render_mode(self) -> str:
         mode = self.config.get("render_mode", "text")
         if mode == "html_image":
-            logger.info(
-                "[WebhookNotifier] render_mode 配置为 html_image，但 MS1 仅支持 text。将降级为 text。"
-            )
-            return "text"
+            logger.info("[WebhookNotifier] render_mode 配置为 html_image（MS2 支持）。")
+            return "html_image"
         return mode
 
     @staticmethod
@@ -667,7 +667,7 @@ class WebhookNotifierPlugin(Star):
             f"启用状态：{'✅ 已启用' if enabled else '❌ 已禁用'}",
             f"HTTP 服务：{'✅ 运行中' if server_running else '⏸ 未启动'}",
             f"Active Endpoint：{active_count} 个",
-            f"渲染模式：{render_mode}（MS1 仅支持 text）",
+            f"渲染模式：{render_mode}",
             f"渲染降级：{'开启' if fallback else '关闭'}",
             f"模板目录：{templates_dir}",
             f"监听地址：http://{host}:{port}{base_path}",

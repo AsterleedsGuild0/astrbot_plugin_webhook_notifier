@@ -4,7 +4,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context
 
 from .models import EndpointRecord, TargetAlias
@@ -50,6 +50,105 @@ class Sender:
             results.append(result)
 
         return results
+
+    async def send_image(
+        self,
+        image_result: str | bytes,
+        endpoint: EndpointRecord,
+        target_alias: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """向 endpoint 绑定的目标发送图片消息。
+
+        图片结果必须是已渲染生成的图片，不再经过 T2I。
+        支持的 image_result 类型：
+        - str URL（http:// 或 https://）
+        - str ``base64://...``
+        - str ``data:image/...;base64,...``
+        - str 本地文件路径
+        - bytes
+
+        Args:
+            image_result: 图片渲染结果（URL / base64 / 路径 / bytes）。
+            endpoint: Endpoint 记录。
+            target_alias: 可选的目标别名。
+
+        Returns:
+            每个目标的发送结果列表。
+        """
+        targets = self._resolve_targets(endpoint, target_alias)
+        if not targets:
+            logger.warning(f"[WebhookNotifier] endpoint {endpoint.name} 没有可用的目标")
+            return [{"name": None, "ok": False, "error": "no_targets"}]
+
+        # 构造图片组件
+        image = self._build_image_component(image_result)
+        if image is None:
+            return [{"name": None, "ok": False, "error": "unsupported_image_result"}]
+
+        # 消息链 — 图片已生成，不再 T2I
+        message_chain = MessageChain()
+        message_chain.chain.append(image)
+        message_chain.use_t2i(False)
+
+        results: list[dict[str, Any]] = []
+        for tgt in targets:
+            result = await self._send_to_target(tgt, message_chain)
+            results.append(result)
+
+        return results
+
+    @staticmethod
+    def _build_image_component(image_result: str | bytes) -> Image | None:
+        """根据 image_result 类型构造 Image 组件。
+
+        Args:
+            image_result: 图片渲染结果。
+
+        Returns:
+            Image 组件，或 None（无法识别的类型）。
+        """
+        if isinstance(image_result, str):
+            result_str = image_result.strip()
+
+            # base64:// 前缀 — 直接传给 Image
+            if result_str.startswith("base64://"):
+                return Image(file=result_str)
+
+            # data:image/...;base64,... — 直接传给 Image
+            if result_str.startswith("data:"):
+                return Image(file=result_str)
+
+            # URL
+            if result_str.startswith("http://") or result_str.startswith("https://"):
+                return Image(file=result_str)
+
+            # 本地路径
+            import os
+
+            if os.path.exists(result_str):
+                return Image(file=result_str)
+
+            # 尝试作为纯 base64 解码
+            try:
+                import base64
+
+                decoded = base64.b64decode(result_str)
+                return Image(file=decoded)
+            except Exception:
+                pass
+
+            logger.warning(
+                f"[WebhookNotifier] 无法识别的图片结果字符串: {result_str[:80]}..."
+            )
+            return None
+
+        if isinstance(image_result, bytes):
+            return Image(file=image_result)
+
+        logger.warning(
+            f"[WebhookNotifier] 不支持的图片结果类型: {type(image_result).__name__}"
+        )
+        return None
 
     async def _send_to_target(
         self,

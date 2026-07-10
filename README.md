@@ -8,18 +8,30 @@
 
 ## 当前状态
 
-当前仓库处于初始化骨架阶段：
+当前处于 Milestone 2（HTML 卡片图片）：
 
-- 已提供 AstrBot 插件元信息、配置 Schema 和状态命令。
-- 已预留 Webhook Token、目标会话、HTML 模板目录和 T2I 渲染参数配置。
-- 尚未启动 HTTP Webhook 服务。
-- 尚未实现事件解析、目标路由和消息发送。
+- ✅ Webhook HTTP Server（aiohttp）已就绪，支持多 endpoint 鉴权与路由。
+- ✅ OMP `session_stop` 事件已适配，可标准化为通用事件对象。
+- ✅ **纯文本渲染与发送** — 默认文本模板，向指定 QQ 群/私聊推送。
+- ✅ **HTML 卡片渲染与发送** — 默认自包含 HTML 模板，调用 AstrBot `html_render` / T2I 截图后发送图片。
+- ✅ **图片结果校验**：支持 PNG / JPEG / WebP magic number 校验。
+- ✅ **HTML 失败降级**：html_render 截图失败、图片校验失败或发送失败时，按配置降级为纯文本通知。
+- ✅ HTTP 响应包含 `render_mode`、`requested_render_mode`、`fallback_to_text`、`fallback_reason`。
+- ✅ 用户通过私聊命令自助申请 / 验证 / 轮换 / 撤销 endpoint token。
+- ✅ 私聊 token 和群聊 token（含群管理员验证）。
+- 🔲 自定义模板文件加载（后续版本）。
 
 可用命令：
 
 ```text
 /webhook_notifier
 /whn
+/whn token new private [名称]
+/whn token new group <群号> [名称]
+/whn token verify <request_id> <code>
+/whn token list
+/whn token rotate <名称>
+/whn token revoke <名称>
 ```
 
 ---
@@ -53,8 +65,8 @@ AstrBot Webhook Notifier
 
 ```yaml
 enabled: true
-render_mode: text
-fallback_to_text: true
+render_mode: html_image   # text | html_image
+fallback_to_text: true     # html_image 渲染失败时降级为纯文本
 templates_dir: templates
 targets: |
   - name: default_group

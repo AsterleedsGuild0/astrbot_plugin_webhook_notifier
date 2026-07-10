@@ -1,6 +1,6 @@
 name: astrbot_plugin_webhook_notifier
 display_name: Webhook Notifier
 desc: 接收外部 Webhook 事件，并以文本或 HTML 卡片图片形式推送到指定 AstrBot 会话。
-version: v0.1.0
+version: v0.2.0
 author: AsterleedsGuild0
 repo: https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier
