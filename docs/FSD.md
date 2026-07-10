@@ -618,7 +618,6 @@ Webhook HTTP Server
 - html_image 渲染失败且 `fallback_to_text=true` 时，继续走 text renderer 和 sender。
 - sender 多目标发送时，MVP 串行执行并记录每个目标结果；部分失败时响应中必须体现失败目标。
 - sender 调用 `Context.send_message()` 后必须检查返回值；返回 `False` 时不得记录为发送成功。
-- 为兼容早期误用平台类型名写入的 UMO，sender 可在首次发送失败时将 `platform_type:MessageType:session_id` 映射为当前运行中的平台实例 ID 并重试一次，例如 `aiocqhttp:GroupMessage:<group_id>` -> `<platform_id>:GroupMessage:<group_id>`。
 
 审计与日志关联：
 
