@@ -327,10 +327,13 @@ class TestRenderHtml:
         assert context["event"]["event_time"] == context["event"]["emitted_at"]
 
     def test_default_template_contains_styles(self):
-        """默认 HTML 模板应包含 CSS 样式。"""
+        """默认 HTML 模板应包含 macOS 浅色卡片样式。"""
         assert "box-sizing" in DEFAULT_HTML_TEMPLATE
+        assert "-apple-system" in DEFAULT_HTML_TEMPLATE
         assert "PingFang SC" in DEFAULT_HTML_TEMPLATE
         assert ".status-badge" in DEFAULT_HTML_TEMPLATE
+        assert "background: #f5f5f7" in DEFAULT_HTML_TEMPLATE
+        assert "#0a0f1c" not in DEFAULT_HTML_TEMPLATE
 
 
 # ─── 图片结果校验测试 ─────────────────────────────────────
