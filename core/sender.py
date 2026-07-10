@@ -58,9 +58,33 @@ class Sender:
     ) -> dict[str, Any]:
         """发送消息到单个目标。"""
         try:
-            await self._context.send_message(target.umo, message_chain)
+            sent = await self._context.send_message(target.umo, message_chain)
+            target_umo = target.umo
+            if not sent:
+                parts = target.umo.split(":", 2)
+                if len(parts) == 3:
+                    platform_name, message_type, session_id = parts
+                    for platform in self._context.platform_manager.platform_insts:
+                        meta = platform.meta()
+                        if meta.name == platform_name and meta.id != platform_name:
+                            fallback_umo = f"{meta.id}:{message_type}:{session_id}"
+                            logger.warning(
+                                f"[WebhookNotifier] 目标 {target.name} 使用平台类型 UMO 发送失败，"
+                                f"改用平台实例 UMO 重试: {fallback_umo}"
+                            )
+                            sent = await self._context.send_message(
+                                fallback_umo, message_chain
+                            )
+                            if sent:
+                                target_umo = fallback_umo
+                            break
+            if not sent:
+                logger.error(
+                    f"[WebhookNotifier] 发送到目标 {target.name} ({target.umo}) 失败: 找不到平台会话"
+                )
+                return {"name": target.name, "ok": False, "error": "session_not_found"}
             logger.info(
-                f"[WebhookNotifier] 消息已发送到目标 {target.name} ({target.umo})"
+                f"[WebhookNotifier] 消息已发送到目标 {target.name} ({target_umo})"
             )
             return {"name": target.name, "ok": True, "error": None}
         except Exception as e:
