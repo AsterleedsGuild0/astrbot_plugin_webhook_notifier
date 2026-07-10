@@ -36,7 +36,7 @@ def _make_event() -> NormalizedEvent:
     )
 
 
-def _make_endpoint(render_mode: str = "text") -> EndpointRecord:
+def _make_endpoint() -> EndpointRecord:
     return EndpointRecord(
         name="test_ep",
         path="u/hash/test_ep",
@@ -45,8 +45,6 @@ def _make_endpoint(render_mode: str = "text") -> EndpointRecord:
         token_hash_algorithm="hmac-sha256",
         owner_user_id="user_001",
         targets=[TargetAlias(name="default", umo="test:Platform:Message:1")],
-        render_mode=render_mode,
-        template=None,
         status="active",
         created_at="2026-07-09T12:00:00",
     )
@@ -122,8 +120,8 @@ def server() -> WebhookServer:
 
 
 class TestGetRenderMode:
-    def test_plugin_html_overrides_endpoint_text(self):
-        """全局 html_image 应覆盖 endpoint text。"""
+    def test_global_html_image(self):
+        """全局 html_image 应返回 html_image。"""
         config = ServerConfig()
         reg = FakeRegistry()
         srv = WebhookServer(
@@ -133,11 +131,10 @@ class TestGetRenderMode:
             html_render=None,
             plugin_config={"render_mode": "html_image"},
         )
-        ep = _make_endpoint(render_mode="text")
-        assert srv._get_render_mode(ep) == "html_image"
+        assert srv._get_render_mode() == "html_image"
 
-    def test_plugin_text_overrides_endpoint_html(self):
-        """全局 text 应覆盖 endpoint html_image。"""
+    def test_global_text(self):
+        """全局 text 应返回 text。"""
         config = ServerConfig()
         reg = FakeRegistry()
         srv = WebhookServer(
@@ -147,28 +144,11 @@ class TestGetRenderMode:
             html_render=None,
             plugin_config={"render_mode": "text"},
         )
-        ep = _make_endpoint(render_mode="html_image")
-        assert srv._get_render_mode(ep) == "text"
+        assert srv._get_render_mode() == "text"
 
-    def test_plugin_text_default(self, server: WebhookServer):
-        """全局 text 默认值应生效。"""
-        ep = _make_endpoint(render_mode="html_image")
-        # 即使 endpoint 是 html_image，全局 text 优先
-        assert server._get_render_mode(ep) == "text"
-
-    def test_plugin_html_image_runtime(self):
-        """全局 html_image 时即使 endpoint 是 text 也可触发 html_image 分支。"""
-        config = ServerConfig()
-        reg = FakeRegistry()
-        srv = WebhookServer(
-            config=config,
-            registry=reg,
-            sender=FakeSender(),
-            html_render=None,
-            plugin_config={"render_mode": "html_image"},
-        )
-        ep = _make_endpoint(render_mode="text")
-        assert srv._get_render_mode(ep) == "html_image"
+    def test_global_text_default(self, server: WebhookServer):
+        """默认插件配置 text 应生效。"""
+        assert server._get_render_mode() == "text"
 
 
 # ─── _get_fallback_to_text ─────────────────────────────────
@@ -278,7 +258,7 @@ class TestBuildRenderResponse:
 class TestHandleText:
     async def test_text_success(self, server: WebhookServer):
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="text")
+        endpoint = _make_endpoint()
         resp = await server._handle_text(
             event, endpoint, target_alias=None, request_id="req-txt-001"
         )
@@ -292,7 +272,7 @@ class TestHandleText:
     async def test_text_response_format(self, server: WebhookServer):
         """验证响应中包含 render_mode/requested_render_mode/fallback 字段。"""
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="text")
+        endpoint = _make_endpoint()
         resp = await server._handle_text(
             event, endpoint, target_alias=None, request_id="req-txt-002"
         )
@@ -315,7 +295,7 @@ class TestHandleHtmlImage:
     async def test_html_image_success(self, server: WebhookServer):
         """HTML 图片模式成功时应返回 html_image render_mode。"""
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
         resp = await server._handle_html_image(
             event,
             endpoint,
@@ -341,7 +321,7 @@ class TestHandleHtmlImage:
         server._html_render = failing_render
 
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
         resp = await server._handle_html_image(
             event,
             endpoint,
@@ -368,7 +348,7 @@ class TestHandleHtmlImage:
         server._html_render = failing_render
 
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
         resp = await server._handle_html_image(
             event,
             endpoint,
@@ -386,7 +366,7 @@ class TestHandleHtmlImage:
         server._html_render = None
 
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
         resp = await server._handle_html_image(
             event,
             endpoint,
@@ -408,7 +388,7 @@ class TestHandleHtmlImage:
         server._html_render = return_invalid_image
 
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
         resp = await server._handle_html_image(
             event,
             endpoint,
@@ -423,7 +403,7 @@ class TestHandleHtmlImage:
     async def test_send_image_delivery_failure(self, server: WebhookServer):
         """发送图片但目标不可达时，render_mode 仍为 html_image，delivered=False。"""
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
         server._sender.set_fail_send(True)
         resp = await server._handle_html_image(
             event,
@@ -441,7 +421,7 @@ class TestHandleHtmlImage:
     async def test_send_image_exception_with_fallback(self, server: WebhookServer):
         """发送图片抛出异常时应降级为 text。"""
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
 
         async def raise_send(*args, **kwargs):
             raise RuntimeError("send crashed")
@@ -464,7 +444,7 @@ class TestHandleHtmlImage:
     async def test_text_mode_still_works(self, server: WebhookServer):
         """text 模式仍应正常工作不受 html_image 影响。"""
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="text")
+        endpoint = _make_endpoint()
         resp = await server._handle_text(
             event, endpoint, target_alias=None, request_id="req-txt-003"
         )
@@ -481,7 +461,7 @@ class TestFallbackToText:
     async def test_fallback_response_format(self, server: WebhookServer):
         """降级响应应包含完整 fallback 标记。"""
         event = _make_event()
-        endpoint = _make_endpoint(render_mode="html_image")
+        endpoint = _make_endpoint()
         resp = await server._fallback_to_text(
             event,
             endpoint,

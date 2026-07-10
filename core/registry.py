@@ -85,8 +85,6 @@ class EndpointRegistry:
                     ),
                     owner_user_id=data.get("owner_user_id", ""),
                     targets=targets,
-                    render_mode=data.get("render_mode", "text"),
-                    template=data.get("template"),
                     status=data.get("status", EndpointStatus.REVOKED.value),
                     created_at=data.get("created_at", ""),
                     revoked_at=data.get("revoked_at"),
@@ -120,8 +118,6 @@ class EndpointRegistry:
                 "token_hash_algorithm": rec.token_hash_algorithm,
                 "owner_user_id": rec.owner_user_id,
                 "targets": [{"name": t.name, "umo": t.umo} for t in rec.targets],
-                "render_mode": rec.render_mode,
-                "template": rec.template,
                 "status": rec.status,
                 "created_at": rec.created_at,
                 "revoked_at": rec.revoked_at,
@@ -153,7 +149,6 @@ class EndpointRegistry:
         path: str,
         owner_user_id: str,
         target_umo: str,
-        render_mode: str = "text",
         description: str | None = None,
     ) -> tuple[EndpointRecord, str]:
         """创建私聊目标 endpoint，直接进入 active 状态。
@@ -172,8 +167,6 @@ class EndpointRegistry:
             token_hash_algorithm=TOKEN_HASH_ALGORITHM,
             owner_user_id=owner_user_id,
             targets=[TargetAlias(name="default", umo=target_umo)],
-            render_mode=render_mode,
-            template=None,
             status=EndpointStatus.ACTIVE.value,
             created_at=now_iso,
             description=description or f"私聊 endpoint for {owner_user_id}",
@@ -188,7 +181,6 @@ class EndpointRegistry:
         path: str,
         owner_user_id: str,
         target_group_id: str,
-        render_mode: str = "text",
         description: str | None = None,
     ) -> tuple[EndpointRecord, str, str]:
         """创建群聊待验证 endpoint。
@@ -210,8 +202,6 @@ class EndpointRegistry:
             token_hash_algorithm=TOKEN_HASH_ALGORITHM,
             owner_user_id=owner_user_id,
             targets=[],  # 验证通过后填充
-            render_mode=render_mode,
-            template=None,
             status=EndpointStatus.PENDING_VERIFICATION.value,
             created_at=now.isoformat(),
             pending_request_id=request_id,

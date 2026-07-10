@@ -27,6 +27,7 @@ class EndpointRecord:
     """端到端注册记录。
 
     每条记录对应一个独立 endpoint/token 绑定关系。
+    渲染配置（render_mode）属于插件全局配置，不在 endpoint 级保存。
     token 明文不持久化，只保存 token_hash。
     """
 
@@ -37,8 +38,6 @@ class EndpointRecord:
     token_hash_algorithm: str
     owner_user_id: str
     targets: list[TargetAlias]  # 目标白名单
-    render_mode: str  # "text" | "html_image"
-    template: str | None  # 自定义模板文件名，None 为默认模板
     status: str  # EndpointStatus 的值
     created_at: str  # ISO-8601 UTC
     revoked_at: str | None = None  # ISO-8601 UTC, None 表示未撤销

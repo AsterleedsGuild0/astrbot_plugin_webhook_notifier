@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import uuid
 
 import pytest
 
 from core.models import EndpointStatus
-from core.registry import EndpointRegistry, build_endpoint_path, owner_path_hash
+from core.registry import (
+    REGISTRY_FILENAME,
+    EndpointRegistry,
+    build_endpoint_path,
+    owner_path_hash,
+)
 
 
 @pytest.fixture
@@ -508,6 +514,48 @@ class TestRegistryPersistence:
             reg2 = EndpointRegistry(tmpdir)
             secret2 = reg2.server_secret
             assert secret1 == secret2
+
+    def test_legacy_render_fields_are_ignored_and_dropped_on_save(self):
+        """旧 registry 中的 render_mode/template 字段应被忽略，重新保存后清理。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = os.path.join(tmpdir, REGISTRY_FILENAME)
+            legacy_data = {
+                "records": {
+                    "user_legacy\u001flegacy_endpoint": {
+                        "name": "legacy_endpoint",
+                        "path": "u/legacy/legacy_endpoint",
+                        "provider": "omp",
+                        "token_hash": "legacy_hash",
+                        "token_hash_algorithm": "HMAC-SHA256",
+                        "owner_user_id": "user_legacy",
+                        "targets": [
+                            {
+                                "name": "default",
+                                "umo": "aiocqhttp:FriendMessage:10001",
+                            }
+                        ],
+                        "render_mode": "text",
+                        "template": "legacy.html",
+                        "status": EndpointStatus.ACTIVE.value,
+                        "created_at": "2026-07-10T00:00:00+00:00",
+                    }
+                },
+                "pending": {},
+            }
+            with open(registry_path, "w", encoding="utf-8") as f:
+                json.dump(legacy_data, f)
+
+            reg = EndpointRegistry(tmpdir)
+            record = reg.get_by_name("legacy_endpoint")
+            assert record is not None
+            assert not hasattr(record, "render_mode")
+            assert not hasattr(record, "template")
+
+            reg.rotate_token("legacy_endpoint", "user_legacy")
+            saved = json.loads(open(registry_path, encoding="utf-8").read())
+            saved_record = saved["records"]["user_legacy\u001flegacy_endpoint"]
+            assert "render_mode" not in saved_record
+            assert "template" not in saved_record
 
 
 class TestStalePending:

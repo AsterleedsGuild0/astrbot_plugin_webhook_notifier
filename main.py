@@ -254,7 +254,6 @@ class WebhookNotifierPlugin(Star):
                 path=endpoint_path,
                 owner_user_id=owner_id,
                 target_umo=target_umo,
-                render_mode=self._get_render_mode(),
                 description=f"私聊 endpoint for {owner_id}",
             )
         except Exception as e:
@@ -312,7 +311,6 @@ class WebhookNotifierPlugin(Star):
                 path=endpoint_path,
                 owner_user_id=owner_id,
                 target_group_id=group_id,
-                render_mode=self._get_render_mode(),
                 description=f"群聊 endpoint for {owner_id} 目标群 {group_id}",
             )
         except Exception as e:
@@ -464,7 +462,6 @@ class WebhookNotifierPlugin(Star):
                 f"{status_emoji} {rec.name}\n"
                 f"   路径: /{rec.path}\n"
                 f"   状态: {rec.status}\n"
-                f"   渲染: {rec.render_mode}\n"
                 f"   目标: {targets_str}\n"
                 f"   创建: {rec.created_at[:19]}\n"
             )

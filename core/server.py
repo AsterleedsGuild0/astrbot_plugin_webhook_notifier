@@ -109,12 +109,11 @@ class WebhookServer:
 
     # ─── 内部辅助方法 ────────────────────────────────────────
 
-    def _get_render_mode(self, endpoint: EndpointRecord) -> str:
-        """确定渲染模式：全局插件配置优先，endpoint 级覆盖暂不生效。
+    def _get_render_mode(self) -> str:
+        """读取插件全局渲染模式。
 
-        MVP 阶段 render_mode 以插件全局配置为准。
-        endpoint.render_mode 字段保留兼容但不参与决策。
-        后续版本可放开 endpoint 覆盖能力。
+        MVP 阶段 render_mode 为全局配置，所有 endpoint 共享。
+        endpoint 级渲染模式已在 EndpointRecord 中移除。
         """
         pm = str(self._plugin_config.get("render_mode", "text"))
         return pm if pm in ("text", "html_image") else "text"
@@ -284,8 +283,8 @@ class WebhookServer:
         # 11. 解析 payload 中的 target alias
         payload_target_alias = body.get("target_alias") or body.get("target")
 
-        # 12. 确定渲染模式
-        render_mode = self._get_render_mode(endpoint)
+        # 12. 确定渲染模式（全局配置）
+        render_mode = self._get_render_mode()
         fallback_to_text = self._get_fallback_to_text()
 
         # 13. 按模式分支

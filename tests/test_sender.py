@@ -23,8 +23,6 @@ def _make_endpoint(
         token_hash_algorithm="hmac-sha256",
         owner_user_id="user_001",
         targets=targets or [],
-        render_mode="text",
-        template=None,
         status="active",
         created_at="2026-07-09T12:00:00",
     )
