@@ -17,12 +17,6 @@
     "type": "bool",
     "default": true
   },
-  "webhook_token": {
-    "description": "[已废弃] 旧版全局 Bearer Token",
-    "type": "string",
-    "hint": "⚠ 该配置已不再使用。请使用 /whn token new 命令创建 managed endpoint。此处保留仅为兼容旧配置，不参与 Webhook 鉴权。",
-    "default": ""
-  },
   "server": {
     "description": "Webhook HTTP 服务器配置",
     "type": "text",

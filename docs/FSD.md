@@ -96,11 +96,13 @@ MVP 支持多个 endpoint。每个 endpoint 对应独立 path、provider、token
 POST /webhook/omp-session
 ```
 
-通用路径：
+MVP 通用路径：
 
 ```text
-POST /webhook/{endpoint}
+POST /webhook/u/{owner_hash}/{endpoint_name}
 ```
+
+`endpoint_name` 在同一个申请用户内唯一；`owner_hash` 用于隔离不同申请用户的同名 endpoint。
 
 功能要求：
 
@@ -448,10 +450,17 @@ MVP 推荐：
 如果实现通用 endpoint，则路径为：
 
 ```text
-/webhook/{endpoint}
+/webhook/u/{owner_hash}/{endpoint_name}
 ```
 
-其中 `endpoint` 用于匹配配置中的 endpoint 名称。
+其中 `endpoint_name` 用于匹配申请者名下的 endpoint 名称；`owner_hash` 是由 `owner_user_id` 计算得到的稳定短 hash，用于 URL 命名空间隔离，不直接暴露 QQ 号或平台用户 ID。
+
+命名规则：
+
+- `endpoint_name` 在同一个 `owner_user_id` 下唯一。
+- 不同 `owner_user_id` 可以创建相同的 `endpoint_name`。
+- Registry 查询、轮换和撤销必须按 `owner_user_id + endpoint_name` 定位记录，不能只按全局 name 查询。
+- Webhook 入站请求仍以完整 path 匹配 endpoint；真正鉴权仍依赖 `Authorization: Bearer <token>`。
 
 ### 请求头
 
@@ -561,7 +570,7 @@ MVP 不接受：
 
 ```text
 External System(OMP)
-  -> Webhook HTTP Server: POST /webhook/{endpoint}
+  -> Webhook HTTP Server: POST /webhook/u/{owner_hash}/{endpoint_name}
      headers: Authorization: Bearer <token>, Content-Type: application/json
      body: OMP session_stop payload
 
@@ -814,7 +823,7 @@ targets:
 
 endpoints:
   - name: alice_omp
-    path: /omp/alice
+    path: u/0a1b2c3d4e5f/alice_omp
     provider: omp
     token_hash: "..."
     owner_user_id: "10001"
@@ -1073,7 +1082,6 @@ MVP 可以串行发送。
 | `enabled` | bool | `true` | 是否启用插件 |
 | `render_mode` | string | `text` | `text` 或 `html_image` |
 | `fallback_to_text` | bool | `true` | HTML 渲染失败是否降级文本 |
-| `webhook_token` | string | `""` | 骨架阶段遗留的全局 Bearer Token；MVP 实现时应迁移为 endpoint 级 token |
 | `auth_mode` | string | `managed` | 预留字段；MVP 只支持 `managed`，不支持 `simple` |
 | `targets` | yaml text | 示例注释 | 推送目标列表 |
 | `endpoints` | yaml text | `[]` | endpoint registry 的可读配置视图；运行时以插件数据目录中的 registry 为准 |
@@ -1104,7 +1112,7 @@ targets:
 
 endpoints:
   - name: alice_omp
-    path: /omp/alice
+    path: u/0a1b2c3d4e5f/alice_omp
     provider: omp
     token_hash: "..."
     owner_user_id: "10001"
@@ -1130,9 +1138,9 @@ providers:
 
 骨架迁移：
 
-- 若升级时检测到旧的全局 `webhook_token`，MVP 不自动把它作为可用 endpoint token。
+- 若升级时检测到骨架阶段早期占位的 `webhook_token`，MVP 不自动把它作为可用 endpoint token。
 - 插件应在状态命令中提示管理员使用 `/whn token new ...` 重新创建 managed endpoint。
-- 旧的 `webhook_token` 不参与 Webhook 鉴权，避免误启用单全局 token 模式。
+- `webhook_token` 不在 MVP 配置界面展示，也不参与 Webhook 鉴权，避免误启用单全局 token 模式。
 
 ### 配置校验
 

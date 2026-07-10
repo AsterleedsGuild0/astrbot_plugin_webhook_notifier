@@ -186,7 +186,7 @@ Bot 私聊返回 Webhook URL、Bearer Token 和 OMP 配置示例
 
 ```text
 OMP / 外部系统
-  ↓ POST /webhook/{endpoint}
+  ↓ POST /webhook/u/{owner_hash}/{endpoint_name}
 Webhook Notifier
   ↓ 鉴权、解析、渲染、发送
 AstrBot OneBot v11 消息平台
@@ -260,10 +260,10 @@ MVP 需要提供一个 HTTP Webhook 入口。
 或更通用：
 
 ```text
-/webhook/{endpoint_name}
+/webhook/u/{owner_hash}/{endpoint_name}
 ```
 
-MVP 应支持多个用户各自拥有独立 endpoint/token，至少需要支持多个 endpoint 记录。
+MVP 应支持多个用户各自拥有独立 endpoint/token，至少需要支持多个 endpoint 记录。`endpoint_name` 在同一个申请用户内唯一；不同用户可以使用相同的 `endpoint_name`。URL 使用 `owner_hash` 做用户命名空间隔离，`owner_hash` 由 `owner_user_id` 计算稳定短 hash，不直接暴露 QQ 号或平台用户 ID。
 
 每个 endpoint/token 必须绑定允许投递的目标白名单，避免 payload 直接指定任意 QQ 私聊或群聊。
 
@@ -577,7 +577,7 @@ targets: |
     umo: aiocqhttp:GroupMessage:123456789
 endpoints: |
   - name: user_private_omp
-    path: /omp/user-private
+    path: u/0a1b2c3d4e5f/user_private_omp
     provider: omp
     token_hash: "由插件生成并保存哈希"
     owner_user_id: "10001"

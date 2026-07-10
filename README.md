@@ -53,9 +53,8 @@ AstrBot Webhook Notifier
 
 ```yaml
 enabled: true
-render_mode: html_image
+render_mode: text
 fallback_to_text: true
-webhook_token: "请替换为高强度随机 Token"
 templates_dir: templates
 targets: |
   - name: default_group
@@ -78,7 +77,7 @@ render_options: |
 
 ## Webhook 鉴权建议
 
-推荐外部系统使用 `Authorization: Bearer <token>` 发送请求：
+Token 由 Bot 命令创建，不通过插件配置项手动填写。先在私聊或群聊中使用 `/whn token new ...` 创建 managed endpoint，再将 Bot 返回的 Token 配置到外部系统。外部系统应使用 `Authorization: Bearer <token>` 发送请求：
 
 ```http
 POST /webhook/omp-session HTTP/1.1

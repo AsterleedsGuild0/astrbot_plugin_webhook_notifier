@@ -170,7 +170,7 @@ class WebhookServer:
             )
 
         # 7. 校验 endpoint 状态
-        if not self._registry.is_endpoint_active(endpoint.name):
+        if not self._registry.is_endpoint_active(endpoint.name, endpoint.owner_user_id):
             logger.warning(
                 f"[WebhookNotifier] request_id={request_id} "
                 f"endpoint {endpoint.name} 状态不可用: {endpoint.status}"

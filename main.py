@@ -11,7 +11,11 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.platform.message_type import MessageType
 
 from .core.models import EndpointStatus, ServerConfig
-from .core.registry import EndpointRegistry
+from .core.registry import (
+    EndpointRegistry,
+    build_endpoint_path,
+    normalize_endpoint_name,
+)
 from .core.sender import Sender
 from .core.server import WebhookServer
 
@@ -78,11 +82,12 @@ class WebhookNotifierPlugin(Star):
                 "创建 endpoint 后服务将自动启动。"
             )
 
-        # 检查旧版 webhook_token 配置
+        # 检查早期占位 webhook_token 配置。该键不在 MVP 配置界面展示；
+        # 仅当用户从骨架阶段配置升级且本地仍保留该键时提示。
         legacy_token = str(self.config.get("webhook_token", "")).strip()
         if legacy_token:
             logger.warning(
-                "[WebhookNotifier] 检测到旧版 webhook_token 配置，该配置已不再使用。"
+                "[WebhookNotifier] 检测到早期占位 webhook_token 配置，该配置在 MVP 中未启用。"
                 "请使用 /whn token new 命令创建 managed endpoint。"
             )
 
@@ -98,20 +103,42 @@ class WebhookNotifierPlugin(Star):
     @filter.command("webhook_notifier")
     async def status_long(self, event: AstrMessageEvent):
         """查看 Webhook Notifier 完整状态。"""
-        yield event.plain_result(self._build_status_text())
+        yield self._plain_text_result(event, self._build_status_text())
 
     @filter.command("whn")
     async def status_short(self, event: AstrMessageEvent):
         """Webhook Notifier 短命令入口。"""
-        if not event.message_str.strip():
-            yield event.plain_result(self._build_status_text())
+        args = self._normalize_whn_args(event.message_str)
+        if not args:
+            yield self._plain_text_result(event, self._build_status_text())
             return
-        # 交由子命令分发
-        # 注意：event.message_str 是去除命令前缀后的纯文本
-        args = event.message_str.strip()
+
         result = await self._dispatch_whn_command(event, args)
         if result:
-            yield event.plain_result(result)
+            yield self._plain_text_result(event, result)
+
+    def _plain_text_result(self, event: AstrMessageEvent, text: str):
+        """构造强制纯文本的命令响应，避免 URL/Token 被 AstrBot T2I 转成图片。"""
+        return event.plain_result(text).use_t2i(False)
+
+    def _normalize_whn_args(self, message: str) -> str:
+        """规范化 /whn 命令参数。
+
+        AstrBot v4.26.1 的 `event.message_str` 可能仍包含完整命令文本
+        （例如 `whn status`），而不是只包含命令后的参数。这里兼容两种
+        形态，避免把根命令 `whn` 当作子命令处理。
+        """
+        text = (message or "").strip()
+        if not text:
+            return ""
+
+        if text.startswith("/"):
+            text = text[1:].lstrip()
+
+        parts = text.split(maxsplit=1)
+        if parts and parts[0].lower() == COMMAND:
+            return parts[1].strip() if len(parts) > 1 else ""
+        return text
 
     async def _dispatch_whn_command(
         self, event: AstrMessageEvent, args: str
@@ -123,6 +150,8 @@ class WebhookNotifierPlugin(Star):
 
         sub = parts[0].lower()
 
+        if sub in ("status", "状态", "查看状态"):
+            return self._build_status_text()
         if sub == "token":
             return await self._handle_token_command(event, parts[1:])
         else:
@@ -130,6 +159,8 @@ class WebhookNotifierPlugin(Star):
                 f"未知子命令: {sub}\n"
                 f"可用命令：\n"
                 f"  /whn                   查看状态\n"
+                f"  /whn status            查看状态\n"
+                f"  /whn 查看状态          查看状态\n"
                 f"  /whn token new private [名称]  创建私聊 endpoint\n"
                 f"  /whn token new group <群号> [名称]  创建群聊 endpoint\n"
                 f"  /whn token verify <request_id> <code>  验证群聊 endpoint\n"
@@ -207,12 +238,16 @@ class WebhookNotifierPlugin(Star):
         owner_id = event.get_sender_id()
         target_umo = event.unified_msg_origin
 
-        endpoint_name = name_param or f"private_{owner_id[:8]}"
-        endpoint_path = endpoint_name
+        endpoint_name = normalize_endpoint_name(name_param or "private")
+        endpoint_path = build_endpoint_path(owner_id, endpoint_name)
 
         # 检查是否已存在
-        if registry.get_by_name(endpoint_name):
-            return f"❌ endpoint 名称 '{endpoint_name}' 已存在，请使用其他名称。"
+        if registry.get_by_owner_name(owner_id, endpoint_name):
+            return (
+                f"❌ 你已经创建过名为 '{endpoint_name}' 的 endpoint，请使用其他名称。"
+            )
+        if registry.get_by_path(endpoint_path):
+            return f"❌ endpoint 路径 '{endpoint_path}' 已存在，请使用其他名称。"
 
         try:
             record, token = registry.create_private_endpoint(
@@ -262,11 +297,15 @@ class WebhookNotifierPlugin(Star):
         name_param = " ".join(args[1:]).strip() if len(args) > 1 else ""
         owner_id = event.get_sender_id()
 
-        endpoint_name = name_param or f"group_{group_id}"
-        endpoint_path = endpoint_name
+        endpoint_name = normalize_endpoint_name(name_param or f"group_{group_id}")
+        endpoint_path = build_endpoint_path(owner_id, endpoint_name)
 
-        if registry.get_by_name(endpoint_name):
-            return f"❌ endpoint 名称 '{endpoint_name}' 已存在，请使用其他名称。"
+        if registry.get_by_owner_name(owner_id, endpoint_name):
+            return (
+                f"❌ 你已经创建过名为 '{endpoint_name}' 的 endpoint，请使用其他名称。"
+            )
+        if registry.get_by_path(endpoint_path):
+            return f"❌ endpoint 路径 '{endpoint_path}' 已存在，请使用其他名称。"
 
         try:
             record, request_id, code = registry.create_pending_verification(
@@ -330,6 +369,7 @@ class WebhookNotifierPlugin(Star):
         platform_name = event.get_platform_name()
         group_umo = f"{platform_name}:GroupMessage:{verify_group_id}"
 
+        pending_info = dict(registry._pending.get(request_id, {}))
         result_status, result_msg, token = registry.verify_group_endpoint(
             request_id=request_id,
             code=code,
@@ -342,10 +382,11 @@ class WebhookNotifierPlugin(Star):
             # 验证成功：私聊返回 token
             await self._ensure_server_running()
 
-            # 获取 endpoint 信息
-            pending_info = registry._pending.get(request_id, {})
+            # 获取 endpoint 信息。verify_group_endpoint 会清理 pending，
+            # 因此这里使用验证前复制出的 pending_info。
             endpoint_name = pending_info.get("endpoint_name", "unknown")
-            record = registry.get_by_name(endpoint_name)
+            owner_user_id = pending_info.get("owner_user_id", verify_user_id)
+            record = registry.get_by_owner_name(owner_user_id, endpoint_name)
             endpoint_path = record.path if record else endpoint_name
             url = self._build_webhook_url(endpoint_path)
 
@@ -365,7 +406,7 @@ class WebhookNotifierPlugin(Star):
             # 尝试私聊发送 token
             try:
                 await self.context.send_message(
-                    private_umo, MessageChain([Plain(private_msg)])
+                    private_umo, MessageChain([Plain(private_msg)]).use_t2i(False)
                 )
                 logger.info(
                     f"[WebhookNotifier] 群聊验证成功，Token 已私聊发送给用户 {verify_user_id}"
@@ -434,14 +475,14 @@ class WebhookNotifierPlugin(Star):
         if not args:
             return "❌ 请指定 endpoint 名称: /whn token rotate <名称>"
 
-        name = args[0].strip()
+        name = normalize_endpoint_name(" ".join(args))
         owner_id = event.get_sender_id()
 
         success, result = registry.rotate_token(name, owner_id)
         if not success:
             return f"❌ {result}"
 
-        record = registry.get_by_name(name)
+        record = registry.get_by_owner_name(owner_id, name)
         endpoint_path = record.path if record else name
         url = self._build_webhook_url(endpoint_path)
 
@@ -467,7 +508,7 @@ class WebhookNotifierPlugin(Star):
         if not args:
             return "❌ 请指定 endpoint 名称: /whn token revoke <名称>"
 
-        name = args[0].strip()
+        name = normalize_endpoint_name(" ".join(args))
         owner_id = event.get_sender_id()
 
         success, message = registry.revoke_endpoint(name, owner_id)
@@ -605,7 +646,7 @@ class WebhookNotifierPlugin(Star):
         port = self._server_config.port if self._server_config else 18080
         base_path = self._server_config.base_path if self._server_config else "/webhook"
 
-        # 检查旧版 token
+        # 检查早期占位 token。仅兼容用户本地旧配置，不在新配置界面展示。
         legacy_token = bool(str(self.config.get("webhook_token", "")).strip())
 
         lines = [
@@ -625,7 +666,7 @@ class WebhookNotifierPlugin(Star):
 
         if legacy_token:
             lines.append("")
-            lines.append("⚠️ 检测到旧版 webhook_token 配置（已不再使用）")
+            lines.append("⚠️ 检测到早期占位 webhook_token 配置（MVP 未启用）")
             lines.append("   请使用 /whn token new 命令创建 managed endpoint。")
 
         lines.extend(

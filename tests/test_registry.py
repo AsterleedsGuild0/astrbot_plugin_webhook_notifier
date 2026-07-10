@@ -9,7 +9,7 @@ import uuid
 import pytest
 
 from core.models import EndpointStatus
-from core.registry import EndpointRegistry
+from core.registry import EndpointRegistry, build_endpoint_path, owner_path_hash
 
 
 @pytest.fixture
@@ -64,24 +64,35 @@ class TestRegistryCreate:
         assert uuid.UUID(request_id).version == 4
         assert len(code) == 6
 
-    def test_duplicate_name(self, registry):
-        """同名 endpoint 不应重复创建但 registry 会覆盖（测试设计为覆盖）。"""
-        registry.create_private_endpoint(
+    def test_same_name_different_owner_isolated(self, registry):
+        """不同用户可以创建同名 endpoint，记录按 owner+name 隔离。"""
+        record1, _ = registry.create_private_endpoint(
             name="dup_test",
-            path="dup_test",
+            path=build_endpoint_path("user_001", "dup_test"),
             owner_user_id="user_001",
             target_umo="aiocqhttp:FriendMessage:10001",
         )
-        # 再次创建同名会覆盖
-        registry.create_private_endpoint(
+        record2, _ = registry.create_private_endpoint(
             name="dup_test",
-            path="dup_test",
+            path=build_endpoint_path("user_002", "dup_test"),
             owner_user_id="user_002",
             target_umo="aiocqhttp:FriendMessage:20002",
         )
-        record = registry.get_by_name("dup_test")
-        assert record is not None
-        assert record.owner_user_id == "user_002"
+        assert record1.path != record2.path
+        assert (
+            registry.get_by_owner_name("user_001", "dup_test").owner_user_id
+            == "user_001"
+        )
+        assert (
+            registry.get_by_owner_name("user_002", "dup_test").owner_user_id
+            == "user_002"
+        )
+
+    def test_build_endpoint_path_uses_owner_hash(self):
+        """URL path 应按 owner hash 隔离且不直接暴露用户 ID。"""
+        path = build_endpoint_path("123456789", "omp-test")
+        assert path == f"u/{owner_path_hash('123456789')}/omp-test"
+        assert "123456789" not in path
 
 
 class TestRegistryVerify:
@@ -221,6 +232,26 @@ class TestRegistryQuery:
     def test_get_by_name_not_found(self, registry):
         assert registry.get_by_name("nonexistent") is None
 
+    def test_get_by_owner_name(self, registry):
+        registry.create_private_endpoint(
+            name="query_same",
+            path=build_endpoint_path("user_a", "query_same"),
+            owner_user_id="user_a",
+            target_umo="aiocqhttp:FriendMessage:10010",
+        )
+        registry.create_private_endpoint(
+            name="query_same",
+            path=build_endpoint_path("user_b", "query_same"),
+            owner_user_id="user_b",
+            target_umo="aiocqhttp:FriendMessage:10011",
+        )
+        assert (
+            registry.get_by_owner_name("user_a", "query_same").owner_user_id == "user_a"
+        )
+        assert (
+            registry.get_by_owner_name("user_b", "query_same").owner_user_id == "user_b"
+        )
+
     def test_get_by_path(self, registry):
         registry.create_private_endpoint(
             name="path_test",
@@ -318,7 +349,7 @@ class TestRegistryRevoke:
         )
         success, msg = registry.revoke_endpoint("other_owner_revoke", "user_999")
         assert success is False
-        assert "只能撤销自己的" in msg
+        assert "不存在" in msg
 
     def test_revoke_nonexistent(self, registry):
         success, msg = registry.revoke_endpoint("nonexistent_endpoint", "user_080")

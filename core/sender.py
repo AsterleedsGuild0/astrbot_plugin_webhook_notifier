@@ -42,6 +42,7 @@ class Sender:
         # 消息链
         message_chain = MessageChain()
         message_chain.chain.append(Plain(text))
+        message_chain.use_t2i(False)
 
         results: list[dict[str, Any]] = []
         for tgt in targets:
