@@ -733,9 +733,9 @@ providers:
   "version": 1,
   "id": "session-id:turn-id",
   "emitted_at": "2026-07-08T12:00:00.000Z",
-  "title": "oh-my-pi 会话完成",
+  "title": "会话完成",
   "status": "success",
-  "summary": "会话已完成",
+  "summary": "",
   "source": {
     "name": "oh-my-pi",
     "url": null
@@ -758,10 +758,11 @@ providers:
 - `emitted_at`
 - `title`
 - `status`
-- `summary`
 - `fields`
 
 若 provider payload 缺少时间字段，`emitted_at` 使用插件接收请求时的 UTC ISO-8601 时间。
+
+`summary` 是可选摘要。默认 OMP `session_stop` 通知可将 `summary` 置空，避免在摘要中重复展示已由 `fields` 表达的会话名和模型名。
 
 ### Raw 字段保留策略
 
@@ -903,7 +904,9 @@ MVP 可以不实现该规则路由，但配置设计需兼容未来扩展。
 ```text
 [{{ event.source.name }}] {{ event.title }}
 
+{% if event.summary %}
 {{ event.summary }}
+{% endif %}
 {% for field in event.fields %}
 {{ field.label }}：{{ field.value }}
 {% endfor %}
@@ -925,6 +928,7 @@ OMP 示例：
 要求：
 
 - 字段缺失时不输出 `None`。
+- `summary` 为空时不输出空摘要行；默认 OMP 通知只在 fields 中展示会话名和模型名，避免重复信息。
 - 长字段按配置截断。
 - 不输出 token、请求头和完整 raw payload。
 

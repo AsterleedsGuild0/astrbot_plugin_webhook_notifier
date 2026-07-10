@@ -11,7 +11,8 @@ from .models import NormalizedEvent
 DEFAULT_TEXT_TEMPLATE = """\
 [{{ event.source.name }}] {{ event.title }}
 
-{{ event.summary }}{% for field in event.fields %}
+{% if event.summary %}{{ event.summary }}
+{% endif %}{% for field in event.fields %}
 {{ field.label }}：{{ field.value }}{% endfor %}
 """
 

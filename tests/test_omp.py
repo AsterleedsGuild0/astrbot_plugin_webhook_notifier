@@ -92,7 +92,6 @@ class TestNormalizeOmpPayload:
         assert event.provider == "omp"
         assert event.event == "omp.session_stop"
         assert event.title != ""
-        assert event.summary != ""
         assert event.status == "success"
 
     def test_full_payload(self):
@@ -133,6 +132,7 @@ class TestNormalizeOmpPayload:
         event = normalize_omp_payload(body)
         assert event.id == "sess_001:turn_001"
         assert event.title == "会话完成"
+        assert event.summary == ""
         assert event.source["name"] == OMP_SOURCE_NAME
 
         # fields 应包含会话、模型、耗时、输入、消息变化、最后状态
@@ -161,6 +161,28 @@ class TestNormalizeOmpPayload:
         # raw 应包含未映射的字段
         assert event.raw.get("metadata.version") == "0.1.0"
         assert event.raw.get("round.stopHookActive") is True
+
+    def test_summary_does_not_duplicate_session_or_model_fields(self):
+        """summary 不应重复展示 fields 中已有的会话和模型。"""
+        body = {
+            "event": "omp.session_stop",
+            "session": {
+                "name": "Analyze gpt-5.6 models.yml configuration",
+                "model": {"id": "gpt-5.5", "name": "GPT-5.5"},
+            },
+        }
+        event = normalize_omp_payload(body)
+        assert event.summary == ""
+        assert "Analyze gpt-5.6" not in event.summary
+        assert "GPT-5.5" not in event.summary
+        assert any(
+            f["label"] == "会话"
+            and f["value"] == "Analyze gpt-5.6 models.yml configuration"
+            for f in event.fields
+        )
+        assert any(
+            f["label"] == "模型" and f["value"] == "GPT-5.5" for f in event.fields
+        )
 
     def test_session_name_fallback_to_file(self):
         """session.name 缺失时使用 session.file basename。"""

@@ -139,14 +139,6 @@ def normalize_omp_payload(
 
     # 生成摘要
     summary = ""
-    if session_name:
-        summary = f"会话 {session_name}"
-    if session_model:
-        summary = (
-            f"{summary} 模型 {session_model}" if summary else f"模型 {session_model}"
-        )
-    if not summary:
-        summary = "OMP 会话已完成"
 
     # 构建 fields
     fields: list[dict[str, Any]] = []

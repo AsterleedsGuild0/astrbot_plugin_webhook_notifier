@@ -84,7 +84,7 @@ class TestRenderTextDefault:
         """应匹配 FSD 中的 OMP 示例格式。"""
         event = _make_event(
             title="会话完成",
-            summary="会话 Add post-conversation HTTP hook",
+            summary="",
             fields=[
                 {
                     "label": "会话",
@@ -103,6 +103,7 @@ class TestRenderTextDefault:
         lines = [l for l in result.split("\n") if l.strip()]
         assert len(lines) >= 3
         assert "[oh-my-pi]" in lines[0]
+        assert all("模型" not in line or line == "模型：gpt-5.5" for line in lines)
 
 
 class TestRenderTextJinja2:
@@ -155,7 +156,8 @@ class TestRenderTextJinja2:
         expected_template = """\
 [{{ event.source.name }}] {{ event.title }}
 
-{{ event.summary }}{% for field in event.fields %}
+{% if event.summary %}{{ event.summary }}
+{% endif %}{% for field in event.fields %}
 {{ field.label }}：{{ field.value }}{% endfor %}
 """
         assert DEFAULT_TEXT_TEMPLATE == expected_template

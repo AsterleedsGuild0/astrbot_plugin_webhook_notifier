@@ -406,9 +406,9 @@ html_image
   "event": "omp.session_stop",
   "version": 1,
   "id": "session-id:turn-id",
-  "title": "oh-my-pi 会话完成",
+  "title": "会话完成",
   "status": "success",
-  "summary": "会话 Add post-conversation HTTP hook 已完成",
+  "summary": "",
   "source": {
     "name": "oh-my-pi",
     "url": null
@@ -431,7 +431,7 @@ html_image
 
 设计原则：
 
-- 模板优先使用 `title`、`status`、`summary`、`fields`、`links`。
+- 模板优先使用 `title`、`status`、`summary`、`fields`、`links`。`summary` 可为空；默认通知不应在 `summary` 中重复展示已由 `fields` 表达的会话名和模型名。
 - `raw` 仅供高级模板或调试使用。
 - 后续 GitHub、GitLab、OpenCode provider 都转换为同一结构。
 
