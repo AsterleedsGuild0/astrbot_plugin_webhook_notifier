@@ -122,24 +122,8 @@ def server() -> WebhookServer:
 
 
 class TestGetRenderMode:
-    def test_endpoint_mode_priority(self, server: WebhookServer):
-        """endpoint 级 render_mode 应优先于插件默认。"""
-        ep = _make_endpoint(render_mode="html_image")
-        assert server._get_render_mode(ep) == "html_image"
-
-    def test_text_mode(self, server: WebhookServer):
-        """text 模式应正常返回。"""
-        ep = _make_endpoint(render_mode="text")
-        assert server._get_render_mode(ep) == "text"
-
-    def test_fallback_to_plugin_config(self, server: WebhookServer):
-        """endpoint 未设置 render_mode 时回退到插件配置。"""
-        ep = _make_endpoint(render_mode="")
-        # 插件默认是 text
-        assert server._get_render_mode(ep) == "text"
-
-    def test_plugin_html_image_mode(self):
-        """插件默认 html_image 应生效（endpoint 未覆盖时）。"""
+    def test_plugin_html_overrides_endpoint_text(self):
+        """全局 html_image 应覆盖 endpoint text。"""
         config = ServerConfig()
         reg = FakeRegistry()
         srv = WebhookServer(
@@ -149,7 +133,41 @@ class TestGetRenderMode:
             html_render=None,
             plugin_config={"render_mode": "html_image"},
         )
-        ep = _make_endpoint(render_mode="")
+        ep = _make_endpoint(render_mode="text")
+        assert srv._get_render_mode(ep) == "html_image"
+
+    def test_plugin_text_overrides_endpoint_html(self):
+        """全局 text 应覆盖 endpoint html_image。"""
+        config = ServerConfig()
+        reg = FakeRegistry()
+        srv = WebhookServer(
+            config=config,
+            registry=reg,
+            sender=FakeSender(),
+            html_render=None,
+            plugin_config={"render_mode": "text"},
+        )
+        ep = _make_endpoint(render_mode="html_image")
+        assert srv._get_render_mode(ep) == "text"
+
+    def test_plugin_text_default(self, server: WebhookServer):
+        """全局 text 默认值应生效。"""
+        ep = _make_endpoint(render_mode="html_image")
+        # 即使 endpoint 是 html_image，全局 text 优先
+        assert server._get_render_mode(ep) == "text"
+
+    def test_plugin_html_image_runtime(self):
+        """全局 html_image 时即使 endpoint 是 text 也可触发 html_image 分支。"""
+        config = ServerConfig()
+        reg = FakeRegistry()
+        srv = WebhookServer(
+            config=config,
+            registry=reg,
+            sender=FakeSender(),
+            html_render=None,
+            plugin_config={"render_mode": "html_image"},
+        )
+        ep = _make_endpoint(render_mode="text")
         assert srv._get_render_mode(ep) == "html_image"
 
 

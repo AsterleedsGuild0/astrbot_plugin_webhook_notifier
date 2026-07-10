@@ -85,6 +85,8 @@ render_options: |
   }
 ```
 
+MVP 阶段 `render_mode` 是插件全局配置，所有 endpoint/token 都跟随该配置；历史 endpoint 中保存的 `render_mode` 不会覆盖全局设置。
+
 ---
 
 ## Webhook 鉴权建议

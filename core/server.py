@@ -110,10 +110,12 @@ class WebhookServer:
     # ─── 内部辅助方法 ────────────────────────────────────────
 
     def _get_render_mode(self, endpoint: EndpointRecord) -> str:
-        """确定渲染模式：endpoint 级优先，否则插件默认。"""
-        ep_mode = getattr(endpoint, "render_mode", None) or ""
-        if ep_mode and ep_mode in ("text", "html_image"):
-            return ep_mode
+        """确定渲染模式：全局插件配置优先，endpoint 级覆盖暂不生效。
+
+        MVP 阶段 render_mode 以插件全局配置为准。
+        endpoint.render_mode 字段保留兼容但不参与决策。
+        后续版本可放开 endpoint 覆盖能力。
+        """
         pm = str(self._plugin_config.get("render_mode", "text"))
         return pm if pm in ("text", "html_image") else "text"
 

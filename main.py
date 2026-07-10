@@ -91,7 +91,7 @@ class WebhookNotifierPlugin(Star):
                 "请使用 /whn token new 命令创建 managed endpoint。"
             )
 
-        logger.info("[WebhookNotifier] 插件 Milestone 1 已初始化")
+        logger.info("[WebhookNotifier] 插件已初始化")
 
     async def terminate(self) -> None:
         if self._server:

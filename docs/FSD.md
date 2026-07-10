@@ -598,7 +598,7 @@ Provider Adapter
   -> Router: 输出 Normalized Event，解析 target alias
 
 Router
-  -> Renderer: 根据 endpoint/plugin render_mode 选择 text 或 html_image
+  -> Renderer: 根据插件全局 render_mode 选择 text 或 html_image
 
 Renderer
   -> Sender: 构造文本或图片消息链
@@ -1148,12 +1148,14 @@ providers:
 
 `public_base_url` 用于 token 创建或轮换成功后拼接完整 Webhook URL，并通过私聊返回给申请者。若未配置，则状态命令和 token 创建结果应提示管理员补充公网访问地址；插件仍可返回本地监听地址用于内网测试。
 
-配置优先级：
+### 配置优先级（MVP 全局渲染模式）
 
-- endpoint 级 `render_mode` 优先于插件级 `render_mode`。
-- endpoint 级 `template` 优先于 provider 默认模板。
-- endpoint 未配置 `render_mode` 时使用插件级 `render_mode`。
-- endpoint 未配置 `template` 时使用 provider/event 默认模板。
+MVP 阶段 `render_mode` 以插件全局配置为准，全局生效：
+
+- 插件全局 `render_mode` 唯一决定所有 endpoint 的渲染模式。
+- endpoint 级 `render_mode` 字段保留兼容，但**不参与决策**。旧 endpoint 中即使为 `text`，只要全局配置为 `html_image`，也必须走 HTML 图片链路。
+- endpoint 级渲染模式覆盖能力预留为后续扩展，当前 MVP 不生效。
+- `template` 优先级暂未启用（自定义模板加载在后续版本实现）。
 
 骨架迁移：
 

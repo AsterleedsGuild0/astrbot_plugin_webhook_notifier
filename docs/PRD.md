@@ -380,6 +380,8 @@ html_image
 
 `html_image` 使用 HTML 模板渲染图片，但必须启用文本兜底。
 
+MVP 阶段渲染模式由插件全局 `render_mode` 统一决定，所有 endpoint/token 跟随全局配置。endpoint 级渲染覆盖能力保留为后续扩展，避免旧 token 持久化值阻止全局切换。
+
 ### 失败降级
 
 当 HTML 渲染失败时，如果 `fallback_to_text` 为 true，发送纯文本摘要。
@@ -819,6 +821,7 @@ MVP 需要有基础日志：
 - MVP 使用 endpoint/token 绑定目标白名单模型，不提供单全局 token simple mode。
 - MVP 使用 Bearer Token；GitHub/GitLab 等平台签名校验留到对应 provider 阶段。
 - token 哈希使用 HMAC-SHA256，token 轮换后旧 token 立即失效。
+- MVP 渲染模式全局生效；endpoint/token 不单独决定 `render_mode`。
 - 每个 Webhook 请求生成 request id，并贯穿响应、日志、渲染和发送结果。
 - MVP 不要求 OMP payload 提供稳定 `status` 字段；`omp.session_stop` 默认视为 `success`，后续如果 payload 提供状态再映射。
 - 默认通知展示完整 `session.cwd` 和格式化后的 `round.startedAt`，不展示完整 `session.file`、`round.prompt` 与 `round.endedAt`；后续 HTML 模板可自行选择展示或隐藏字段。
