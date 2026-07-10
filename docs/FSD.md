@@ -205,6 +205,12 @@ MVP 支持两类申请：
 - 插件在群消息事件中确认 Bot 在该群、申请者在该群，且申请者是群主或群管理员。
 - 验证通过后，Bot 私聊返回 Webhook URL 和 token。
 
+群聊验证成功后的私聊发送约束：
+
+- 插件必须使用平台实例 ID 构造 UMO，例如 `event.get_platform_id():FriendMessage:<user_id>`，不能使用平台类型名 `event.get_platform_name()` 构造 UMO。AstrBot 的主动发送 API 按平台实例 ID 查找 adapter；使用平台类型名会导致 `cannot find platform for session ...` 并丢失私聊 token。
+- 调用 `Context.send_message()` 后必须检查返回值；返回 `False` 时应视为私聊发送失败，不能向群内提示“Token 已发送”。
+- 如果群聊验证已成功但私聊发送失败，endpoint 已进入 `active` 且 token 明文不可恢复。用户可在私聊中执行 `/whn token rotate <endpoint_name>` 重新生成并获取新 token。
+
 待验证申请格式：
 
 - `request_id` 使用 UUID4 字符串。
