@@ -91,7 +91,13 @@ class TestRenderTextDefault:
                     "value": "Add post-conversation HTTP hook",
                     "short": True,
                 },
-                {"label": "模型", "value": "gpt-5.5", "short": True},
+                {"label": "cwd", "value": "/home/user/project", "short": False},
+                {"label": "模型", "value": "openai/gpt-5.5", "short": True},
+                {
+                    "label": "开始时间",
+                    "value": "2026-07-08T11:59:00.000Z",
+                    "short": True,
+                },
                 {"label": "耗时", "value": "57.7s", "short": True},
                 {"label": "输入", "value": "977 字 / 1 张图", "short": True},
                 {"label": "消息变化", "value": "+2", "short": True},
@@ -103,7 +109,11 @@ class TestRenderTextDefault:
         lines = [l for l in result.split("\n") if l.strip()]
         assert len(lines) >= 3
         assert "[oh-my-pi]" in lines[0]
-        assert all("模型" not in line or line == "模型：gpt-5.5" for line in lines)
+        assert all(
+            "模型" not in line or line == "模型：openai/gpt-5.5" for line in lines
+        )
+        assert "cwd：/home/user/project" in lines
+        assert "开始时间：2026-07-08T11:59:00.000Z" in lines
 
 
 class TestRenderTextJinja2:

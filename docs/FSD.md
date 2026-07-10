@@ -691,7 +691,7 @@ metadata.eventName
 - 字符串，例如 `"gpt-5.5"`。
 - 对象，例如 `{ "provider": "openai", "id": "gpt-5.5", "name": "GPT-5.5" }`。
 
-标准化为通知展示值时，对象形态优先使用 `name`，其次使用 `id`；若 `session.model` 无法得到展示值，再回退到 `round.lastAssistant.model`。
+标准化为通知展示值时，对象形态优先使用 `provider/name`，其次使用 `provider/id`；缺少 provider 时退化为模型名。若 `session.model` 无法得到展示值，再回退到 `round.lastAssistant.model`，并可使用 `round.lastAssistant.provider` 拼接 provider。
 
 ### 字段缺失处理
 
@@ -780,11 +780,15 @@ MVP 中支持读取但未映射为 `fields` 的 OMP 字段，默认保留在 `ra
 以下字段默认映射为通知字段：
 
 - `session.name` 或 `session.file` basename → 会话。
-- `session.model` 或 `round.lastAssistant.model` → 模型。
+- `session.cwd` → cwd。
+- `session.model` 或 `round.lastAssistant.model` → 模型；模型对象优先展示 `provider/name`，其次展示 `provider/id`，缺少 provider 时退化为模型名。
+- `round.startedAt` → 开始时间。
 - `round.durationMs` → 耗时。
 - `round.promptLength` 与 `round.imageCount` → 输入规模。
 - `round.messageCountDelta` → 消息变化。
 - `round.lastAssistant.stopReason` → 最后状态。
+
+`round.endedAt` 默认不作为通知字段展示，仅在 `round.durationMs` 缺失时参与耗时计算。后续 HTML 渲染模板可以按字段自行选择展示或隐藏。
 
 ### Status 取值
 
@@ -805,7 +809,7 @@ OMP `session_stop` 默认使用 `success`。如果后续 payload 明确包含失
 ```json
 {
   "label": "模型",
-  "value": "gpt-5.5",
+  "value": "openai/gpt-5.5",
   "short": true
 }
 ```
@@ -918,7 +922,9 @@ OMP 示例：
 [oh-my-pi] 会话完成
 
 会话：Add post-conversation HTTP hook
-模型：gpt-5.5
+cwd：/home/user/project
+模型：openai/gpt-5.5
+开始时间：2026-07-08T11:59:00.000Z
 耗时：57.7s
 输入：977 字 / 1 张图
 消息变化：+2

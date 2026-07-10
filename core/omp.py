@@ -86,7 +86,6 @@ def normalize_omp_payload(
     session_name = _string_or_empty(session.get("name"))
     session_file = _string_or_empty(session.get("file"))
     session_cwd = _string_or_empty(session.get("cwd"))
-    session_model = _model_display_name(session.get("model"))
     session_id = _string_or_empty(session.get("id"))
 
     # session.name 缺失时使用 session.file basename
@@ -108,7 +107,13 @@ def normalize_omp_payload(
 
     # session.model 缺失时使用 round.lastAssistant.model
     last_assistant = round_data.get("lastAssistant", {}) or {}
-    assistant_model = _model_display_name(last_assistant.get("model"))
+    assistant_provider = _string_or_empty(last_assistant.get("provider"))
+    session_model = _model_display_name(
+        session.get("model"), fallback_provider=assistant_provider
+    )
+    assistant_model = _model_display_name(
+        last_assistant.get("model"), fallback_provider=assistant_provider
+    )
     assistant_stop_reason = _string_or_empty(last_assistant.get("stopReason"))
     assistant_timestamp = _string_or_empty(last_assistant.get("timestamp"))
     assistant_duration_ms = last_assistant.get("durationMs")
@@ -146,8 +151,14 @@ def normalize_omp_payload(
     if session_name:
         fields.append({"label": "会话", "value": session_name, "short": True})
 
+    if session_cwd:
+        fields.append({"label": "cwd", "value": session_cwd, "short": False})
+
     if session_model:
         fields.append({"label": "模型", "value": session_model, "short": True})
+
+    if started_at:
+        fields.append({"label": "开始时间", "value": started_at, "short": True})
 
     # 耗时 - 格式化
     duration_display = _format_duration(duration_ms)
@@ -232,24 +243,36 @@ def _string_or_empty(value: Any) -> str:
     return str(value)
 
 
-def _model_display_name(model: Any) -> str:
+def _model_display_name(model: Any, fallback_provider: str = "") -> str:
     """提取 OMP 模型展示名。
 
     OMP 客户端可能发送字符串模型名，也可能发送形如
     {"provider": "openai", "id": "gpt-5.5", "name": "GPT-5.5"} 的对象。
-    对象按 name -> id 顺序回退，避免把整个 dict 展示到群聊通知中。
+    对象按 name -> id 顺序回退，展示时优先拼接 provider/name。
     """
     if model is None:
         return ""
     if isinstance(model, dict):
+        provider = _string_or_empty(model.get("provider")) or fallback_provider
         name = model.get("name")
         if name:
-            return str(name)
+            return _join_provider_model(provider, str(name))
         model_id = model.get("id")
         if model_id:
-            return str(model_id)
+            return _join_provider_model(provider, str(model_id))
         return ""
-    return str(model)
+    return _join_provider_model(fallback_provider, str(model))
+
+
+def _join_provider_model(provider: str, model: str) -> str:
+    """拼接 provider/model，避免重复拼接。"""
+    provider = provider.strip()
+    model = model.strip()
+    if not model:
+        return ""
+    if not provider or model.startswith(f"{provider}/"):
+        return model
+    return f"{provider}/{model}"
 
 
 def _format_duration(duration_ms: int | None | float) -> str:

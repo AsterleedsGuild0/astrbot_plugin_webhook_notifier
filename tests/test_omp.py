@@ -135,21 +135,28 @@ class TestNormalizeOmpPayload:
         assert event.summary == ""
         assert event.source["name"] == OMP_SOURCE_NAME
 
-        # fields 应包含会话、模型、耗时、输入、消息变化、最后状态
+        # fields 应包含会话、cwd、模型、开始时间、耗时、输入、消息变化、最后状态
         field_labels = {f["label"] for f in event.fields}
         assert "会话" in field_labels
+        assert "cwd" in field_labels
         assert "模型" in field_labels
+        assert "开始时间" in field_labels
         assert "耗时" in field_labels
         assert "输入" in field_labels
         assert "消息变化" in field_labels
         assert "最后状态" in field_labels
+        assert "结束时间" not in field_labels
 
         # 验证字段值
         for field in event.fields:
             if field["label"] == "会话":
                 assert field["value"] == "Add post-conversation HTTP hook"
+            elif field["label"] == "cwd":
+                assert field["value"] == "/home/user/project"
             elif field["label"] == "模型":
-                assert field["value"] == "gpt-5.5"
+                assert field["value"] == "openai/gpt-5.5"
+            elif field["label"] == "开始时间":
+                assert field["value"] == "2026-07-08T11:59:00.000Z"
             elif field["label"] == "耗时":
                 assert "s" in field["value"] or "ms" in field["value"]
             elif field["label"] == "输入":
@@ -168,7 +175,7 @@ class TestNormalizeOmpPayload:
             "event": "omp.session_stop",
             "session": {
                 "name": "Analyze gpt-5.6 models.yml configuration",
-                "model": {"id": "gpt-5.5", "name": "GPT-5.5"},
+                "model": {"provider": "cpa", "id": "gpt-5.5", "name": "GPT-5.5"},
             },
         }
         event = normalize_omp_payload(body)
@@ -181,7 +188,7 @@ class TestNormalizeOmpPayload:
             for f in event.fields
         )
         assert any(
-            f["label"] == "模型" and f["value"] == "GPT-5.5" for f in event.fields
+            f["label"] == "模型" and f["value"] == "cpa/GPT-5.5" for f in event.fields
         )
 
     def test_session_name_fallback_to_file(self):
@@ -212,8 +219,8 @@ class TestNormalizeOmpPayload:
         if model_fields:
             assert model_fields[0]["value"] == "claude-4"
 
-    def test_session_model_object_uses_name(self):
-        """session.model 为对象时优先展示 name。"""
+    def test_session_model_object_uses_provider_and_name(self):
+        """session.model 为对象时优先展示 provider/name。"""
         body = {
             "session": {
                 "id": "sess_model_object",
@@ -226,10 +233,10 @@ class TestNormalizeOmpPayload:
         }
         event = normalize_omp_payload(body)
         model_fields = [f for f in event.fields if f["label"] == "模型"]
-        assert model_fields[0]["value"] == "GPT-5.5"
+        assert model_fields[0]["value"] == "openai/GPT-5.5"
 
-    def test_session_model_object_fallback_to_id(self):
-        """session.model 对象缺少 name 时使用 id。"""
+    def test_session_model_object_fallback_to_provider_and_id(self):
+        """session.model 对象缺少 name 时使用 provider/id。"""
         body = {
             "session": {
                 "id": "sess_model_object",
@@ -241,7 +248,22 @@ class TestNormalizeOmpPayload:
         }
         event = normalize_omp_payload(body)
         model_fields = [f for f in event.fields if f["label"] == "模型"]
-        assert model_fields[0]["value"] == "gpt-5.5"
+        assert model_fields[0]["value"] == "openai/gpt-5.5"
+
+    def test_session_model_object_without_provider_uses_name(self):
+        """session.model 对象缺少 provider 时仍展示 name。"""
+        body = {
+            "session": {
+                "id": "sess_model_object",
+                "model": {
+                    "id": "gpt-5.5",
+                    "name": "GPT-5.5",
+                },
+            },
+        }
+        event = normalize_omp_payload(body)
+        model_fields = [f for f in event.fields if f["label"] == "模型"]
+        assert model_fields[0]["value"] == "GPT-5.5"
 
     def test_turn_id_zero_is_preserved(self):
         """round.turnId 为 0 时应保留并参与 event.id。"""
