@@ -273,6 +273,34 @@ class TestRenderHtml:
         assert "secret" not in html
         assert "should-be-hidden" not in html
 
+    def test_html_template_escapes_content(self):
+        """HTML 卡片内容应转义，避免字段值破坏卡片结构。"""
+        event = _make_event(
+            title="<b>标题</b>",
+            summary="<script>alert(1)</script>",
+            fields=[{"label": "路径 <cwd>", "value": "/tmp/<project>"}],
+        )
+        html = render_html_default(event)
+        assert "&lt;b&gt;标题&lt;/b&gt;" in html
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+        assert "路径 &lt;cwd&gt;" in html
+        assert "/tmp/&lt;project&gt;" in html
+        assert "<script>alert(1)</script>" not in html
+
+    def test_html_template_keeps_falsey_field_values(self):
+        """0 和 False 等字段值也应展示，不能被默认值吞掉。"""
+        event = _make_event(
+            fields=[
+                {"label": "退出码", "value": 0},
+                {"label": "是否跳过", "value": False},
+            ],
+        )
+        html = render_html_default(event)
+        assert "退出码" in html
+        assert ">0</div>" in html
+        assert "是否跳过" in html
+        assert "False" in html
+
     def test_sandbox_blocks_dangerous(self):
         """sandbox 应阻断危险操作。"""
         dangerous_template = "<html><body>{{ event.__class__.__mro__ }}</body></html>"

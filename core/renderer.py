@@ -262,7 +262,15 @@ DEFAULT_HTML_TEMPLATE = """\
   {% set title = event.title|default('Webhook 通知', true) %}
   {% set source = event.source|default('AstrBot', true) %}
   {% set status = event.status|default('info', true)|string %}
-  {% set status_key = status|lower|replace(' ', '-')|replace('_', '-') %}
+  {% set status_text = status|lower %}
+  {% set status_tone = 'default' %}
+  {% if status_text in ['success', 'ok', 'succeeded', '成功', '完成', '已完成'] %}
+    {% set status_tone = 'success' %}
+  {% elif status_text in ['error', 'failed', 'fail', '错误', '失败', '异常'] %}
+    {% set status_tone = 'error' %}
+  {% elif status_text in ['warning', 'warn', '警告', '告警'] %}
+    {% set status_tone = 'warning' %}
+  {% endif %}
   {% set summary = event.summary|default('', true) %}
   {% set generated_time = event.generated_at|default('', true) %}
   {% set event_time = event.event_time|default(event.emitted_at|default('', true), true) %}
@@ -272,17 +280,17 @@ DEFAULT_HTML_TEMPLATE = """\
     <div class="card-inner">
       <div class="topbar">
         <div class="source-wrap">
-          <span class="eyebrow">来源：{{ source }}</span>
+          <span class="eyebrow">来源：{{ source|e }}</span>
         </div>
         <div class="status-wrap">
-          <span class="status-badge status-{{ status_key }}">{{ status }}</span>
+          <span class="status-badge status-{{ status_tone }}">{{ status|e }}</span>
         </div>
       </div>
 
-      <h1>{{ title }}</h1>
+      <h1>{{ title|e }}</h1>
 
       {% if summary|string|trim %}
-      <div class="summary">{{ summary }}</div>
+      <div class="summary">{{ summary|e }}</div>
       {% endif %}
 
       <div class="section-label">字段</div>
@@ -293,24 +301,28 @@ DEFAULT_HTML_TEMPLATE = """\
             {% for field_name, field_value in event.fields.items() %}
               {% set safe_name = field_name|string %}
               {% set safe_key = safe_name|lower %}
+              {% set safe_value = field_value if field_value is not none else '' %}
               {% if 'token' not in safe_key and 'raw' not in safe_key and 'prompt' not in safe_key %}
                 {% set visible_count.value = visible_count.value + 1 %}
         <li class="field">
-          <div class="field-name">{{ safe_name }}</div>
-          <div class="field-value">{{ field_value }}</div>
+          <div class="field-name">{{ safe_name|e }}</div>
+          <div class="field-value">{{ safe_value|e }}</div>
         </li>
               {% endif %}
             {% endfor %}
           {% else %}
             {% for field in event.fields %}
               {% set safe_name = field.label|default(field.name|default(field.key|default('字段', true), true), true)|string %}
-              {% set safe_value = field.value|default('', true) %}
+              {% set safe_value = field.value|default('') %}
+              {% if safe_value is none %}
+                {% set safe_value = '' %}
+              {% endif %}
               {% set safe_key = safe_name|lower %}
               {% if 'token' not in safe_key and 'raw' not in safe_key and 'prompt' not in safe_key %}
                 {% set visible_count.value = visible_count.value + 1 %}
         <li class="field">
-          <div class="field-name">{{ safe_name }}</div>
-          <div class="field-value">{{ safe_value }}</div>
+          <div class="field-name">{{ safe_name|e }}</div>
+          <div class="field-value">{{ safe_value|e }}</div>
         </li>
               {% endif %}
             {% endfor %}
@@ -322,8 +334,8 @@ DEFAULT_HTML_TEMPLATE = """\
       </ul>
 
       <div class="meta">
-        <div class="meta-item"><span class="meta-label">生成时间：</span>{{ generated_time|default('未提供', true) }}</div>
-        <div class="meta-item"><span class="meta-label">事件时间：</span>{{ event_time|default('未提供', true) }}</div>
+        <div class="meta-item"><span class="meta-label">生成时间：</span>{{ generated_time|default('未提供', true)|e }}</div>
+        <div class="meta-item"><span class="meta-label">事件时间：</span>{{ event_time|default('未提供', true)|e }}</div>
       </div>
     </div>
   </main>
