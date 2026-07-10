@@ -365,8 +365,8 @@ class WebhookNotifierPlugin(Star):
             )
 
         # 构造群聊 UMO
-        platform_name = event.get_platform_name()
-        group_umo = f"{platform_name}:GroupMessage:{verify_group_id}"
+        platform_id = event.get_platform_id()
+        group_umo = f"{platform_id}:GroupMessage:{verify_group_id}"
 
         pending_info = dict(registry._pending.get(request_id, {}))
         result_status, result_msg, token = registry.verify_group_endpoint(
@@ -391,7 +391,7 @@ class WebhookNotifierPlugin(Star):
 
             # 仅在私聊返回 token。verify 命令发生在群聊事件中，不能使用
             # event.unified_msg_origin，否则 token 明文会被发送到群内。
-            private_umo = f"{platform_name}:FriendMessage:{verify_user_id}"
+            private_umo = f"{platform_id}:FriendMessage:{verify_user_id}"
             private_msg = (
                 f"✅ 群聊 endpoint 验证成功！\n\n"
                 f"名称: {endpoint_name}\n"
@@ -404,9 +404,18 @@ class WebhookNotifierPlugin(Star):
             )
             # 尝试私聊发送 token
             try:
-                await self.context.send_message(
+                sent = await self.context.send_message(
                     private_umo, MessageChain([Plain(private_msg)]).use_t2i(False)
                 )
+                if not sent:
+                    logger.error(
+                        f"[WebhookNotifier] 私聊发送 token 失败: 找不到平台会话 {private_umo}"
+                    )
+                    return (
+                        "❌ 验证成功但私聊发送 Token 失败：无法找到私聊会话。"
+                        "请先私聊 Bot 任意消息后，再使用 /whn token rotate "
+                        f"{endpoint_name} 重新生成 Token。"
+                    )
                 logger.info(
                     f"[WebhookNotifier] 群聊验证成功，Token 已私聊发送给用户 {verify_user_id}"
                 )
