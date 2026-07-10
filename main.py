@@ -241,11 +241,11 @@ class WebhookNotifierPlugin(Star):
         endpoint_path = build_endpoint_path(owner_id, endpoint_name)
 
         # 检查是否已存在
-        if registry.get_by_owner_name(owner_id, endpoint_name):
+        if not registry.is_owner_name_available(owner_id, endpoint_name):
             return (
                 f"❌ 你已经创建过名为 '{endpoint_name}' 的 endpoint，请使用其他名称。"
             )
-        if registry.get_by_path(endpoint_path):
+        if not registry.is_path_available(endpoint_path):
             return f"❌ endpoint 路径 '{endpoint_path}' 已存在，请使用其他名称。"
 
         try:
@@ -299,11 +299,11 @@ class WebhookNotifierPlugin(Star):
         endpoint_name = normalize_endpoint_name(name_param or f"group_{group_id}")
         endpoint_path = build_endpoint_path(owner_id, endpoint_name)
 
-        if registry.get_by_owner_name(owner_id, endpoint_name):
+        if not registry.is_owner_name_available(owner_id, endpoint_name):
             return (
                 f"❌ 你已经创建过名为 '{endpoint_name}' 的 endpoint，请使用其他名称。"
             )
-        if registry.get_by_path(endpoint_path):
+        if not registry.is_path_available(endpoint_path):
             return f"❌ endpoint 路径 '{endpoint_path}' 已存在，请使用其他名称。"
 
         try:

@@ -317,6 +317,7 @@ MVP 选择 endpoint/token 绑定目标白名单，而不是单全局 token。
 - 最小权限：token 只能投递到绑定的私聊或群聊目标。
 - 泄露隔离：某个用户 token 泄露时，只影响该 endpoint 的目标白名单。
 - 独立撤销：可以单独 revoke 或 rotate 某个用户的 endpoint token。
+- 名称复用：已撤销或已过期的 endpoint 不应继续占用用户命名空间；用户可以用相同名称重新创建 endpoint。
 - 可审计：每次请求都能关联 endpoint、owner、provider 和目标。
 - 防越权：payload 即使携带 target alias，也只能选择白名单内目标。
 

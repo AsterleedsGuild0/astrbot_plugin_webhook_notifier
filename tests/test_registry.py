@@ -378,6 +378,36 @@ class TestRegistryRevoke:
         assert success is False
         assert "不存在" in msg
 
+    def test_revoked_name_and_path_can_be_reused(self, registry):
+        record1, token1 = registry.create_private_endpoint(
+            name="reuse_after_revoke",
+            path=build_endpoint_path("user_reuse", "reuse_after_revoke"),
+            owner_user_id="user_reuse",
+            target_umo="aiocqhttp:FriendMessage:10180",
+        )
+        assert (
+            registry.is_owner_name_available("user_reuse", "reuse_after_revoke")
+            is False
+        )
+        assert registry.is_path_available(record1.path) is False
+
+        success, msg = registry.revoke_endpoint("reuse_after_revoke", "user_reuse")
+        assert success is True
+        assert (
+            registry.is_owner_name_available("user_reuse", "reuse_after_revoke") is True
+        )
+        assert registry.is_path_available(record1.path) is True
+
+        record2, token2 = registry.create_private_endpoint(
+            name="reuse_after_revoke",
+            path=record1.path,
+            owner_user_id="user_reuse",
+            target_umo="aiocqhttp:FriendMessage:10180",
+        )
+        assert record2.status == EndpointStatus.ACTIVE.value
+        assert record2.revoked_at is None
+        assert token2 != token1
+
 
 class TestRegistryRotate:
     def test_rotate_active(self, registry):

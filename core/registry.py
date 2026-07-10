@@ -23,6 +23,7 @@ from .security import (
 
 REGISTRY_FILENAME = "webhook_tokens.json"
 PENDING_EXPIRY_SECONDS = 600  # 10 分钟
+TERMINAL_STATUSES = {EndpointStatus.REVOKED.value, EndpointStatus.EXPIRED.value}
 
 
 def normalize_endpoint_name(name: str, fallback: str = "default") -> str:
@@ -324,6 +325,16 @@ class EndpointRegistry:
             if rec.path == path:
                 return rec
         return None
+
+    def is_owner_name_available(self, owner_user_id: str, name: str) -> bool:
+        """检查用户命名空间内的 endpoint 名称是否可用于创建。"""
+        record = self.get_by_owner_name(owner_user_id, name)
+        return record is None or record.status in TERMINAL_STATUSES
+
+    def is_path_available(self, path: str) -> bool:
+        """检查 endpoint path 是否可用于创建。"""
+        record = self.get_by_path(path)
+        return record is None or record.status in TERMINAL_STATUSES
 
     def list_by_owner(self, owner_user_id: str) -> list[EndpointRecord]:
         return [

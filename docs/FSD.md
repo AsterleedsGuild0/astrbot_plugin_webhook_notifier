@@ -224,6 +224,7 @@ Token 生命周期：
 - 创建：生成 token 明文、保存哈希、私聊返回明文。
 - 轮换：生成新 token 并替换 token hash，旧 token 立即失效，无宽限期。
 - 撤销：使用软删除，设置 `revoked_at`；默认不硬删除记录，便于审计。
+- 同名重建：`revoked` / `expired` 终态记录不占用 `owner_user_id + endpoint_name` 命名空间，也不占用对应 path；用户可用相同名称重新创建 endpoint。若实现选择覆盖同名终态记录，MVP 不保证同名重建前的完整历史审计。
 - 列表：普通 `/whn token list` 默认只展示 active 和 pending_verification endpoint 的 name、path、provider、target aliases、render mode、created_at，不展示 token 明文和完整 token hash；revoked/expired 记录保留在持久化数据中用于审计，但不在默认列表中展示。
 - 已撤销 endpoint 的请求返回 403 `endpoint_revoked`。
 
@@ -250,6 +251,7 @@ Endpoint / token 申请记录使用以下状态：
 - 群聊 token 必须先进入 `pending_verification`，验证通过后进入 `active`。
 - `pending_verification` 记录不得接受 Webhook 请求。
 - `expired` 和 `revoked` 记录不得接受 Webhook 请求。
+- `expired` 和 `revoked` 记录不得阻止同 owner 使用相同 endpoint name 和 path 重新创建 endpoint。
 - `rotate` 只允许作用于 `active` endpoint，轮换后仍保持 `active`，旧 token 立即失效。
 - `revoke` 可作用于 `pending_verification` 或 `active` 记录。
 
