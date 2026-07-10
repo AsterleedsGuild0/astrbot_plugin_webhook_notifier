@@ -330,6 +330,22 @@ class EndpointRegistry:
             rec for rec in self._records.values() if rec.owner_user_id == owner_user_id
         ]
 
+    def list_visible_by_owner(self, owner_user_id: str) -> list[EndpointRecord]:
+        """列出用户默认可见的 endpoint。
+
+        revoked/expired 记录仍持久化用于审计和安全排查，但不在普通用户的
+        token list 中展示，避免撤销后仍看起来可继续使用。
+        """
+        visible_states = {
+            EndpointStatus.ACTIVE.value,
+            EndpointStatus.PENDING_VERIFICATION.value,
+        }
+        return [
+            rec
+            for rec in self._records.values()
+            if rec.owner_user_id == owner_user_id and rec.status in visible_states
+        ]
+
     def count_active(self) -> int:
         return sum(
             1

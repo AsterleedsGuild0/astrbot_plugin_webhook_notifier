@@ -150,7 +150,7 @@ class WebhookNotifierPlugin(Star):
 
         sub = parts[0].lower()
 
-        if sub in ("status", "状态", "查看状态"):
+        if sub in ("status", "状态"):
             return self._build_status_text()
         if sub == "token":
             return await self._handle_token_command(event, parts[1:])
@@ -160,7 +160,6 @@ class WebhookNotifierPlugin(Star):
                 f"可用命令：\n"
                 f"  /whn                   查看状态\n"
                 f"  /whn status            查看状态\n"
-                f"  /whn 查看状态          查看状态\n"
                 f"  /whn token new private [名称]  创建私聊 endpoint\n"
                 f"  /whn token new group <群号> [名称]  创建群聊 endpoint\n"
                 f"  /whn token verify <request_id> <code>  验证群聊 endpoint\n"
@@ -430,10 +429,14 @@ class WebhookNotifierPlugin(Star):
             return "❌ 查看 endpoint 列表请在私聊中执行。"
 
         owner_id = event.get_sender_id()
-        records = registry.list_by_owner(owner_id)
+        records = registry.list_visible_by_owner(owner_id)
 
         if not records:
-            return "📋 您还没有创建任何 endpoint。\n使用 /whn token new private [名称] 创建。"
+            return (
+                "📋 您当前没有可用的 endpoint。\n"
+                "已撤销或已过期的 endpoint 不在默认列表中显示。\n"
+                "使用 /whn token new private [名称] 创建。"
+            )
 
         lines = ["📋 您的 Endpoint 列表:\n"]
         for rec in records:

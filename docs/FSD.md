@@ -218,7 +218,7 @@ Token 生命周期：
 - 创建：生成 token 明文、保存哈希、私聊返回明文。
 - 轮换：生成新 token 并替换 token hash，旧 token 立即失效，无宽限期。
 - 撤销：使用软删除，设置 `revoked_at`；默认不硬删除记录，便于审计。
-- 列表：只展示 endpoint name、path、provider、target aliases、render mode、created_at、revoked_at，不展示 token 明文和完整 token hash。
+- 列表：普通 `/whn token list` 默认只展示 active 和 pending_verification endpoint 的 name、path、provider、target aliases、render mode、created_at，不展示 token 明文和完整 token hash；revoked/expired 记录保留在持久化数据中用于审计，但不在默认列表中展示。
 - 已撤销 endpoint 的请求返回 403 `endpoint_revoked`。
 
 群管理员识别基于目标群的群消息事件：在群消息事件中读取 message/group 对象上的 `group_owner`、`owner`、`owner_id`、`group_admins`、`admins`、`admin_ids` 等字段，并结合 `event.is_admin()`。

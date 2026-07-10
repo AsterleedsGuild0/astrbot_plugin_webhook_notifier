@@ -287,6 +287,28 @@ class TestRegistryQuery:
         names = {r.name for r in records}
         assert names == {"owner_test_1", "owner_test_2"}
 
+    def test_list_visible_by_owner_hides_terminal_records(self, registry):
+        registry.create_private_endpoint(
+            name="visible_active",
+            path="visible_active",
+            owner_user_id="user_visible",
+            target_umo="aiocqhttp:FriendMessage:10020",
+        )
+        registry.create_private_endpoint(
+            name="hidden_revoked",
+            path="hidden_revoked",
+            owner_user_id="user_visible",
+            target_umo="aiocqhttp:FriendMessage:10021",
+        )
+        registry.revoke_endpoint("hidden_revoked", "user_visible")
+
+        visible = registry.list_visible_by_owner("user_visible")
+        assert {r.name for r in visible} == {"visible_active"}
+        assert {r.name for r in registry.list_by_owner("user_visible")} == {
+            "visible_active",
+            "hidden_revoked",
+        }
+
     def test_count_active(self, registry):
         registry.create_private_endpoint(
             name="active_1",
