@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from core.models import NormalizedEvent
 from core.renderer import DEFAULT_TEXT_TEMPLATE, render_text, render_text_default
 
@@ -178,9 +180,11 @@ class TestRenderTextJinja2:
 
 from core.renderer import (
     DEFAULT_HTML_TEMPLATE,
+    _expected_canvas_right,
     render_html,
     render_html_default,
     render_html_data,
+    trim_viewport_whitespace,
     validate_image_result,
 )
 
@@ -327,14 +331,20 @@ class TestRenderHtml:
         assert context["event"]["event_time"] == context["event"]["emitted_at"]
 
     def test_default_template_contains_styles(self):
-        """默认 HTML 模板应包含 macOS 浅色卡片样式。"""
+        """默认 HTML 模板应包含 macOS 浅色卡片样式及 shrinkwrap CSS。"""
         assert "box-sizing" in DEFAULT_HTML_TEMPLATE
         assert "-apple-system" in DEFAULT_HTML_TEMPLATE
         assert "PingFang SC" in DEFAULT_HTML_TEMPLATE
         assert ".status-badge" in DEFAULT_HTML_TEMPLATE
         assert "background: #f5f5f7" in DEFAULT_HTML_TEMPLATE
-        assert "width: 100vw" in DEFAULT_HTML_TEMPLATE
+        assert "width: fit-content" in DEFAULT_HTML_TEMPLATE
         assert "min-width: 0" in DEFAULT_HTML_TEMPLATE
+        assert "min-height: 0" in DEFAULT_HTML_TEMPLATE
+        assert "height: auto" in DEFAULT_HTML_TEMPLATE
+        assert "width: 828px" in DEFAULT_HTML_TEMPLATE
+        assert "max-width: 828px" in DEFAULT_HTML_TEMPLATE
+        assert "width: 100vw" not in DEFAULT_HTML_TEMPLATE
+        assert "min-height: 100%" not in DEFAULT_HTML_TEMPLATE
         assert "justify-content: center" not in DEFAULT_HTML_TEMPLATE
         assert "#0a0f1c" not in DEFAULT_HTML_TEMPLATE
 
@@ -420,3 +430,158 @@ class TestValidateImageResult:
             assert False
         except TypeError:
             pass
+
+
+# ─── 视口空白裁切测试 ────────────────────────────────────
+
+
+class TestTrimViewportWhitespace:
+    def test_expected_canvas_right_when_viewport_width_honored(self):
+        """viewport_width 生效时，按 860px 视口推断右边界。"""
+        # 860 * 1.3 = 1118，内容右边界约 (860 - 16) * 1.3
+        assert _expected_canvas_right(1118, 860) == int(844 * 1.3)
+
+    def test_expected_canvas_right_when_default_viewport_used(self):
+        """旧 T2I 忽略 viewport_width 时，按 1280px 默认视口兜底推断。"""
+        # 1280 * 1.3 = 1664，仍应裁到 860px 画布附近，而不是保留 1280px 视口。
+        assert _expected_canvas_right(1664, 860) == int(844 * 1.3)
+
+    def test_url_passthrough(self):
+        """URL 字符串应原样返回（不处理）。"""
+        url = "https://example.com/img.png"
+        assert trim_viewport_whitespace(url) is url
+
+    def test_bytes_passthrough(self):
+        """bytes 应原样返回。"""
+        data = b"dummy bytes"
+        assert trim_viewport_whitespace(data) is data
+
+    def test_none_passthrough(self):
+        """None 应原样返回。"""
+        assert trim_viewport_whitespace(None) is None
+
+    def test_local_file_cropped(self):
+        """本地 PNG 截图，右侧/底部为纯背景，调用后尺寸应缩小。"""
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            pytest.skip("PIL not available")
+
+        import tempfile
+
+        # 构造一张 500x400 的图片：
+        # - 白色内容区 0-250 x 0-300，其余为灰色背景
+        # - canvas_width=300 模拟视口宽度
+        width, height = 500, 400
+        img = Image.new("RGB", (width, height), (200, 200, 200))  # 灰色背景
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, 0, 250, 300], fill=(255, 255, 255))  # 白色内容区
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            img.save(tmp_path, format="PNG")
+
+        try:
+            result = trim_viewport_whitespace(tmp_path, canvas_width=300)
+            assert result == tmp_path  # 相同路径
+
+            # 验证已裁切
+            with Image.open(tmp_path) as cropped:
+                assert cropped.width < width, "右侧空白应被裁切"
+                assert cropped.height < height, "底部空白应被裁切"
+                # 内容区不应被过度裁切
+                assert cropped.width >= 250
+                assert cropped.height >= 300
+        finally:
+            import os as _os
+
+            if _os.path.exists(tmp_path):
+                _os.remove(tmp_path)
+
+    def test_different_formats_jpeg(self):
+        """JPEG 格式应正确处理。"""
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            pytest.skip("PIL not available")
+
+        import tempfile
+
+        width, height = 400, 350
+        img = Image.new("RGB", (width, height), (200, 200, 200))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, 0, 200, 250], fill=(255, 255, 255))
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            tmp_path = f.name
+            img.save(tmp_path, format="JPEG", quality=95)
+
+        try:
+            result = trim_viewport_whitespace(tmp_path, canvas_width=250)
+            assert result == tmp_path
+
+            with Image.open(tmp_path) as cropped:
+                assert cropped.width < width
+                assert cropped.height < height
+        finally:
+            import os as _os
+
+            if _os.path.exists(tmp_path):
+                _os.remove(tmp_path)
+
+    def test_no_crop_needed(self):
+        """内容已铺满的图片不应被裁切。"""
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            pytest.skip("PIL not available")
+
+        import tempfile
+
+        width, height = 300, 200
+        img = Image.new("RGB", (width, height), (255, 255, 255))  # 全部白色
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            img.save(tmp_path, format="PNG")
+
+        try:
+            result = trim_viewport_whitespace(tmp_path, canvas_width=860)
+            assert result == tmp_path
+
+            # 不应裁切
+            with Image.open(tmp_path) as reloaded:
+                assert reloaded.size == (width, height)
+        finally:
+            import os as _os
+
+            if _os.path.exists(tmp_path):
+                _os.remove(tmp_path)
+
+    def test_small_image_skipped(self):
+        """过小的图片应跳过裁切。"""
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("PIL not available")
+
+        import tempfile
+
+        img = Image.new("RGB", (100, 80), (255, 255, 255))
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            img.save(tmp_path, format="PNG")
+
+        try:
+            # 尺寸 < 360x240，不应裁切
+            result = trim_viewport_whitespace(tmp_path, canvas_width=200)
+            assert result == tmp_path
+
+            with Image.open(tmp_path) as reloaded:
+                assert reloaded.size == (100, 80)
+        finally:
+            import os as _os
+
+            if _os.path.exists(tmp_path):
+                _os.remove(tmp_path)

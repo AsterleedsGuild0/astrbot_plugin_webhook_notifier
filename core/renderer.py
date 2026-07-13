@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import struct
 from datetime import datetime, timezone
 from typing import Any
@@ -8,6 +9,9 @@ from jinja2 import BaseLoader, Environment
 from jinja2.sandbox import SandboxedEnvironment
 
 from .models import NormalizedEvent
+
+DEFAULT_FALLBACK_VIEWPORT_WIDTH = 1280
+DEVICE_SCALE_CANDIDATES = (1.0, 1.3, 1.8)
 
 # 默认文本模板（与 FSD 一致）
 DEFAULT_TEXT_TEMPLATE = """\
@@ -36,9 +40,10 @@ DEFAULT_HTML_TEMPLATE = """\
     body {
       margin: 0;
       padding: 0;
-      width: 100vw;
+      width: fit-content;
       min-width: 0;
-      min-height: 100%;
+      min-height: 0;
+      height: auto;
       color: #1d1d1f;
       background: #f5f5f7;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -52,7 +57,8 @@ DEFAULT_HTML_TEMPLATE = """\
 
     .card {
       position: relative;
-      width: 100%;
+      width: 828px;
+      max-width: 828px;
       overflow: hidden;
       border: 1px solid rgba(0, 0, 0, 0.10);
       border-radius: 22px;
@@ -618,6 +624,213 @@ def _validate_image_bytes(data: bytes, is_header: bool = False) -> bool:
         return True
 
     raise ValueError(f"不支持的图片格式: magic={data[:8].hex()} (支持 PNG/JPEG/WebP)")
+
+
+def trim_viewport_whitespace(
+    image_result: Any,
+    canvas_width: int = 860,
+) -> Any:
+    """裁切 HTML 卡片截图视口中右侧/底部多余背景空白。
+
+    仅处理本地文件路径；URL、base64、data URL、bytes 原样返回。
+    修改在原文件上就地执行（保存到临时文件后 os.replace）。
+
+    Args:
+        image_result: html_render 返回的图片结果。
+        canvas_width: 渲染时使用的视口宽度（CSS 像素），用于推算缩放比。
+
+    Returns:
+        原 image_result（就地修改或原样返回）。
+    """
+    if not (isinstance(image_result, str) and os.path.isfile(image_result)):
+        return image_result
+
+    temp_path = f"{image_result}.trim"
+    try:
+        from PIL import Image
+
+        with Image.open(image_result) as img:
+            if img.width < 360 or img.height < 240:
+                return image_result
+
+            crop_box = _detect_trim_box(img, canvas_width)
+            if crop_box is None:
+                return image_result
+
+            cropped = img.crop(crop_box)
+            fmt = (img.format or "PNG").upper()
+            save_kwargs: dict[str, Any] = {}
+            if fmt in ("JPEG", "JPG"):
+                fmt = "JPEG"
+                cropped = cropped.convert("RGB")
+                save_kwargs = {"quality": 95, "optimize": True}
+            elif fmt == "PNG":
+                save_kwargs = {"optimize": True}
+
+            cropped.save(temp_path, format=fmt, **save_kwargs)
+
+        # 验证并替换原文件（最小尺寸 256 bytes，有效 PNG/JPEG 头部即视为有效）
+        if (
+            os.path.exists(temp_path)
+            and os.path.getsize(temp_path) > 256
+            and _validate_temp_image(temp_path)
+        ):
+            os.replace(temp_path, image_result)
+            _log_debug(f"trim_viewport_whitespace: 已裁切为 {crop_box}")
+        elif os.path.exists(temp_path):
+            os.remove(temp_path)
+    except ImportError:
+        # PIL 不可用，静默跳过
+        pass
+    except Exception as e:
+        # 清理临时文件
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        _log_debug(f"trim_viewport_whitespace 跳过: {e}")
+
+    return image_result
+
+
+def _detect_trim_box(
+    image: Any,
+    canvas_width: int,
+) -> tuple[int, int, int, int] | None:
+    """识别 HTML 卡片截图中左上对齐卡片内容的有效区域。
+
+    右侧按已知画布宽度推算卡片右边缘（view - 右 padding）；
+    底部使用像素差异检测。参考 astrbot_plugin_bilibili 的 _detect_card_crop_box。
+
+    Args:
+        image: PIL Image 对象。
+        canvas_width: 渲染时的浏览器视口 CSS 宽度（如 860）。
+
+    Returns:
+        (left, top, right, bottom) 裁剪框，无需处理时返回 None。
+    """
+    width, height = image.size
+
+    # --- 右侧裁剪 ---
+    # 卡片设计宽度固定为 828px，在 860px 视口中两侧各 16px padding。
+    # 若 T2I 尊重 viewport_width，截图宽度约为 canvas_width * scale；
+    # 若旧服务忽略 viewport_width，则常见截图宽度约为 1280 * scale。
+    expected_right = _expected_canvas_right(width, canvas_width)
+
+    crop_right = width
+    if width - expected_right > max(24, int(width * 0.03)):
+        right_margin = max(18, int(width * 0.018))
+        crop_right = min(width, expected_right + right_margin)
+
+    # --- 底部裁剪（像素差异检测） ---
+    rgb = image.convert("RGB")
+    bottom = _find_content_limit(rgb, axis="y")
+
+    crop_bottom = height
+    if bottom is not None:
+        bottom_margin = max(18, int(height * 0.018))
+        candidate = min(height, bottom + bottom_margin)
+        if height - candidate > max(24, int(height * 0.03)):
+            crop_bottom = candidate
+
+    if crop_right == width and crop_bottom == height:
+        return None
+    return (0, 0, crop_right, crop_bottom)
+
+
+def _expected_canvas_right(image_width: int, canvas_width: int) -> int:
+    """根据截图宽度推断画布右边界，兼容 viewport_width 生效/未生效两类情况。"""
+    content_right_css = max(canvas_width - 16, 1)
+    viewport_width = max(canvas_width, 1)
+
+    configured_scale = image_width / viewport_width
+    if _is_known_device_scale(configured_scale):
+        return int(content_right_css * configured_scale)
+
+    fallback_scale = image_width / DEFAULT_FALLBACK_VIEWPORT_WIDTH
+    if _is_known_device_scale(fallback_scale):
+        return int(content_right_css * fallback_scale)
+
+    return int(content_right_css * configured_scale)
+
+
+def _is_known_device_scale(scale: float) -> bool:
+    return any(abs(scale - candidate) <= 0.08 for candidate in DEVICE_SCALE_CANDIDATES)
+
+
+def _find_content_limit(image: Any, axis: str) -> int | None:
+    """在指定轴上找到最后一个明显不是纯背景的边缘位置。
+
+    通过采样相邻像素通道差异来定位内容边界。
+    axis='x' 从右向左找右侧边界，axis='y' 从下向上找底部边界。
+    """
+    width, height = image.size
+    primary = width if axis == "x" else height
+    secondary = height if axis == "x" else width
+    primary_step = max(1, primary // 900)
+    secondary_step = max(2, secondary // 280)
+
+    scores: list[tuple[int, float]] = []
+    for pos in range(0, primary - primary_step, primary_step):
+        total = 0.0
+        count = 0
+        for cross in range(0, secondary, secondary_step):
+            if axis == "x":
+                px1 = image.getpixel((pos, cross))
+                px2 = image.getpixel((pos + primary_step, cross))
+            else:
+                px1 = image.getpixel((cross, pos))
+                px2 = image.getpixel((cross, pos + primary_step))
+            total += _pixel_distance(px1, px2)
+            count += 1
+        if count:
+            scores.append((pos, total / count))
+
+    if not scores:
+        return None
+
+    # 取尾部 18% 的中位数作为背景噪声基线
+    tail_start = int(len(scores) * 0.82)
+    tail_scores = sorted(score for _, score in scores[tail_start:]) or [0.0]
+    background_score = tail_scores[len(tail_scores) // 2]
+    threshold = max(5.0, background_score * 3.2 + 1.5)
+
+    for pos, score in reversed(scores):
+        if score >= threshold:
+            return pos + primary_step
+    return None
+
+
+def _pixel_distance(px1: Any, px2: Any) -> float:
+    """计算两个 RGB 像素的平均通道差。"""
+    return (
+        abs(int(px1[0]) - int(px2[0]))
+        + abs(int(px1[1]) - int(px2[1]))
+        + abs(int(px1[2]) - int(px2[2]))
+    ) / 3
+
+
+def _validate_temp_image(img_path: str) -> bool:
+    """使用 PIL verify 验证临时图片文件有效。"""
+    try:
+        from PIL import Image
+
+        with Image.open(img_path) as img:
+            img.verify()
+        return True
+    except Exception:
+        return False
+
+
+def _log_debug(msg: str) -> None:
+    """尝试使用 astrbot logger 输出 debug 日志，不可用时静默跳过。"""
+    try:
+        from astrbot.api import logger
+
+        logger.debug(msg)
+    except Exception:
+        pass
 
 
 def _get(obj: Any, keys: list[str], default: Any = None) -> Any:

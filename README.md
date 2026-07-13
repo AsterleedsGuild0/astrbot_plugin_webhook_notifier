@@ -15,6 +15,7 @@
 - ✅ **纯文本渲染与发送** — 默认文本模板，向指定 QQ 群/私聊推送。
 - ✅ **HTML 卡片渲染与发送** — 默认自包含 HTML 模板，调用 AstrBot `html_render` / T2I 截图后发送图片。
 - ✅ **图片结果校验**：支持 PNG / JPEG / WebP magic number 校验。
+- ✅ **截图空白裁剪**：HTML 图片模式会对本地 T2I 截图裁掉右侧/底部多余视口背景。
 - ✅ **HTML 失败降级**：html_render 截图失败、图片校验失败或发送失败时，按配置降级为纯文本通知。
 - ✅ HTTP 响应包含 `render_mode`、`requested_render_mode`、`fallback_to_text`、`fallback_reason`。
 - ✅ 用户通过私聊命令自助申请 / 验证 / 轮换 / 撤销 endpoint token。
@@ -87,6 +88,8 @@ render_options: |
 ```
 
 MVP 阶段 `render_mode` 是插件全局配置，所有 endpoint/token 都跟随该配置；历史 endpoint 中保存的 `render_mode` 不会覆盖全局设置。
+
+T2I 截图空白裁剪与排障经验见 [`docs/t2i-rendering-notes.md`](docs/t2i-rendering-notes.md)。
 
 ---
 

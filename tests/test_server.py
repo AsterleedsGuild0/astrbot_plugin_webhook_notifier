@@ -101,7 +101,19 @@ def server() -> WebhookServer:
     async def fake_html_render(
         tmpl: str, data: dict, return_url: bool = True, options: dict | None = None
     ) -> str | bytes:
-        return "https://example.com/rendered_image.png"
+        # html_image 模式应传 return_url=False 获取本地路径
+        assert return_url is False, "预期 return_url=False"
+        # 返回一个真实的极小 PNG 文件路径
+        import tempfile
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (860, 400), (245, 245, 247))  # 背景
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([16, 16, 844, 384], fill=(255, 255, 255))  # 卡片区
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            img.save(tmp_path, format="PNG")
+        return tmp_path
 
     return WebhookServer(
         config=config,

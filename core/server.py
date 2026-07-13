@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ from .registry import EndpointRegistry
 from .renderer import (
     render_html_default,
     render_text_default,
+    trim_viewport_whitespace,
     validate_image_result,
 )
 from .security import verify_token
@@ -417,7 +419,7 @@ class WebhookServer:
             image_result = await self._html_render(
                 html_str,
                 {"event": event_dict},
-                return_url=True,
+                return_url=False,
                 options=render_options,
             )
             result_type = type(image_result).__name__
@@ -471,6 +473,22 @@ class WebhookServer:
             return self._error_response(
                 500, "render_failed", f"图片校验失败: {e}", request_id
             )
+
+        # ── Phase 3b: 裁切视口多余空白 ──────────────────────
+        # 对本地文件进行右/底部多余背景裁切，非本地类型静默跳过
+        result_kind = "unknown"
+        if isinstance(image_result, str):
+            result_kind = "path" if os.path.exists(image_result) else "url_or_string"
+        elif isinstance(image_result, bytes):
+            result_kind = f"bytes:{len(image_result)}"
+        image_result = trim_viewport_whitespace(
+            image_result,
+            canvas_width=render_options.get("viewport_width") or 860,
+        )
+        logger.info(
+            f"[WebhookNotifier] request_id={request_id} 裁切后: "
+            f"type={type(image_result).__name__} kind={result_kind}"
+        )
 
         # ── Phase 4: 发送图片 ─────────────────────────────────
         try:
