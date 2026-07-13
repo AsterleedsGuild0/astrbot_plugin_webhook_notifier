@@ -19,6 +19,16 @@ from .renderer import (
 from .security import verify_token
 from .sender import Sender
 
+DEFAULT_RENDER_OPTIONS: dict[str, Any] = {
+    "full_page": True,
+    "type": "png",
+    "quality": 90,
+    "timeout": 5000,
+    "viewport_width": 860,
+    "device_scale_factor_level": "high",
+    "wait_until": "domcontentloaded",
+}
+
 
 class WebhookServer:
     """Webhook HTTP Server。
@@ -121,19 +131,21 @@ class WebhookServer:
     def _get_fallback_to_text(self) -> bool:
         return bool(self._plugin_config.get("fallback_to_text", True))
 
-    def _get_render_options(self) -> dict[str, Any] | None:
+    def _get_render_options(self) -> dict[str, Any]:
         raw = self._plugin_config.get("render_options", "")
         if not raw:
-            return None
+            return dict(DEFAULT_RENDER_OPTIONS)
         if isinstance(raw, dict):
-            return raw
+            return DEFAULT_RENDER_OPTIONS | raw
         if isinstance(raw, str):
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return DEFAULT_RENDER_OPTIONS | parsed
             except (json.JSONDecodeError, TypeError):
                 logger.warning("[WebhookNotifier] render_options 解析失败，使用默认值")
-                return None
-        return None
+                return dict(DEFAULT_RENDER_OPTIONS)
+        return dict(DEFAULT_RENDER_OPTIONS)
 
     # ─── 请求处理 ────────────────────────────────────────────
 
@@ -382,6 +394,18 @@ class WebhookServer:
             )
 
         render_options = self._get_render_options()
+        logger.info(
+            f"[WebhookNotifier] request_id={request_id} html_image 渲染参数: "
+            f"viewport_width={render_options.get('viewport_width')} "
+            f"viewport_height={render_options.get('viewport_height')} "
+            f"full_page={render_options.get('full_page')} "
+            f"type={render_options.get('type')} "
+            f"quality={render_options.get('quality')} "
+            f"device_scale_factor_level={render_options.get('device_scale_factor_level')} "
+            f"wait_until={render_options.get('wait_until')} "
+            f"clip={render_options.get('clip')} "
+            f"html_length={len(html_str)}"
+        )
         # 构造模板数据 — render_html_default 使用 Jinja2 已生成 HTML，
         # 传给 html_render 时 data 可不传额外变量，但保留 event 用于兼容
         event_dict = event.to_dict()
@@ -394,6 +418,23 @@ class WebhookServer:
                 {"event": event_dict},
                 return_url=True,
                 options=render_options,
+            )
+            result_type = type(image_result).__name__
+            result_hint = ""
+            if isinstance(image_result, str):
+                if image_result.startswith(("http://", "https://")):
+                    result_hint = "url"
+                elif image_result.startswith("base64://"):
+                    result_hint = "base64"
+                elif image_result.startswith("data:image/"):
+                    result_hint = "data_url"
+                else:
+                    result_hint = "path_or_string"
+            elif isinstance(image_result, bytes):
+                result_hint = f"bytes:{len(image_result)}"
+            logger.info(
+                f"[WebhookNotifier] request_id={request_id} html_render 返回: "
+                f"type={result_type} kind={result_hint}"
             )
         except Exception as e:
             logger.error(

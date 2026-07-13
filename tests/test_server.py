@@ -12,7 +12,7 @@ from core.models import EndpointRecord, NormalizedEvent, ServerConfig, TargetAli
 from core.registry import EndpointRegistry
 from core.renderer import render_text_default
 from core.sender import Sender
-from core.server import WebhookServer
+from core.server import DEFAULT_RENDER_OPTIONS, WebhookServer
 
 
 def _make_event() -> NormalizedEvent:
@@ -192,9 +192,11 @@ class TestGetRenderOptions:
             plugin_config={"render_options": {"full_page": False}},
         )
         opts = srv._get_render_options()
-        assert opts == {"full_page": False}
+        assert opts["full_page"] is False
+        assert opts["viewport_width"] == DEFAULT_RENDER_OPTIONS["viewport_width"]
+        assert opts["type"] == DEFAULT_RENDER_OPTIONS["type"]
 
-    def test_empty_returns_none(self):
+    def test_empty_returns_default_options(self):
         config = ServerConfig()
         reg = FakeRegistry()
         srv = WebhookServer(
@@ -204,7 +206,19 @@ class TestGetRenderOptions:
             html_render=None,
             plugin_config={},
         )
-        assert srv._get_render_options() is None
+        assert srv._get_render_options() == DEFAULT_RENDER_OPTIONS
+
+    def test_invalid_json_returns_default_options(self):
+        config = ServerConfig()
+        reg = FakeRegistry()
+        srv = WebhookServer(
+            config=config,
+            registry=reg,
+            sender=FakeSender(),
+            html_render=None,
+            plugin_config={"render_options": "not-json"},
+        )
+        assert srv._get_render_options() == DEFAULT_RENDER_OPTIONS
 
 
 # ─── _build_render_response ────────────────────────────────
