@@ -12,6 +12,7 @@ from .models import NormalizedEvent
 
 DEFAULT_FALLBACK_VIEWPORT_WIDTH = 1280
 DEVICE_SCALE_CANDIDATES = (1.0, 1.3, 1.8)
+NORMALIZED_CANVAS_MARGIN = 24
 
 # 默认文本模板（与 FSD 一致）
 DEFAULT_TEXT_TEMPLATE = """\
@@ -626,11 +627,78 @@ def _validate_image_bytes(data: bytes, is_header: bool = False) -> bool:
     raise ValueError(f"不支持的图片格式: magic={data[:8].hex()} (支持 PNG/JPEG/WebP)")
 
 
+def _infer_viewport_scale(image_width: int, canvas_width: int) -> float:
+    """推断截图时的 device scale factor。
+
+    优先按 image_width / canvas_width 估算；若不在已知候选值中，
+    回退到 image_width / DEFAULT_FALLBACK_VIEWPORT_WIDTH（兼容旧 T2I
+    忽略 viewport_width 的情况）。
+    """
+    if canvas_width <= 0:
+        return 1.0
+    scale = image_width / canvas_width
+    if _is_known_device_scale(scale):
+        return round(scale, 2)
+    fallback_scale = image_width / DEFAULT_FALLBACK_VIEWPORT_WIDTH
+    if _is_known_device_scale(fallback_scale):
+        return round(fallback_scale, 2)
+    return round(scale, 2)
+
+
+def _normalize_cropped_canvas(
+    cropped: Any,
+    original_format: str | None,
+    scale: float,
+) -> Any:
+    """将裁剪后的图片贴到对称浅灰背景的新画布上，实现居中归一化。
+
+    新画布背景色为 ``#f5f5f7``（与 HTML 模板页面背景一致）。
+    边距 ``margin_px`` 由 ``NORMALIZED_CANVAS_MARGIN * scale`` 计算。
+
+    Args:
+        cropped: 裁剪后的 PIL Image 对象。
+        original_format: 原始图片格式（如 "PNG"、"JPEG"）。
+        scale: 推断的 device scale factor。
+
+    Returns:
+        归一化后的 PIL Image 对象（新画布）。
+    """
+    from PIL import Image
+
+    bg_color = (245, 245, 247)  # #f5f5f7
+
+    margin_px = NORMALIZED_CANVAS_MARGIN
+    if scale > 1.0:
+        margin_px = int(NORMALIZED_CANVAS_MARGIN * scale)
+
+    new_width = cropped.width + 2 * margin_px
+    new_height = cropped.height + 2 * margin_px
+
+    fmt = (original_format or "PNG").upper()
+    if fmt == "PNG":
+        canvas = Image.new("RGBA", (new_width, new_height), bg_color + (255,))
+        if cropped.mode != "RGBA":
+            cropped = cropped.convert("RGBA")
+        canvas.paste(cropped, (margin_px, margin_px), cropped)
+    else:
+        canvas = Image.new("RGB", (new_width, new_height), bg_color)
+        if cropped.mode != "RGB":
+            cropped = cropped.convert("RGB")
+        canvas.paste(cropped, (margin_px, margin_px))
+
+    return canvas
+
+
 def trim_viewport_whitespace(
     image_result: Any,
     canvas_width: int = 860,
 ) -> Any:
-    """裁切 HTML 卡片截图视口中右侧/底部多余背景空白。
+    """裁切 HTML 卡片截图视口中右侧/底部多余背景空白，并对齐到居中归一化画布。
+
+    处理流程：
+    1. 检测有效内容区域，裁掉右侧/底部多余视口背景。
+    2. 推断 device scale factor，计算边距 ``NORMALIZED_CANVAS_MARGIN * scale``。
+    3. 将裁剪结果贴到 ``#f5f5f7`` 浅灰背景新画布，四周留白对称。
 
     仅处理本地文件路径；URL、base64、data URL、bytes 原样返回。
     修改在原文件上就地执行（保存到临时文件后 os.replace）。
@@ -659,15 +727,17 @@ def trim_viewport_whitespace(
 
             cropped = img.crop(crop_box)
             fmt = (img.format or "PNG").upper()
+            scale = _infer_viewport_scale(img.width, canvas_width)
+            normalized = _normalize_cropped_canvas(cropped, fmt, scale)
+
             save_kwargs: dict[str, Any] = {}
             if fmt in ("JPEG", "JPG"):
                 fmt = "JPEG"
-                cropped = cropped.convert("RGB")
                 save_kwargs = {"quality": 95, "optimize": True}
             elif fmt == "PNG":
                 save_kwargs = {"optimize": True}
 
-            cropped.save(temp_path, format=fmt, **save_kwargs)
+            normalized.save(temp_path, format=fmt, **save_kwargs)
 
         # 验证并替换原文件（最小尺寸 256 bytes，有效 PNG/JPEG 头部即视为有效）
         if (
@@ -676,7 +746,10 @@ def trim_viewport_whitespace(
             and _validate_temp_image(temp_path)
         ):
             os.replace(temp_path, image_result)
-            _log_debug(f"trim_viewport_whitespace: 已裁切为 {crop_box}")
+            _log_debug(
+                f"trim_viewport_whitespace: 裁切为 {crop_box} "
+                f"→ 归一化为 {normalized.size} (margin≈{scale:.2g})"
+            )
         elif os.path.exists(temp_path):
             os.remove(temp_path)
     except ImportError:
