@@ -36,7 +36,8 @@ DEFAULT_HTML_TEMPLATE = """\
     body {
       margin: 0;
       padding: 0;
-      width: 900px;
+      width: 820px;
+      min-width: 820px;
       min-height: 100%;
       color: #1d1d1f;
       background: #f5f5f7;
@@ -44,12 +45,14 @@ DEFAULT_HTML_TEMPLATE = """\
     }
 
     body {
-      padding: 24px;
+      padding: 16px;
+      display: block;
+      overflow-x: hidden;
     }
 
     .card {
       position: relative;
-      width: 852px;
+      width: 100%;
       overflow: hidden;
       border: 1px solid rgba(0, 0, 0, 0.10);
       border-radius: 22px;
