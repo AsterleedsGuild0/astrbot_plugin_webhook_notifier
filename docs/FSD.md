@@ -994,6 +994,7 @@ event.raw
   "quality": 90,
   "timeout": 5000,
   "viewport_width": 860,
+  "viewport_height": 1200,
   "device_scale_factor_level": "high",
   "wait_until": "domcontentloaded"
 }
