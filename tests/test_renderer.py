@@ -333,8 +333,8 @@ class TestRenderHtml:
         assert "PingFang SC" in DEFAULT_HTML_TEMPLATE
         assert ".status-badge" in DEFAULT_HTML_TEMPLATE
         assert "background: #f5f5f7" in DEFAULT_HTML_TEMPLATE
-        assert "width: 820px" in DEFAULT_HTML_TEMPLATE
-        assert "min-width: 820px" in DEFAULT_HTML_TEMPLATE
+        assert "width: 860px" in DEFAULT_HTML_TEMPLATE
+        assert "min-width: 860px" in DEFAULT_HTML_TEMPLATE
         assert "justify-content: center" not in DEFAULT_HTML_TEMPLATE
         assert "#0a0f1c" not in DEFAULT_HTML_TEMPLATE
 

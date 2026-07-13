@@ -36,8 +36,8 @@ DEFAULT_HTML_TEMPLATE = """\
     body {
       margin: 0;
       padding: 0;
-      width: 820px;
-      min-width: 820px;
+      width: 860px;
+      min-width: 860px;
       min-height: 100%;
       color: #1d1d1f;
       background: #f5f5f7;
