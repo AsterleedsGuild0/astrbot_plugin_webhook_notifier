@@ -26,7 +26,7 @@ DEFAULT_RENDER_OPTIONS: dict[str, Any] = {
     "type": "png",
     "quality": 90,
     "timeout": 5000,
-    "viewport_width": 860,
+    "viewport_width": 812,
     "viewport_height": 1200,
     "device_scale_factor_level": "high",
     "wait_until": "domcontentloaded",
@@ -483,7 +483,7 @@ class WebhookServer:
             result_kind = f"bytes:{len(image_result)}"
         image_result = trim_viewport_whitespace(
             image_result,
-            canvas_width=render_options.get("viewport_width") or 860,
+            canvas_width=render_options.get("viewport_width") or 812,
         )
         logger.info(
             f"[WebhookNotifier] request_id={request_id} 裁切后: "

@@ -21,6 +21,8 @@ AstrBot `html_render` 最终会把 HTML 交给 T2I 服务截图。`full_page=tru
 3. **本地图片后处理裁剪**：当 `html_render(return_url=False)` 返回本地图片路径时，对图片文件做右侧和底部空白裁剪；URL、base64、bytes 等结果保持原样。
 4. **像素检测只做兜底**：已知模板宽度时优先按设计画布宽度推断右边界；底部高度动态时再用像素差异检测寻找内容边缘。
 
+排查时不要把云端插件配置视为不可修改的固定前提。若实际配置（例如 `viewport_width`、`device_scale_factor_level`、`full_page`）与模板设计不匹配，应先向用户说明需要调整的配置项和推荐值，请用户确认或协助修改；只有在需要兼容历史配置或多环境配置差异时，才在代码中增加防御性兼容逻辑。
+
 静态 `clip` 不适合作为默认方案，因为卡片高度会随字段数量、摘要、长路径等内容变化，容易裁掉底部信息。
 
 ---
@@ -39,8 +41,8 @@ body {
 }
 
 .card {
-  width: 828px;
-  max-width: 828px;
+  width: 780px;
+  max-width: 780px;
 }
 ```
 
@@ -52,7 +54,7 @@ body {
   "type": "png",
   "quality": 90,
   "timeout": 5000,
-  "viewport_width": 860,
+  "viewport_width": 812,
   "viewport_height": 1200,
   "device_scale_factor_level": "high",
   "wait_until": "domcontentloaded"
@@ -62,11 +64,12 @@ body {
 渲染时使用 `return_url=false` 获取本地图片路径，然后执行 `trim_viewport_whitespace()`：
 
 - 仅处理本地文件路径。
-- 按已知画布宽度裁掉右侧多余视口背景。
-- 兼容 T2I 尊重 `viewport_width=860` 和旧服务退回默认 `1280` 视口两类情况。
+- 按实际卡片宽度（`body padding + card width`）裁掉右侧多余视口背景，不依赖云端配置里的 `viewport_width` 是否等于默认值；例如云端使用 `viewport_width=900` 时，也应按实际卡片右边界裁剪，而不是按 `900 - padding` 裁剪。
+- 兼容 T2I 尊重 `viewport_width=812` 和旧服务退回默认 `1280` 视口两类情况。
+- 右侧保留略小于模板 body padding 的视觉裁剪 padding（当前为 `12px`），不按整张截图宽度百分比计算；这是因为右侧还会叠加卡片阴影和圆角溢出，保留完整 `16px` 容易显得比左侧更宽，而 `0px` 又会贴边。
 - 用像素差异检测裁掉底部背景。
 - 先写临时文件，再校验并原子替换原图；失败时跳过裁剪，不影响文本降级和发送链路。
-- **v1.6+**：裁剪后不会直接保存，而是执行「居中归一化」——将裁剪内容贴到 `#f5f5f7` 浅灰背景新画布上，四周留白对称。边距默认 `24px`，高 DPI（scale>1）时按推断 scale 等比例放大。该行为在 `_normalize_cropped_canvas()` 中实现。
+- (v1.6+) 页面背景已改为纯白 `#ffffff`，不再需要通过额外新画布居中归一化；裁剪后直接保存 cropped 图。
 
 ---
 

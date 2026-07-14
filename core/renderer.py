@@ -12,7 +12,10 @@ from .models import NormalizedEvent
 
 DEFAULT_FALLBACK_VIEWPORT_WIDTH = 1280
 DEVICE_SCALE_CANDIDATES = (1.0, 1.3, 1.8)
-NORMALIZED_CANVAS_MARGIN = 24
+HTML_BODY_PADDING = 16
+HTML_CARD_WIDTH = 780
+RIGHT_VISUAL_CROP_PADDING = 12
+
 
 # 默认文本模板（与 FSD 一致）
 DEFAULT_TEXT_TEMPLATE = """\
@@ -46,7 +49,7 @@ DEFAULT_HTML_TEMPLATE = """\
       min-height: 0;
       height: auto;
       color: #1d1d1f;
-      background: #f5f5f7;
+      background: #ffffff;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     }
 
@@ -58,8 +61,8 @@ DEFAULT_HTML_TEMPLATE = """\
 
     .card {
       position: relative;
-      width: 828px;
-      max-width: 828px;
+      width: 780px;
+      max-width: 780px;
       overflow: hidden;
       border: 1px solid rgba(0, 0, 0, 0.10);
       border-radius: 22px;
@@ -627,78 +630,15 @@ def _validate_image_bytes(data: bytes, is_header: bool = False) -> bool:
     raise ValueError(f"不支持的图片格式: magic={data[:8].hex()} (支持 PNG/JPEG/WebP)")
 
 
-def _infer_viewport_scale(image_width: int, canvas_width: int) -> float:
-    """推断截图时的 device scale factor。
-
-    优先按 image_width / canvas_width 估算；若不在已知候选值中，
-    回退到 image_width / DEFAULT_FALLBACK_VIEWPORT_WIDTH（兼容旧 T2I
-    忽略 viewport_width 的情况）。
-    """
-    if canvas_width <= 0:
-        return 1.0
-    scale = image_width / canvas_width
-    if _is_known_device_scale(scale):
-        return round(scale, 2)
-    fallback_scale = image_width / DEFAULT_FALLBACK_VIEWPORT_WIDTH
-    if _is_known_device_scale(fallback_scale):
-        return round(fallback_scale, 2)
-    return round(scale, 2)
-
-
-def _normalize_cropped_canvas(
-    cropped: Any,
-    original_format: str | None,
-    scale: float,
-) -> Any:
-    """将裁剪后的图片贴到对称浅灰背景的新画布上，实现居中归一化。
-
-    新画布背景色为 ``#f5f5f7``（与 HTML 模板页面背景一致）。
-    边距 ``margin_px`` 由 ``NORMALIZED_CANVAS_MARGIN * scale`` 计算。
-
-    Args:
-        cropped: 裁剪后的 PIL Image 对象。
-        original_format: 原始图片格式（如 "PNG"、"JPEG"）。
-        scale: 推断的 device scale factor。
-
-    Returns:
-        归一化后的 PIL Image 对象（新画布）。
-    """
-    from PIL import Image
-
-    bg_color = (245, 245, 247)  # #f5f5f7
-
-    margin_px = NORMALIZED_CANVAS_MARGIN
-    if scale > 1.0:
-        margin_px = int(NORMALIZED_CANVAS_MARGIN * scale)
-
-    new_width = cropped.width + 2 * margin_px
-    new_height = cropped.height + 2 * margin_px
-
-    fmt = (original_format or "PNG").upper()
-    if fmt == "PNG":
-        canvas = Image.new("RGBA", (new_width, new_height), bg_color + (255,))
-        if cropped.mode != "RGBA":
-            cropped = cropped.convert("RGBA")
-        canvas.paste(cropped, (margin_px, margin_px), cropped)
-    else:
-        canvas = Image.new("RGB", (new_width, new_height), bg_color)
-        if cropped.mode != "RGB":
-            cropped = cropped.convert("RGB")
-        canvas.paste(cropped, (margin_px, margin_px))
-
-    return canvas
-
-
 def trim_viewport_whitespace(
     image_result: Any,
-    canvas_width: int = 860,
+    canvas_width: int = 812,
 ) -> Any:
-    """裁切 HTML 卡片截图视口中右侧/底部多余背景空白，并对齐到居中归一化画布。
+    """裁切 HTML 卡片截图视口中右侧/底部多余背景空白。
 
-    处理流程：
-    1. 检测有效内容区域，裁掉右侧/底部多余视口背景。
-    2. 推断 device scale factor，计算边距 ``NORMALIZED_CANVAS_MARGIN * scale``。
-    3. 将裁剪结果贴到 ``#f5f5f7`` 浅灰背景新画布，四周留白对称。
+    检测有效内容区域后直接裁剪保存，不再二次创建新画布。
+    页面背景已改为纯白（``#ffffff``），卡片本身自带圆角阴影，
+    不再需要额外归一化画布。
 
     仅处理本地文件路径；URL、base64、data URL、bytes 原样返回。
     修改在原文件上就地执行（保存到临时文件后 os.replace）。
@@ -727,17 +667,15 @@ def trim_viewport_whitespace(
 
             cropped = img.crop(crop_box)
             fmt = (img.format or "PNG").upper()
-            scale = _infer_viewport_scale(img.width, canvas_width)
-            normalized = _normalize_cropped_canvas(cropped, fmt, scale)
-
             save_kwargs: dict[str, Any] = {}
             if fmt in ("JPEG", "JPG"):
                 fmt = "JPEG"
+                cropped = cropped.convert("RGB")
                 save_kwargs = {"quality": 95, "optimize": True}
             elif fmt == "PNG":
                 save_kwargs = {"optimize": True}
 
-            normalized.save(temp_path, format=fmt, **save_kwargs)
+            cropped.save(temp_path, format=fmt, **save_kwargs)
 
         # 验证并替换原文件（最小尺寸 256 bytes，有效 PNG/JPEG 头部即视为有效）
         if (
@@ -746,10 +684,7 @@ def trim_viewport_whitespace(
             and _validate_temp_image(temp_path)
         ):
             os.replace(temp_path, image_result)
-            _log_debug(
-                f"trim_viewport_whitespace: 裁切为 {crop_box} "
-                f"→ 归一化为 {normalized.size} (margin≈{scale:.2g})"
-            )
+            _log_debug(f"trim_viewport_whitespace: 已裁切为 {crop_box}")
         elif os.path.exists(temp_path):
             os.remove(temp_path)
     except ImportError:
@@ -778,7 +713,7 @@ def _detect_trim_box(
 
     Args:
         image: PIL Image 对象。
-        canvas_width: 渲染时的浏览器视口 CSS 宽度（如 860）。
+        canvas_width: 渲染时的浏览器视口 CSS 宽度（如 812）。
 
     Returns:
         (left, top, right, bottom) 裁剪框，无需处理时返回 None。
@@ -786,15 +721,16 @@ def _detect_trim_box(
     width, height = image.size
 
     # --- 右侧裁剪 ---
-    # 卡片设计宽度固定为 828px，在 860px 视口中两侧各 16px padding。
+    # 卡片设计宽度固定为 780px，在 812px 视口中两侧各 16px padding。
     # 若 T2I 尊重 viewport_width，截图宽度约为 canvas_width * scale；
     # 若旧服务忽略 viewport_width，则常见截图宽度约为 1280 * scale。
     expected_right = _expected_canvas_right(width, canvas_width)
 
     crop_right = width
-    if width - expected_right > max(24, int(width * 0.03)):
-        right_margin = max(18, int(width * 0.018))
-        crop_right = min(width, expected_right + right_margin)
+    right_margin = _scaled_right_crop_padding(width, canvas_width)
+    candidate_right = min(width, expected_right + right_margin)
+    if width - candidate_right > max(8, int(width * 0.006)):
+        crop_right = candidate_right
 
     # --- 底部裁剪（像素差异检测） ---
     rgb = image.convert("RGB")
@@ -814,22 +750,53 @@ def _detect_trim_box(
 
 def _expected_canvas_right(image_width: int, canvas_width: int) -> int:
     """根据截图宽度推断画布右边界，兼容 viewport_width 生效/未生效两类情况。"""
-    content_right_css = max(canvas_width - 16, 1)
+    content_right_css = max(HTML_BODY_PADDING + HTML_CARD_WIDTH, 1)
+    scale = _infer_device_scale(image_width, canvas_width)
+    return int(content_right_css * scale)
+
+
+def _scaled_right_crop_padding(image_width: int, canvas_width: int) -> int:
+    """将右侧视觉裁剪留白转换到截图像素。
+
+    右侧存在卡片阴影和圆角溢出，若保留完整 body padding，视觉上会比左侧更宽。
+    因此右侧只保留略小于 body padding 的视觉 padding，用于平衡阴影带来的视觉宽度。
+    """
+    return max(
+        0,
+        int(RIGHT_VISUAL_CROP_PADDING * _infer_device_scale(image_width, canvas_width)),
+    )
+
+
+def _infer_device_scale(image_width: int, canvas_width: int) -> float:
+    """推断截图设备缩放，兼容 viewport_width 生效和旧服务默认 1280 视口。"""
     viewport_width = max(canvas_width, 1)
-
     configured_scale = image_width / viewport_width
-    if _is_known_device_scale(configured_scale):
-        return int(content_right_css * configured_scale)
-
     fallback_scale = image_width / DEFAULT_FALLBACK_VIEWPORT_WIDTH
-    if _is_known_device_scale(fallback_scale):
-        return int(content_right_css * fallback_scale)
 
-    return int(content_right_css * configured_scale)
+    configured_match = _nearest_known_device_scale(configured_scale)
+    fallback_match = _nearest_known_device_scale(fallback_scale)
+    if configured_match and fallback_match:
+        configured_known, configured_diff = configured_match
+        fallback_known, fallback_diff = fallback_match
+        return fallback_known if fallback_diff < configured_diff else configured_known
+    if configured_match:
+        return configured_match[0]
+    if fallback_match:
+        return fallback_match[0]
+
+    return configured_scale
 
 
 def _is_known_device_scale(scale: float) -> bool:
-    return any(abs(scale - candidate) <= 0.08 for candidate in DEVICE_SCALE_CANDIDATES)
+    return _nearest_known_device_scale(scale) is not None
+
+
+def _nearest_known_device_scale(scale: float) -> tuple[float, float] | None:
+    nearest = min(
+        ((candidate, abs(scale - candidate)) for candidate in DEVICE_SCALE_CANDIDATES),
+        key=lambda item: item[1],
+    )
+    return nearest if nearest[1] <= 0.08 else None
 
 
 def _find_content_limit(image: Any, axis: str) -> int | None:

@@ -180,10 +180,8 @@ class TestRenderTextJinja2:
 
 from core.renderer import (
     DEFAULT_HTML_TEMPLATE,
-    NORMALIZED_CANVAS_MARGIN,
     _expected_canvas_right,
-    _infer_viewport_scale,
-    _normalize_cropped_canvas,
+    _scaled_right_crop_padding,
     render_html,
     render_html_default,
     render_html_data,
@@ -339,13 +337,13 @@ class TestRenderHtml:
         assert "-apple-system" in DEFAULT_HTML_TEMPLATE
         assert "PingFang SC" in DEFAULT_HTML_TEMPLATE
         assert ".status-badge" in DEFAULT_HTML_TEMPLATE
-        assert "background: #f5f5f7" in DEFAULT_HTML_TEMPLATE
+        assert "background: #ffffff" in DEFAULT_HTML_TEMPLATE
         assert "width: fit-content" in DEFAULT_HTML_TEMPLATE
         assert "min-width: 0" in DEFAULT_HTML_TEMPLATE
         assert "min-height: 0" in DEFAULT_HTML_TEMPLATE
         assert "height: auto" in DEFAULT_HTML_TEMPLATE
-        assert "width: 828px" in DEFAULT_HTML_TEMPLATE
-        assert "max-width: 828px" in DEFAULT_HTML_TEMPLATE
+        assert "width: 780px" in DEFAULT_HTML_TEMPLATE
+        assert "max-width: 780px" in DEFAULT_HTML_TEMPLATE
         assert "width: 100vw" not in DEFAULT_HTML_TEMPLATE
         assert "min-height: 100%" not in DEFAULT_HTML_TEMPLATE
         assert "justify-content: center" not in DEFAULT_HTML_TEMPLATE
@@ -438,95 +436,40 @@ class TestValidateImageResult:
 # ─── 视口空白裁切测试 ────────────────────────────────────
 
 
-class TestInferViewportScale:
-    def test_known_scale_from_canvas_width(self):
-        """已知 device scale 时准确推断。"""
-        # canvas_width=860, scale=1.3 → 860*1.3=1118
-        assert _infer_viewport_scale(1118, 860) == 1.3
-
-    def test_fallback_to_default_viewport(self):
-        """旧 T2I 退回 1280 默认视口时仍可推断。"""
-        # 1280*1.3=1664
-        assert _infer_viewport_scale(1664, 860) == 1.3
-
-    def test_unknown_scale_returns_calculated(self):
-        """无法匹配时返回计算值。"""
-        scale = _infer_viewport_scale(500, 300)
-        assert abs(scale - 1.67) < 0.02
-
-    def test_zero_canvas_width_returns_one(self):
-        """canvas_width≤0 时返回 1.0。"""
-        assert _infer_viewport_scale(100, 0) == 1.0
-        assert _infer_viewport_scale(100, -1) == 1.0
-
-
-class TestNormalizeCroppedCanvas:
-    def test_symmetric_margins_rgb(self):
-        """RGB 图片归一化后四周为 #f5f5f7 且尺寸正确。"""
-        try:
-            from PIL import Image
-        except ImportError:
-            pytest.skip("PIL not available")
-
-        cropped = Image.new("RGB", (100, 80), (255, 255, 255))
-        scale = 1.0
-        result = _normalize_cropped_canvas(cropped, "JPEG", scale)
-
-        margin = NORMALIZED_CANVAS_MARGIN
-        assert result.size == (100 + 2 * margin, 80 + 2 * margin)
-
-        # 四角应为 #f5f5f7
-        bg = (245, 245, 247)
-        w, h = result.size
-        for cx, cy in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-            px = result.getpixel((cx, cy))
-            assert abs(px[0] - bg[0]) <= 2
-            assert abs(px[1] - bg[1]) <= 2
-            assert abs(px[2] - bg[2]) <= 2
-
-    def test_symmetric_margins_rgba(self):
-        """PNG RGBA 归一化后 alpha 保留、四角 #f5f5f7。"""
-        try:
-            from PIL import Image
-        except ImportError:
-            pytest.skip("PIL not available")
-
-        cropped = Image.new("RGBA", (60, 40), (255, 255, 255, 255))
-        result = _normalize_cropped_canvas(cropped, "PNG", 1.0)
-
-        margin = NORMALIZED_CANVAS_MARGIN
-        assert result.size == (60 + 2 * margin, 40 + 2 * margin)
-        assert result.mode == "RGBA"
-
-        bg = (245, 245, 247, 255)
-        w, h = result.size
-        for cx, cy in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-            px = result.getpixel((cx, cy))
-            assert all(abs(px[i] - bg[i]) <= 2 for i in range(4))
-
-    def test_scale_scales_margin(self):
-        """scale>1 时边距按比例放大。"""
-        try:
-            from PIL import Image
-        except ImportError:
-            pytest.skip("PIL not available")
-
-        cropped = Image.new("RGB", (50, 50), (255, 255, 255))
-        # scale=1.3 → margin_px = int(24 * 1.3) = 31
-        result = _normalize_cropped_canvas(cropped, "PNG", 1.3)
-        assert result.size == (50 + 2 * 31, 50 + 2 * 31)
-
-
 class TestTrimViewportWhitespace:
     def test_expected_canvas_right_when_viewport_width_honored(self):
-        """viewport_width 生效时，按 860px 视口推断右边界。"""
-        # 860 * 1.3 = 1118，内容右边界约 (860 - 16) * 1.3
-        assert _expected_canvas_right(1118, 860) == int(844 * 1.3)
+        """viewport_width 生效时，按 812px 视口推断右边界。"""
+        # 812 * 1.3 = 1055.6，内容右边界约 (16 + 780) * 1.3
+        assert _expected_canvas_right(int(812 * 1.3), 812) == int(796 * 1.3)
+
+    def test_expected_canvas_right_uses_card_width_with_old_viewport(self):
+        """云端仍使用旧 viewport_width=860 时，也应按实际卡片宽度裁剪。"""
+        assert _expected_canvas_right(int(860 * 1.3), 860) == int(796 * 1.3)
+
+    def test_expected_canvas_right_uses_card_width_with_custom_viewport(self):
+        """云端配置自定义 viewport_width=900 时，也应按实际卡片宽度裁剪。"""
+        assert _expected_canvas_right(int(900 * 1.3), 900) == int(796 * 1.3)
 
     def test_expected_canvas_right_when_default_viewport_used(self):
         """旧 T2I 忽略 viewport_width 时，按 1280px 默认视口兜底推断。"""
-        # 1280 * 1.3 = 1664，仍应裁到 860px 画布附近，而不是保留 1280px 视口。
-        assert _expected_canvas_right(1664, 860) == int(844 * 1.3)
+        # 1280 * 1.3 = 1664，仍应裁到 812px 画布附近，而不是保留 1280px 视口。
+        assert _expected_canvas_right(1664, 812) == int(796 * 1.3)
+
+    def test_expected_canvas_right_uses_card_width_with_old_viewport_and_default_viewport(
+        self,
+    ):
+        """旧配置 860 + 旧 T2I 默认 1280 视口时，仍应按 780px 卡片宽度裁剪。"""
+        assert _expected_canvas_right(1664, 860) == int(796 * 1.3)
+
+    def test_expected_canvas_right_uses_card_width_with_custom_viewport_and_default_viewport(
+        self,
+    ):
+        """自定义配置 900 + 旧 T2I 默认 1280 视口时，仍应按 780px 卡片宽度裁剪。"""
+        assert _expected_canvas_right(1664, 900) == int(796 * 1.3)
+
+    def test_scaled_right_crop_padding_uses_fallback_viewport_scale(self):
+        """旧 T2I 默认 1280 视口时，右侧裁剪留白应按真实 scale，而非整图比例。"""
+        assert _scaled_right_crop_padding(1664, 812) == int(12 * 1.3)
 
     def test_url_passthrough(self):
         """URL 字符串应原样返回（不处理）。"""
@@ -542,8 +485,8 @@ class TestTrimViewportWhitespace:
         """None 应原样返回。"""
         assert trim_viewport_whitespace(None) is None
 
-    def test_local_file_normalized(self):
-        """本地 PNG 截图：裁切后四周为对称 #f5f5f7 边距。"""
+    def test_local_file_cropped(self):
+        """本地 PNG 截图，右侧/底部为纯背景，调用后尺寸应缩小。"""
         try:
             from PIL import Image, ImageDraw
         except ImportError:
@@ -551,42 +494,30 @@ class TestTrimViewportWhitespace:
 
         import tempfile
 
-        # 构造一张 500x400 的图片：
-        # - 白色内容区 0-250 x 0-300，其余为灰色背景
-        # - canvas_width=300 模拟视口宽度
-        width, height = 500, 400
+        # 构造一张旧 T2I 默认 1280 视口、high scale=1.3 的图片：
+        # - 白色内容区到 812px 画布附近，其余为灰色背景
+        # - canvas_width=812 模拟插件传入的目标视口宽度
+        width, height = 1664, 520
         img = Image.new("RGB", (width, height), (200, 200, 200))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, 250, 300], fill=(255, 255, 255))
+        draw.rectangle([0, 0, int(796 * 1.3), 360], fill=(255, 255, 255))
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = f.name
             img.save(tmp_path, format="PNG")
 
         try:
-            result = trim_viewport_whitespace(tmp_path, canvas_width=300)
+            result = trim_viewport_whitespace(tmp_path, canvas_width=812)
             assert result == tmp_path
 
-            with Image.open(tmp_path) as normalized:
-                w, h = normalized.size
-
-                # 内容仍可见（中心附近应为白色）
-                cx, cy = w // 2, h // 2
-                mid = normalized.getpixel((cx, cy))
-                assert min(mid[:3]) >= 240  # 内容区域接近白色
-
-                # 四角应为对称的 #f5f5f7
-                bg = (245, 245, 247)
-                for px, py in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-                    p = normalized.getpixel((px, py))
-                    assert abs(p[0] - bg[0]) <= 2
-                    assert abs(p[1] - bg[1]) <= 2
-                    assert abs(p[2] - bg[2]) <= 2
-
-                # 尺寸 ≥ 裁切后内容尺寸（至少 250+2*margin）
-                # scale≈1.67, margin≈40
-                assert w >= 250 + 2 * 24
-                assert h >= 300 + 2 * 24
+            # 验证已裁切
+            with Image.open(tmp_path) as cropped:
+                assert cropped.width < width, "右侧空白应被裁切"
+                assert cropped.height < height, "底部空白应被裁切"
+                # 内容区不应被过度裁切
+                assert cropped.width >= int(796 * 1.3)
+                assert cropped.width <= int(808 * 1.3) + 2
+                assert cropped.height >= 360
         finally:
             import os as _os
 
@@ -594,7 +525,7 @@ class TestTrimViewportWhitespace:
                 _os.remove(tmp_path)
 
     def test_different_formats_jpeg(self):
-        """JPEG 格式应正确处理（归一化后为 RGB）。"""
+        """JPEG 格式应正确处理。"""
         try:
             from PIL import Image, ImageDraw
         except ImportError:
@@ -602,30 +533,23 @@ class TestTrimViewportWhitespace:
 
         import tempfile
 
-        width, height = 400, 350
+        width, height = 1280, 420
         img = Image.new("RGB", (width, height), (200, 200, 200))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, 200, 250], fill=(255, 255, 255))
+        draw.rectangle([0, 0, 796, 280], fill=(255, 255, 255))
 
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
             tmp_path = f.name
             img.save(tmp_path, format="JPEG", quality=95)
 
         try:
-            result = trim_viewport_whitespace(tmp_path, canvas_width=250)
+            result = trim_viewport_whitespace(tmp_path, canvas_width=812)
             assert result == tmp_path
 
-            with Image.open(tmp_path) as normalized:
-                # JPEG 应为 RGB
-                assert normalized.mode == "RGB"
-                # 四角为背景色
-                bg = (245, 245, 247)
-                w, h = normalized.size
-                for px, py in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-                    p = normalized.getpixel((px, py))
-                    assert abs(p[0] - bg[0]) <= 2
-                    assert abs(p[1] - bg[1]) <= 2
-                    assert abs(p[2] - bg[2]) <= 2
+            with Image.open(tmp_path) as cropped:
+                assert cropped.width < width
+                assert cropped.width <= 810
+                assert cropped.height < height
         finally:
             import os as _os
 
@@ -649,7 +573,7 @@ class TestTrimViewportWhitespace:
             img.save(tmp_path, format="PNG")
 
         try:
-            result = trim_viewport_whitespace(tmp_path, canvas_width=860)
+            result = trim_viewport_whitespace(tmp_path, canvas_width=812)
             assert result == tmp_path
 
             # 不应裁切（尺寸不变）
@@ -683,50 +607,6 @@ class TestTrimViewportWhitespace:
 
             with Image.open(tmp_path) as reloaded:
                 assert reloaded.size == (100, 80)
-        finally:
-            import os as _os
-
-            if _os.path.exists(tmp_path):
-                _os.remove(tmp_path)
-
-    def test_high_dpi_cropped_uses_scaled_margin(self):
-        """高 DPI 截图（旧 T2I 1280 视口）裁剪后边距按 scale 放大。"""
-        try:
-            from PIL import Image, ImageDraw
-        except ImportError:
-            pytest.skip("PIL not available")
-
-        import tempfile
-
-        # 模拟旧 T2I 截图：1280*1.3=1664 宽
-        width, height = 1664, 1200
-        img = Image.new("RGB", (width, height), (200, 200, 200))
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, 1097, 900], fill=(255, 255, 255))
-
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            tmp_path = f.name
-            img.save(tmp_path, format="PNG")
-
-        try:
-            result = trim_viewport_whitespace(tmp_path, canvas_width=860)
-            assert result == tmp_path
-
-            with Image.open(tmp_path) as normalized:
-                # scale=1.3 → margin_px = int(24*1.3) = 31
-                # 裁切后内容尺寸至少 ~(1097+margins, 900+margins)
-                # 归一化后至少再加 2*31
-                assert normalized.width >= 1097 + 2 * 31
-                assert normalized.height >= 900 + 2 * 31
-
-                # 四角为背景色
-                bg = (245, 245, 247)
-                w, h = normalized.size
-                for px, py in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-                    p = normalized.getpixel((px, py))
-                    assert abs(p[0] - bg[0]) <= 2
-                    assert abs(p[1] - bg[1]) <= 2
-                    assert abs(p[2] - bg[2]) <= 2
         finally:
             import os as _os
 

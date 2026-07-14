@@ -48,6 +48,6 @@
     "editor_language": "json",
     "editor_theme": "vs-dark",
     "hint": "传给 AstrBot html_render / T2I 服务的截图参数。html_image 模式下生效。",
-    "default": "{\n  \"full_page\": true,\n  \"type\": \"png\",\n  \"quality\": 90,\n  \"timeout\": 5000,\n  \"viewport_width\": 860,\n  \"viewport_height\": 1200,\n  \"device_scale_factor_level\": \"high\",\n  \"wait_until\": \"domcontentloaded\"\n}"
+    "default": "{\n  \"full_page\": true,\n  \"type\": \"png\",\n  \"quality\": 90,\n  \"timeout\": 5000,\n  \"viewport_width\": 812,\n  \"viewport_height\": 1200,\n  \"device_scale_factor_level\": \"high\",\n  \"wait_until\": \"domcontentloaded\"\n}"
   }
 }

@@ -555,7 +555,7 @@ HTML 模板只允许来自插件侧受信任配置：
   "type": "png",
   "quality": 90,
   "timeout": 5000,
-  "viewport_width": 860,
+  "viewport_width": 812,
   "viewport_height": 1200,
   "device_scale_factor_level": "high",
   "wait_until": "domcontentloaded"
@@ -600,7 +600,7 @@ render_options: |
     "type": "png",
     "quality": 90,
     "timeout": 5000,
-    "viewport_width": 860,
+    "viewport_width": 812,
     "viewport_height": 1200,
     "device_scale_factor_level": "high",
     "wait_until": "domcontentloaded"

@@ -107,9 +107,9 @@ def server() -> WebhookServer:
         import tempfile
         from PIL import Image, ImageDraw
 
-        img = Image.new("RGB", (860, 400), (245, 245, 247))  # 背景
+        img = Image.new("RGB", (812, 400), (255, 255, 255))  # 背景
         draw = ImageDraw.Draw(img)
-        draw.rectangle([16, 16, 844, 384], fill=(255, 255, 255))  # 卡片区
+        draw.rectangle([16, 16, 796, 384], fill=(255, 255, 255))  # 卡片区
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = f.name
             img.save(tmp_path, format="PNG")
