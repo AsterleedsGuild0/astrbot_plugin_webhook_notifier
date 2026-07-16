@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-当前处于 Milestone 2（HTML 卡片图片）：
+当前已完成 Milestone 2（HTML 卡片图片）与 WebUI 模板管理 Phase 1：
 
 - ✅ Webhook HTTP Server（aiohttp）已就绪，支持多 endpoint 鉴权与路由。
 - ✅ OMP `session_stop` 事件已适配，可标准化为通用事件对象。
@@ -18,9 +18,11 @@
 - ✅ **截图空白裁剪**：HTML 图片模式会对本地 T2I 截图裁掉右侧/底部多余视口背景。
 - ✅ **HTML 失败降级**：html_render 截图失败、图片校验失败或发送失败时，按配置降级为纯文本通知。
 - ✅ HTTP 响应包含 `render_mode`、`requested_render_mode`、`fallback_to_text`、`fallback_reason`。
+- ✅ **私聊通知安全默认值**：Webhook 状态通知默认不主动投递到 `FriendMessage`，群聊通知不受影响。
 - ✅ 用户通过私聊命令自助申请 / 验证 / 轮换 / 撤销 endpoint token。
 - ✅ 私聊 token 和群聊 token（含群管理员验证）。
-- 🔲 自定义模板文件加载（后续版本）。
+- ✅ **WebUI 模板管理**：在插件详情页中创建、复制、编辑、预览、保存、应用和删除 HTML 模板。
+- ✅ **安全模板预览**：HTML Monaco 编辑器、JSON 预览数据和 sandbox `srcdoc` 预览。
 
 可用命令：
 
@@ -66,9 +68,9 @@ AstrBot Webhook Notifier
 
 ```yaml
 enabled: true
+enable_private_notifications: false  # 是否允许 Webhook 状态通知主动投递到 FriendMessage
 render_mode: html_image   # text | html_image
 fallback_to_text: true     # html_image 渲染失败时降级为纯文本
-templates_dir: templates
 targets: |
   - name: default_group
     umo: aiocqhttp:GroupMessage:123456789
@@ -89,7 +91,25 @@ render_options: |
 
 MVP 阶段 `render_mode` 是插件全局配置，所有 endpoint/token 都跟随该配置；历史 endpoint 中保存的 `render_mode` 不会覆盖全局设置。
 
+`enable_private_notifications` 默认为 `false`，仅控制 Webhook 状态通知是否投递到 UMO 类型为 `FriendMessage` 的目标。它不影响聊天命令回复、Token 创建后的发送与验证、endpoint 创建或群聊通知。
+
+### v0.2.0 私聊通知迁移提示
+
+升级后，现有私聊 endpoint 和 Token 继续有效，无需重建或轮换。默认配置下，发往私聊 endpoint 的 Webhook 请求仍返回 HTTP 200，但响应为 `message=skipped`、`retryable=false`、`rendered=false`，表示请求已被安全策略处理且不应重试。
+
+如管理员确认所用平台允许主动私聊，并接受对应平台规则与风控风险，可开启 `enable_private_notifications` 后 reload 插件，现有私聊 endpoint 将恢复投递。混合目标中，群聊正常发送，私聊标记为 `skipped`，整体 `message=partial_delivery`；只有真实发送失败才会返回 `retryable=true`。
+
+### QQ 平台风险提示
+
+- OneBot/NapCat 的主动私聊可能触发 QQ 风控。请参考 [NapCatQQ 风控讨论](https://github.com/NapNeko/NapCatQQ/issues/751) 与 [NapCat 安全指南](https://napneko.github.io/other/security)，本插件不提供或建议任何对抗风控方案。
+- QQ 官方 Bot 也不是无限安全通道；主动私聊和主动消息受严格规则与额度约束。仅在确认并持续遵守 [QQ 官方 Bot 主动消息规则](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/send.html) 后再开启私聊通知。
+- AstrBot 平台接入资料见 [aiocqhttp](https://docs.astrbot.app/platform/aiocqhttp.html) 与 [QQ 官方 Bot WebSocket](https://docs.astrbot.app/en/platform/qqofficial/websockets.html)。当前 UMO 只能可靠识别 `platform_id` 与 `FriendMessage` / `GroupMessage`，不能据此自动识别 NapCat 或其他 OneBot 实现。
+
+完整的平台差异、证据边界、架构决策和运维建议见 [`docs/platform-delivery-policy.md`](docs/platform-delivery-policy.md)。
+
 T2I 截图空白裁剪与排障经验见 [`docs/t2i-rendering-notes.md`](docs/t2i-rendering-notes.md)。
+
+模板可用变量、兼容行为和示例见 [`docs/template-variables.md`](docs/template-variables.md)。
 
 ---
 
@@ -113,9 +133,18 @@ X-OMP-Event: session_stop
 
 ---
 
-## HTML 卡片与 T2I 方向
+## HTML 卡片与模板管理
 
-插件计划支持用户在插件侧配置受信任的 HTML 模板，而不是允许聊天用户随意提交 HTML。
+管理员可以直接在 AstrBot 插件详情页维护 HTML 卡片模板，不需要手工编辑服务器文件，也不需要通过聊天命令 reload。
+
+使用步骤：
+
+1. 在 AstrBot Dashboard 打开本插件详情页并进入模板管理页面。
+2. 选择内置模板查看效果，或从内置模板新建副本。
+3. 在 HTML Monaco 编辑器中修改模板，并按需调整预览 JSON 和画布宽度。
+4. 使用“保存”“应用”或“保存并应用”；离开未保存内容前页面会要求确认。
+
+内置模板始终只读。自定义模板保存到插件数据目录中的 `templates.json` 与 `templates/<id>-<revision>.html`；revision 文件不可变，当前 active 模板为插件全局设置。保存当前 active 模板的新内容后，新 revision 会立即用于后续通知，active ID 保持不变。
 
 推荐渲染链路：
 
@@ -124,7 +153,7 @@ Webhook payload
   ↓
 标准化事件对象
   ↓
-插件内置或用户配置的 HTML 模板
+插件内置或 WebUI 管理的 HTML 模板
   ↓
 AstrBot html_render / 已配置的 T2I 服务
   ↓
@@ -134,9 +163,13 @@ AstrBot html_render / 已配置的 T2I 服务
 设计原则：
 
 - 默认模板尽量自包含，避免依赖外部 JS、CSS、远程字体和 CDN 图片。
-- HTML 图片渲染失败时自动降级为纯文本通知。
+- active 自定义模板失败时先尝试内置模板；内置模板也失败时再按配置降级为纯文本通知。
 - 模板主要使用标准化事件字段，原始 payload 仅作为高级调试数据。
 - 渲染参数沿用 AstrBot T2I 服务支持的截图选项。
+
+### 开发者说明
+
+Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用相对 endpoint，提供模板列表、详情、保存、应用、删除和预览操作。页面不依赖 Dashboard 内部模块路径；模板 ID 由后端生成，并使用 `expected_revision` 防止并发覆盖。
 
 ---
 
