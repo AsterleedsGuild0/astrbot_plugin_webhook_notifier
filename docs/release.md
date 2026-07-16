@@ -16,7 +16,25 @@
 python -m pytest
 ```
 
-1. 本地验证打包：
+1. 本地生成带时分标识的测试包：
+
+```bash
+python scripts/package_plugin.py --dev-version
+```
+
+测试包版本和文件名使用本地时间后缀 `-test.YYYYMMDD.HHMM`，例如
+`v0.2.0-test.20260715.0905`。同一天多次打包时可直接按小时和分钟区分。
+
+建议再添加本次测试用途标签，便于同时区分功能和生成时间：
+
+```bash
+python scripts/package_plugin.py --dev-version --test-label template-manager
+```
+
+生成格式为 `-test.YYYYMMDD.HHMM.<label>`，例如
+`v0.2.0-test.20260715.0905.template-manager`。标签仅允许英文字母、数字和连字符。
+
+1. 本地验证正式发布包：
 
 ```bash
 python scripts/package_plugin.py

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import zipfile
 from datetime import datetime
@@ -32,6 +33,11 @@ PACKAGE_DIRS = [
     "core",
 ]
 
+PACKAGE_STATIC_DIRS = [
+    "pages",
+    ".astrbot-plugin",
+]
+
 PACKAGE_DOC_DIRS = [
     "docs",
 ]
@@ -56,6 +62,15 @@ def iter_package_files() -> list[str]:
         files.extend(
             path.relative_to(ROOT).as_posix()
             for path in sorted(doc_dir.rglob("*.md"))
+            if path.is_file()
+        )
+    for relative_dir in PACKAGE_STATIC_DIRS:
+        static_dir = ROOT / relative_dir
+        if not static_dir.is_dir():
+            raise FileNotFoundError(f"Missing static package dir: {relative_dir}")
+        files.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in sorted(static_dir.rglob("*"))
             if path.is_file()
         )
     return files
@@ -157,14 +172,21 @@ def _patched_file_content(relative: str, package_version: str) -> str | None:
     return None
 
 
-def build_dev_version(base_version: str) -> str:
+def build_dev_version(base_version: str, test_label: str | None = None) -> str:
     """Return a SemVer-compatible temporary version based on local time.
 
     Use `test` instead of `dev` because AstrBot's current version comparator
     strips all `v` characters before comparing versions.
     """
     stamp = datetime.now().strftime("%Y%m%d.%H%M")
-    return f"{base_version}-test.{stamp}"
+    version = f"{base_version}-test.{stamp}"
+    if test_label:
+        if not re.fullmatch(r"[0-9A-Za-z-]+", test_label):
+            raise ValueError(
+                "--test-label must contain only ASCII letters, digits, and hyphens"
+            )
+        version = f"{version}.{test_label}"
+    return version
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -199,6 +221,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--test-label",
+        type=str,
+        default=None,
+        help=(
+            "Append a recognizable label to --dev-version, e.g. "
+            "template-manager or viewport-900-crop."
+        ),
+    )
+    parser.add_argument(
         "--package-version",
         type=str,
         default=None,
@@ -213,12 +244,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     package_version = args.package_version
+    if args.test_label and not args.dev_version:
+        raise ValueError("--test-label requires --dev-version")
     if args.dev_version:
         if package_version:
             raise ValueError(
                 "--dev-version and --package-version cannot be used together"
             )
-        package_version = build_dev_version(read_plugin_version())
+        package_version = build_dev_version(read_plugin_version(), args.test_label)
 
     if (
         package_version
