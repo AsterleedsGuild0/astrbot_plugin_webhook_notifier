@@ -187,6 +187,8 @@ from core.renderer import (
     render_html_data,
     trim_viewport_whitespace,
     validate_image_result,
+    render_preview,
+    validate_html_template,
 )
 
 
@@ -348,6 +350,42 @@ class TestRenderHtml:
         assert "min-height: 100%" not in DEFAULT_HTML_TEMPLATE
         assert "justify-content: center" not in DEFAULT_HTML_TEMPLATE
         assert "#0a0f1c" not in DEFAULT_HTML_TEMPLATE
+
+    @pytest.mark.parametrize(
+        "dangerous",
+        [
+            "<script>alert(1)</script>",
+            '<img src="https://example.com/a.png">',
+            '<div onclick="alert(1)">x</div>',
+            "<style>@import 'x.css';</style>",
+            '<meta http-equiv="refresh" content="0">',
+            '<meta http-equiv="Content-Security-Policy" content="default-src *">',
+        ],
+    )
+    def test_dangerous_html_rejected(self, dangerous):
+        with pytest.raises(ValueError):
+            validate_html_template(dangerous)
+
+    def test_preview_limits_sensitive_keys_and_csp(self):
+        html, width = render_preview(
+            "<html><head></head><body>{{ event.title }}</body></html>",
+            {"title": "safe"},
+            700,
+        )
+        assert width == 700
+        assert "Content-Security-Policy" in html
+        with pytest.raises(ValueError):
+            render_preview("<p>x</p>", {"api_key": "hidden"}, 700)
+        with pytest.raises(ValueError):
+            render_preview("<p>x</p>", {"items": [0] * 201}, 700)
+
+    def test_preview_injects_csp_when_body_mentions_header_name(self):
+        html, _ = render_preview(
+            "<html><head></head><body>Content-Security-Policy</body></html>",
+            {},
+            780,
+        )
+        assert '<meta http-equiv="Content-Security-Policy"' in html
 
 
 # ─── 图片结果校验测试 ─────────────────────────────────────

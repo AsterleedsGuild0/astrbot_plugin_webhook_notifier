@@ -245,3 +245,92 @@ class TestSendImageTargetAlias:
         assert len(results) == 1
         assert results[0]["ok"] is False
         assert results[0]["error"] == "no_targets"
+
+
+@pytest.mark.asyncio
+class TestPrivateNotificationPolicy:
+    async def test_private_text_and_image_are_skipped_by_default(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            [TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001")]
+        )
+
+        text_results = await sender.send_text("hello", endpoint)
+        image_results = await sender.send_image("not_an_image", endpoint)
+
+        expected = {
+            "name": "private",
+            "ok": True,
+            "skipped": True,
+            "error": None,
+            "reason": "private_notifications_disabled",
+        }
+        assert text_results == [expected]
+        assert image_results == [expected]
+        assert ctx.get_last_sent() is None
+
+    async def test_private_notifications_can_be_enabled(self):
+        ctx = Context()
+        sender = Sender(ctx, enable_private_notifications=True)
+        endpoint = _make_endpoint(
+            [TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001")]
+        )
+
+        results = await sender.send_text("hello", endpoint)
+
+        assert results == [{"name": "private", "ok": True, "error": None}]
+        assert ctx.get_last_sent() is not None
+
+    async def test_private_image_notifications_can_be_enabled(self):
+        ctx = Context()
+        sender = Sender(ctx, enable_private_notifications=True)
+        endpoint = _make_endpoint(
+            [TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001")]
+        )
+
+        results = await sender.send_image("https://example.com/image.png", endpoint)
+
+        assert results == [{"name": "private", "ok": True, "error": None}]
+        assert ctx.get_last_sent() is not None
+
+    async def test_group_is_always_sent_and_mixed_targets_skip_only_private(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            [
+                TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001"),
+                TargetAlias(name="group", umo="aiocqhttp:GroupMessage:20001"),
+            ]
+        )
+
+        results = await sender.send_text("hello", endpoint)
+
+        assert results[0]["skipped"] is True
+        assert results[1] == {"name": "group", "ok": True, "error": None}
+        assert ctx.get_last_sent()[0] == "aiocqhttp:GroupMessage:20001"
+
+    async def test_target_alias_only_evaluates_selected_target(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            [
+                TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001"),
+                TargetAlias(name="group", umo="aiocqhttp:GroupMessage:20001"),
+            ]
+        )
+
+        results = await sender.send_text("hello", endpoint, target_alias="group")
+
+        assert results == [{"name": "group", "ok": True, "error": None}]
+
+    async def test_session_id_with_colon_does_not_change_message_type(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            [TargetAlias(name="group", umo="aiocqhttp:GroupMessage:room:thread")]
+        )
+
+        results = await sender.send_text("hello", endpoint)
+
+        assert results == [{"name": "group", "ok": True, "error": None}]

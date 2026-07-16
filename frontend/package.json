@@ -1,0 +1,13 @@
+{
+  "name": "astrbot-plugin-webhook-notifier-template-page",
+  "private": true,
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "monaco-editor": "0.52.2"
+  },
+  "devDependencies": {
+    "vite": "6.4.3"
+  }
+}

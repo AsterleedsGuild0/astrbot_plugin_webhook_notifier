@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -13,11 +12,14 @@ from .models import EndpointRecord, NormalizedEvent, ServerConfig
 from .omp import is_omp_session_stop, normalize_omp_payload
 from .registry import EndpointRegistry
 from .renderer import (
-    render_html_default,
+    DEFAULT_HTML_TEMPLATE,
+    render_html_data,
+    render_html_template,
     render_text_default,
     trim_viewport_whitespace,
     validate_image_result,
 )
+from .template_registry import BUILT_IN_ID, ActiveTemplate, TemplateRegistry
 from .security import verify_token
 from .sender import Sender
 
@@ -50,12 +52,14 @@ class WebhookServer:
         sender: Sender,
         html_render: Callable | None = None,
         plugin_config: dict[str, Any] | None = None,
+        template_registry: TemplateRegistry | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
         self._sender = sender
         self._html_render: Callable | None = html_render
         self._plugin_config: dict[str, Any] = plugin_config or {}
+        self._template_registry = template_registry
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -222,9 +226,7 @@ class WebhookServer:
             logger.warning(
                 f"[WebhookNotifier] request_id={request_id} endpoint 未找到: {endpoint_path}"
             )
-            return self._error_response(
-                404, "not_found", f"endpoint 未找到", request_id
-            )
+            return self._error_response(404, "not_found", "endpoint 未找到", request_id)
 
         # 7. 校验 endpoint 状态
         if not self._registry.is_endpoint_active(endpoint.name, endpoint.owner_user_id):
@@ -298,16 +300,43 @@ class WebhookServer:
         # 11. 解析 payload 中的 target alias
         payload_target_alias = body.get("target_alias") or body.get("target")
 
-        # 12. 确定渲染模式（全局配置）
+        return await self._dispatch_event(
+            event, endpoint, payload_target_alias, request_id
+        )
+
+    async def _dispatch_event(
+        self,
+        event: NormalizedEvent,
+        endpoint: EndpointRecord,
+        target_alias: str | None,
+        request_id: str,
+    ) -> web.Response:
+        """应用发送策略后按全局渲染模式处理已标准化事件。"""
         render_mode = self._get_render_mode()
         fallback_to_text = self._get_fallback_to_text()
+
+        skipped_results = self._sender.preflight_private_notification_policy(
+            endpoint, target_alias
+        )
+        if skipped_results is not None:
+            return self._build_render_response(
+                request_id=request_id,
+                provider=event.provider,
+                event_name=event.event,
+                render_mode=render_mode,
+                requested_render_mode=render_mode,
+                fallback_to_text=False,
+                fallback_reason=None,
+                send_results=skipped_results,
+                rendered=False,
+            )
 
         # 13. 按模式分支
         if render_mode == "html_image":
             return await self._handle_html_image(
                 event,
                 endpoint,
-                payload_target_alias,
+                target_alias,
                 request_id,
                 fallback_to_text,
             )
@@ -315,7 +344,7 @@ class WebhookServer:
             return await self._handle_text(
                 event,
                 endpoint,
-                payload_target_alias,
+                target_alias,
                 request_id,
             )
 
@@ -355,142 +384,47 @@ class WebhookServer:
         request_id: str,
         fallback_to_text: bool,
     ) -> web.Response:
-        """HTML 卡片渲染与发送。
-
-        分阶段处理：HTML 渲染 → html_render 截图 → 图片校验 → 发送。
-        任一阶段失败时按 fallback_to_text 降级或返回 500。
-        """
-        # ── Phase 1: HTML 模板渲染 ────────────────────────────
-        try:
-            html_str = render_html_default(event)
-        except Exception as e:
-            logger.error(
-                f"[WebhookNotifier] request_id={request_id} HTML 模板渲染失败: {e}"
+        """渲染一次 active 快照；custom 失败时在发送前尝试 built-in。"""
+        active = (
+            self._template_registry.get_active()
+            if self._template_registry
+            else ActiveTemplate(
+                BUILT_IN_ID, "Built-in", DEFAULT_HTML_TEMPLATE, 812, 0, ""
             )
-            if fallback_to_text:
-                return await self._fallback_to_text(
-                    event,
-                    endpoint,
-                    target_alias,
-                    request_id,
-                    "template_render_failed",
-                )
-            return self._error_response(
-                500, "render_failed", f"HTML 模板渲染失败: {e}", request_id
-            )
-
-        # ── Phase 2: AstrBot html_render 截图 ─────────────────
-        if not self._html_render:
-            logger.error(
-                f"[WebhookNotifier] request_id={request_id} html_render 回调未设置"
-            )
-            if fallback_to_text:
-                return await self._fallback_to_text(
-                    event,
-                    endpoint,
-                    target_alias,
-                    request_id,
-                    "html_render_not_available",
-                )
-            return self._error_response(
-                500, "render_failed", "html_render 回调未设置", request_id
-            )
-
-        render_options = self._get_render_options()
-        logger.info(
-            f"[WebhookNotifier] request_id={request_id} html_image 渲染参数: "
-            f"viewport_width={render_options.get('viewport_width')} "
-            f"viewport_height={render_options.get('viewport_height')} "
-            f"full_page={render_options.get('full_page')} "
-            f"type={render_options.get('type')} "
-            f"quality={render_options.get('quality')} "
-            f"device_scale_factor_level={render_options.get('device_scale_factor_level')} "
-            f"wait_until={render_options.get('wait_until')} "
-            f"clip={render_options.get('clip')} "
-            f"html_length={len(html_str)}"
         )
-        # 构造模板数据 — render_html_default 使用 Jinja2 已生成 HTML，
-        # 传给 html_render 时 data 可不传额外变量，但保留 event 用于兼容
-        event_dict = event.to_dict()
-        event_dict["generated_at"] = datetime.now(timezone.utc).isoformat()
-        event_dict["event_time"] = event_dict.get("emitted_at", "")
-
-        try:
-            image_result = await self._html_render(
-                html_str,
-                {"event": event_dict},
-                return_url=False,
-                options=render_options,
+        attempts = [active]
+        if active.id != BUILT_IN_ID:
+            attempts.append(
+                ActiveTemplate(
+                    BUILT_IN_ID, "Built-in", DEFAULT_HTML_TEMPLATE, 812, 0, ""
+                )
             )
-            result_type = type(image_result).__name__
-            result_hint = ""
-            if isinstance(image_result, str):
-                if image_result.startswith(("http://", "https://")):
-                    result_hint = "url"
-                elif image_result.startswith("base64://"):
-                    result_hint = "base64"
-                elif image_result.startswith("data:image/"):
-                    result_hint = "data_url"
-                else:
-                    result_hint = "path_or_string"
-            elif isinstance(image_result, bytes):
-                result_hint = f"bytes:{len(image_result)}"
-            logger.info(
-                f"[WebhookNotifier] request_id={request_id} html_render 返回: "
-                f"type={result_type} kind={result_hint}"
-            )
-        except Exception as e:
-            logger.error(
-                f"[WebhookNotifier] request_id={request_id} html_render 截图失败: {e}"
-            )
+        image_result: Any = None
+        render_options: dict[str, Any] = {}
+        failure_reason = "render_failed"
+        failure_message = "HTML 图片渲染失败"
+        for template in attempts:
+            try:
+                image_result, render_options = await self._render_image_attempt(
+                    event, template, request_id
+                )
+                break
+            except Exception as e:
+                failure_reason = getattr(e, "reason", "render_failed")
+                failure_message = str(e)
+                logger.error(
+                    f"[WebhookNotifier] request_id={request_id} "
+                    f"template={template.id} 图片生成失败: {e}"
+                )
+        else:
             if fallback_to_text:
                 return await self._fallback_to_text(
-                    event,
-                    endpoint,
-                    target_alias,
-                    request_id,
-                    "html_render_failed",
+                    event, endpoint, target_alias, request_id, failure_reason
                 )
             return self._error_response(
-                500, "render_failed", f"html_render 截图失败: {e}", request_id
+                500, "render_failed", failure_message, request_id
             )
 
-        # ── Phase 3: 图片结果校验 ─────────────────────────────
-        try:
-            validate_image_result(image_result)
-        except (ValueError, TypeError) as e:
-            logger.error(
-                f"[WebhookNotifier] request_id={request_id} 图片结果校验失败: {e}"
-            )
-            if fallback_to_text:
-                return await self._fallback_to_text(
-                    event,
-                    endpoint,
-                    target_alias,
-                    request_id,
-                    "image_validation_failed",
-                )
-            return self._error_response(
-                500, "render_failed", f"图片校验失败: {e}", request_id
-            )
-
-        # ── Phase 3b: 裁切视口多余空白 ──────────────────────
-        # 对本地文件进行右/底部多余背景裁切，非本地类型静默跳过
-        result_kind = "unknown"
-        if isinstance(image_result, str):
-            result_kind = "path" if os.path.exists(image_result) else "url_or_string"
-        elif isinstance(image_result, bytes):
-            result_kind = f"bytes:{len(image_result)}"
-        image_result = trim_viewport_whitespace(
-            image_result,
-            canvas_width=render_options.get("viewport_width") or 812,
-        )
-        logger.info(
-            f"[WebhookNotifier] request_id={request_id} 裁切后: "
-            f"type={type(image_result).__name__} kind={result_kind}"
-        )
-
-        # ── Phase 4: 发送图片 ─────────────────────────────────
         try:
             send_results = await self._sender.send_image(
                 image_result, endpoint, target_alias
@@ -543,6 +477,52 @@ class WebhookServer:
             send_results=send_results,
         )
 
+    async def _render_image_attempt(
+        self,
+        event: NormalizedEvent,
+        template: ActiveTemplate,
+        request_id: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        """完成单个模板的生成、截图、校验与 trim，不发送。"""
+        if not self._html_render:
+            error = RuntimeError("html_render 回调未设置")
+            error.reason = "html_render_not_available"  # type: ignore[attr-defined]
+            raise error
+        try:
+            event_data = render_html_data(event)["event"]
+            rendered_html = render_html_template(template.content, event_data)
+        except Exception as exc:
+            error = RuntimeError(f"HTML 模板渲染失败: {exc}")
+            error.reason = "template_render_failed"  # type: ignore[attr-defined]
+            raise error from exc
+        render_options = self._get_render_options()
+        render_options["viewport_width"] = template.canvas_width
+        try:
+            image_result = await self._html_render(
+                "{{ rendered_html | safe }}",
+                {"rendered_html": rendered_html},
+                return_url=False,
+                options=render_options,
+            )
+        except Exception as exc:
+            error = RuntimeError(f"html_render 截图失败: {exc}")
+            error.reason = "html_render_failed"  # type: ignore[attr-defined]
+            raise error from exc
+        try:
+            validate_image_result(image_result)
+        except (ValueError, TypeError) as exc:
+            error = RuntimeError(f"图片校验失败: {exc}")
+            error.reason = "image_validation_failed"  # type: ignore[attr-defined]
+            raise error from exc
+        image_result = trim_viewport_whitespace(
+            image_result, canvas_width=template.canvas_width
+        )
+        logger.info(
+            f"[WebhookNotifier] request_id={request_id} template={template.id} "
+            f"html_length={len(rendered_html)} canvas_width={template.canvas_width}"
+        )
+        return image_result, render_options
+
     async def _fallback_to_text(
         self,
         event: NormalizedEvent,
@@ -593,9 +573,15 @@ class WebhookServer:
         fallback_to_text: bool,
         fallback_reason: str | None,
         send_results: list[dict[str, Any]],
+        rendered: bool = True,
     ) -> web.Response:
         """构造统一渲染响应 JSON。"""
-        delivered = all(r.get("ok", False) for r in send_results)
+        skipped_results = [r for r in send_results if r.get("skipped", False)]
+        failed_results = [r for r in send_results if not r.get("ok", False)]
+        delivered = any(
+            r.get("ok", False) and not r.get("skipped", False) for r in send_results
+        )
+        all_skipped = bool(send_results) and len(skipped_results) == len(send_results)
         target_names = [r.get("name", "unknown") for r in send_results]
 
         data: dict[str, Any] = {
@@ -608,12 +594,25 @@ class WebhookServer:
             "requested_render_mode": requested_render_mode,
             "fallback_to_text": fallback_to_text,
             "fallback_reason": fallback_reason,
+            "skipped": bool(skipped_results),
+            "rendered": rendered,
+            "retryable": bool(failed_results),
         }
 
-        if not delivered:
+        if skipped_results:
+            data["skip_reason"] = "private_notifications_disabled"
+
+        if failed_results or skipped_results:
             data["send_results"] = send_results
 
-        message = "ok" if delivered else "partial_failure"
+        if failed_results:
+            message = "partial_failure"
+        elif all_skipped:
+            message = "skipped"
+        elif skipped_results:
+            message = "partial_delivery"
+        else:
+            message = "ok"
         return web.json_response({"code": 0, "message": message, "data": data})
 
     @staticmethod

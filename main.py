@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import json
+import inspect
 import os
-from typing import Any
+from typing import Any, Awaitable, cast
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_type import MessageType
 
 from .core.models import EndpointStatus, ServerConfig
@@ -18,6 +19,15 @@ from .core.registry import (
 )
 from .core.sender import Sender
 from .core.server import WebhookServer
+from .core.template_registry import (
+    MAX_TEMPLATE_BYTES,
+    MAX_TEMPLATES,
+    TemplateConflictError,
+    TemplateReadOnlyError,
+    TemplateRegistry,
+    TemplateRegistryError,
+)
+from .core.renderer import render_preview
 
 PLUGIN_NAME = "Webhook Notifier"
 COMMAND = "whn"
@@ -39,9 +49,11 @@ class WebhookNotifierPlugin(Star):
 
         # 运行时组件（在 initialize 中初始化）
         self._registry: EndpointRegistry | None = None
+        self._template_registry: TemplateRegistry | None = None
         self._sender: Sender | None = None
         self._server: WebhookServer | None = None
         self._server_config: ServerConfig | None = None
+        self._register_template_web_apis()
 
     async def initialize(self) -> None:
         if not self._enabled:
@@ -49,11 +61,13 @@ class WebhookNotifierPlugin(Star):
             return
 
         # 初始化插件数据目录
+        data_dir_available = True
         try:
             data_dir = StarTools.get_data_dir(
                 plugin_name="astrbot_plugin_webhook_notifier"
             )
         except (ValueError, RuntimeError) as e:
+            data_dir_available = False
             logger.error(
                 f"[WebhookNotifier] 无法获取插件数据目录: {e}，将使用 fallback 路径"
             )
@@ -64,9 +78,21 @@ class WebhookNotifierPlugin(Star):
         # 初始化 Registry
         self._registry = EndpointRegistry(data_dir)
         self._registry.expire_stale_pending()
+        if data_dir_available:
+            try:
+                self._template_registry = TemplateRegistry(data_dir)
+            except Exception as e:
+                logger.error(f"[WebhookNotifier] 模板 Registry 初始化失败: {e}")
+        else:
+            logger.error(
+                "[WebhookNotifier] StarTools 数据目录不可用，模板 Registry 已禁用"
+            )
 
         # 初始化 Sender
-        self._sender = Sender(self.context)
+        self._sender = Sender(
+            self.context,
+            bool(self.config.get("enable_private_notifications", False)),
+        )
 
         # 初始化服务器配置
         self._server_config = ServerConfig.from_plugin_config(
@@ -97,6 +123,210 @@ class WebhookNotifierPlugin(Star):
         if self._server:
             await self._server.stop()
         logger.info("[WebhookNotifier] 插件已卸载")
+
+    # ─── Template Web API ───────────────────────────────────
+
+    def _register_template_web_apis(self) -> None:
+        """在构造期注册模板管理 API。"""
+        prefix = "/astrbot_plugin_webhook_notifier"
+        routes = (
+            ("templates", self._api_templates, ["GET"], "List templates"),
+            (
+                "templates/<template_id>",
+                self._api_template_detail,
+                ["GET"],
+                "Get template",
+            ),
+            ("templates/save", self._api_template_save, ["POST"], "Save template"),
+            (
+                "templates/apply",
+                self._api_template_apply,
+                ["POST"],
+                "Apply template",
+            ),
+            (
+                "templates/delete",
+                self._api_template_delete,
+                ["POST"],
+                "Delete template",
+            ),
+            (
+                "templates/preview",
+                self._api_template_preview,
+                ["POST"],
+                "Preview template",
+            ),
+        )
+        for endpoint, handler, methods, description in routes:
+            self.context.register_web_api(
+                f"{prefix}/{endpoint}", handler, methods, description
+            )
+
+    def _template_registry_or_response(self):
+        if self._template_registry is None:
+            return None, error_response("模板 Registry 未初始化", 503)
+        return self._template_registry, None
+
+    async def _api_templates(self):
+        registry, unavailable = self._template_registry_or_response()
+        if unavailable:
+            return unavailable
+        assert registry is not None
+        snapshot = registry.snapshot
+        return json_response(
+            {
+                "templates": registry.list_templates(),
+                "active": snapshot.active,
+                "requested_active": snapshot.active,
+                "effective_active": snapshot.effective_active,
+                "read_only": snapshot.read_only,
+                "sample_event": self._sample_preview_event(),
+                "limits": {
+                    "max_templates": MAX_TEMPLATES,
+                    "max_template_bytes": MAX_TEMPLATE_BYTES,
+                    "canvas_width_min": 320,
+                    "canvas_width_max": 2048,
+                },
+            }
+        )
+
+    async def _api_template_detail(self, template_id: str | None = None):
+        registry, unavailable = self._template_registry_or_response()
+        if unavailable:
+            return unavailable
+        assert registry is not None
+        template_id = template_id or self._request_template_id()
+        result = registry.export_template(template_id)
+        if result is None:
+            return error_response("模板不存在", 404)
+        return json_response(result)
+
+    async def _api_template_save(self):
+        registry, unavailable = self._template_registry_or_response()
+        if unavailable:
+            return unavailable
+        assert registry is not None
+        try:
+            body = await self._request_json()
+            apply_value = body.get("apply", False)
+            if not isinstance(apply_value, bool):
+                raise ValueError("apply 必须是 bool")
+            result = registry.save(
+                body.get("id"),
+                body.get("display_name"),
+                body.get("content"),
+                body.get("canvas_width"),
+                body.get("expected_revision"),
+                apply_value,
+            )
+            snapshot = registry.snapshot
+            return json_response(
+                {
+                    "template": registry.export_template(result.id),
+                    "active": snapshot.active,
+                    "effective_active": snapshot.effective_active,
+                }
+            )
+        except TemplateConflictError as e:
+            return error_response(str(e), 409)
+        except TemplateReadOnlyError as e:
+            return error_response(str(e), 503)
+        except (TemplateRegistryError, ValueError, TypeError) as e:
+            return error_response(str(e), 400)
+
+    async def _api_template_apply(self):
+        registry, unavailable = self._template_registry_or_response()
+        if unavailable:
+            return unavailable
+        assert registry is not None
+        try:
+            body = await self._request_json()
+            registry.apply(body.get("id"), body.get("expected_revision"))
+            snapshot = registry.snapshot
+            return json_response(
+                {
+                    "active": snapshot.active,
+                    "effective_active": snapshot.effective_active,
+                }
+            )
+        except TemplateConflictError as e:
+            return error_response(str(e), 409)
+        except TemplateReadOnlyError as e:
+            return error_response(str(e), 503)
+        except (TemplateRegistryError, ValueError, TypeError) as e:
+            return error_response(str(e), 400)
+
+    async def _api_template_delete(self):
+        registry, unavailable = self._template_registry_or_response()
+        if unavailable:
+            return unavailable
+        assert registry is not None
+        try:
+            body = await self._request_json()
+            registry.delete(body.get("id"), body.get("expected_revision"))
+            snapshot = registry.snapshot
+            return json_response(
+                {
+                    "deleted": True,
+                    "active": snapshot.active,
+                    "effective_active": snapshot.effective_active,
+                }
+            )
+        except TemplateConflictError as e:
+            return error_response(str(e), 409)
+        except TemplateReadOnlyError as e:
+            return error_response(str(e), 503)
+        except (TemplateRegistryError, ValueError, TypeError) as e:
+            return error_response(str(e), 400)
+
+    async def _api_template_preview(self):
+        registry, unavailable = self._template_registry_or_response()
+        if unavailable:
+            return unavailable
+        assert registry is not None
+        try:
+            body = await self._request_json()
+            content = body.get("content")
+            width = body.get("canvas_width")
+            template_id = body.get("id")
+            if content is None and template_id:
+                template = registry.get(str(template_id))
+                if template is None or not template.valid:
+                    raise TemplateRegistryError("模板不存在或无效")
+                content = template.content
+                width = template.canvas_width if width is None else width
+            if not isinstance(content, str):
+                raise ValueError("content 必须是字符串")
+            html, width = render_preview(content, body.get("event"), width)
+            return json_response({"html": html, "canvas_width": width})
+        except (TemplateRegistryError, ValueError, TypeError) as e:
+            return error_response(str(e), 400)
+
+    @staticmethod
+    async def _request_json() -> dict[str, Any]:
+        value = request.json
+        if callable(value):
+            value = value()
+        if inspect.isawaitable(value):
+            value = await cast(Awaitable[Any], value)
+        if not isinstance(value, dict):
+            raise ValueError("请求体必须是 JSON object")
+        return value
+
+    @staticmethod
+    def _request_template_id() -> str:
+        view_args = getattr(request, "view_args", None) or {}
+        return str(view_args.get("template_id", ""))
+
+    @staticmethod
+    def _sample_preview_event() -> dict[str, Any]:
+        return {
+            "title": "Webhook 通知",
+            "source": "AstrBot",
+            "status": "success",
+            "summary": "模板预览示例",
+            "fields": [{"label": "事件", "value": "preview"}],
+        }
 
     # ─── 状态命令 ───────────────────────────────────────────
 
@@ -265,6 +495,14 @@ class WebhookNotifierPlugin(Star):
 
         # 构造返回信息
         url = self._build_webhook_url(endpoint_path)
+        private_notification_notice = ""
+        if not bool(self.config.get("enable_private_notifications", False)):
+            private_notification_notice = (
+                "\n\nℹ️ 当前 Webhook 私聊状态通知已关闭：endpoint 和 Token 仍有效，"
+                "但 Webhook 通知会返回 skipped。请在配置中开启 "
+                "enable_private_notifications 并 reload 后恢复。"
+            )
+
         return (
             f"✅ 私聊 endpoint 创建成功\n\n"
             f"名称: {endpoint_name}\n"
@@ -274,6 +512,7 @@ class WebhookNotifierPlugin(Star):
             f"  OMP_SESSION_WEBHOOK_URL={url}\n"
             f"  OMP_SESSION_WEBHOOK_TOKEN={token}\n\n"
             f"⚠️ 安全提示：Token 只展示一次，泄露后请立即使用 /whn token rotate {endpoint_name} 轮换。"
+            f"{private_notification_notice}"
         )
 
     async def _create_group_pending(
@@ -549,6 +788,7 @@ class WebhookNotifierPlugin(Star):
                 sender=self._sender,
                 html_render=self.html_render,
                 plugin_config=dict(self.config),
+                template_registry=self._template_registry,
             )
             await self._server.start()
         except Exception as e:
@@ -650,7 +890,9 @@ class WebhookNotifierPlugin(Star):
         active_count = self._registry.count_active() if self._registry else 0
         render_mode = self._get_render_mode()
         fallback = self.config.get("fallback_to_text", True)
-        templates_dir = self.config.get("templates_dir", "templates")
+        private_notifications = bool(
+            self.config.get("enable_private_notifications", False)
+        )
         host = self._server_config.host if self._server_config else "127.0.0.1"
         port = self._server_config.port if self._server_config else 18080
         base_path = self._server_config.base_path if self._server_config else "/webhook"
@@ -666,7 +908,7 @@ class WebhookNotifierPlugin(Star):
             f"Active Endpoint：{active_count} 个",
             f"渲染模式：{render_mode}",
             f"渲染降级：{'开启' if fallback else '关闭'}",
-            f"模板目录：{templates_dir}",
+            f"Webhook 私聊状态通知：{'开启' if private_notifications else '关闭'}",
             f"监听地址：http://{host}:{port}{base_path}",
         ]
 

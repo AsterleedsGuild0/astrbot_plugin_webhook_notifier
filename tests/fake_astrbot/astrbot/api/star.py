@@ -12,6 +12,12 @@ class Context:
 
     def __init__(self) -> None:
         self._sent_messages: list[tuple[str, MessageChain]] = []
+        self.web_apis: list[tuple[str, Any, list[str], str]] = []
+
+    def register_web_api(
+        self, route: str, handler: Any, methods: list[str], description: str
+    ) -> None:
+        self.web_apis.append((route, handler, methods, description))
 
     async def send_message(self, umo: str, message_chain: MessageChain) -> bool:
         """发送消息。
@@ -78,6 +84,5 @@ class StarTools:
     @staticmethod
     def get_data_dir(plugin_name: str) -> str:
         import tempfile
-        import os
 
         return tempfile.mkdtemp(prefix=f"{plugin_name}_")

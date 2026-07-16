@@ -12,6 +12,12 @@
     "hint": "MS2 支持 text 和 html_image。html_image 使用 HTML 模板渲染卡片并截图发送；渲染失败时可按 fallback_to_text 设置降级为纯文本。",
     "default": "text"
   },
+  "enable_private_notifications": {
+    "description": "是否允许 Webhook 私聊主动通知",
+    "type": "bool",
+    "hint": "默认关闭 Webhook 私聊主动通知。开启后允许向所有平台的 FriendMessage 目标发送；OneBot/NapCat 频繁私聊（尤其发图）存在 QQ 风控或封禁风险，不建议开启；QQ 官方 Bot 也仅应在确认主动消息规则与额度后开启；其他平台请自行评估风险。",
+    "default": false
+  },
   "fallback_to_text": {
     "description": "HTML 卡片渲染失败时降级为纯文本",
     "type": "bool",
@@ -34,12 +40,6 @@
     "editor_theme": "vs-dark",
     "hint": "参考配置。运行时 endpoint 目标白名单通过命令行创建和管理。",
     "default": "# 示例：\n# - name: default_group\n#   umo: aiocqhttp:GroupMessage:123456789\n# - name: owner_private\n#   umo: aiocqhttp:FriendMessage:10001\n"
-  },
-  "templates_dir": {
-    "description": "自定义 HTML 模板目录",
-    "type": "string",
-    "hint": "自定义 HTML 模板目录。留空使用内置默认模板。自定义模板文件加载功能将在后续版本中实现。",
-    "default": "templates"
   },
   "render_options": {
     "description": "HTML 卡片渲染参数",

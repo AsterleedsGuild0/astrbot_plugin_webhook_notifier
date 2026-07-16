@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
-import struct
+import json
+import math
+import re
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from typing import Any
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader
 from jinja2.sandbox import SandboxedEnvironment
+from jinja2.utils import Namespace
 
 from .models import NormalizedEvent
 
@@ -15,6 +19,28 @@ DEVICE_SCALE_CANDIDATES = (1.0, 1.3, 1.8)
 HTML_BODY_PADDING = 16
 HTML_CARD_WIDTH = 780
 RIGHT_VISUAL_CROP_PADDING = 12
+MAX_RENDERED_HTML_BYTES = 2 * 1024 * 1024
+MAX_PREVIEW_EVENT_BYTES = 64 * 1024
+MAX_PREVIEW_DEPTH = 10
+MAX_PREVIEW_NODES = 2000
+MAX_PREVIEW_CONTAINER = 200
+MAX_PREVIEW_STRING = 8192
+CSP_META = (
+    '<meta http-equiv="Content-Security-Policy" '
+    "content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:\">"
+)
+_SENSITIVE_KEYS = {
+    "token",
+    "password",
+    "secret",
+    "authorization",
+    "cookie",
+    "apikey",
+    "accesstoken",
+}
+_FORBIDDEN_TAGS = {"script", "iframe", "object", "embed", "base", "form"}
+_CSS_DANGEROUS = re.compile(r"url\s*\(|@import\b|expression\s*\(", re.I)
+_EXTERNAL_RESOURCE = re.compile(r"(?:https?|file)\s*:", re.I)
 
 
 # 默认文本模板（与 FSD 一致）
@@ -375,18 +401,151 @@ DEFAULT_HTML_TEMPLATE = """\
 </html>"""
 
 
-def _create_sandbox() -> SandboxedEnvironment:
+def _create_sandbox(autoescape: bool = False) -> SandboxedEnvironment:
     """创建 Jinja2 sandbox 环境。
 
     SandboxedEnvironment 默认已限制危险操作。
     模板上下文只注入 event 对象，不暴露 Python 内置函数。
     """
-    return SandboxedEnvironment(
+    env = SandboxedEnvironment(
         loader=BaseLoader(),
-        autoescape=False,
+        autoescape=autoescape,
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    env.globals.clear()
+    env.globals["namespace"] = Namespace
+    return env
+
+
+class _HTMLPolicyParser(HTMLParser):
+    """检查模板和渲染 HTML 的危险标签与属性。"""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._check(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._check(tag, attrs)
+
+    def _check(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in _FORBIDDEN_TAGS:
+            raise ValueError(f"HTML 标签不允许: {tag}")
+        lowered = {name.lower(): (value or "") for name, value in attrs}
+        if any(name.startswith("on") for name in lowered):
+            raise ValueError("HTML 事件属性不允许")
+        if tag == "meta":
+            http_equiv = lowered.get("http-equiv", "").lower()
+            if http_equiv == "refresh":
+                raise ValueError("meta refresh 不允许")
+            if http_equiv == "content-security-policy":
+                raise ValueError("不允许手动设置 CSP")
+        for name, value in lowered.items():
+            compact = re.sub(r"[\x00-\x20]+", "", value).lower()
+            if "javascript:" in compact:
+                raise ValueError("javascript URL 不允许")
+            if name == "style" and _CSS_DANGEROUS.search(value):
+                raise ValueError("危险 CSS 不允许")
+            if name in {"src", "href", "action", "poster", "data"}:
+                if _EXTERNAL_RESOURCE.search(compact):
+                    raise ValueError("外部资源不允许")
+
+
+def validate_html_policy(html: str) -> None:
+    """执行严格 HTML/CSS/外部资源策略校验。"""
+    if not isinstance(html, str):
+        raise ValueError("HTML 必须是字符串")
+    if _CSS_DANGEROUS.search(html):
+        raise ValueError("危险 CSS 不允许")
+    parser = _HTMLPolicyParser(convert_charrefs=True)
+    parser.feed(html)
+    parser.close()
+
+
+def validate_html_template(template_str: str) -> None:
+    """校验 HTML 模板策略并提前编译。"""
+    validate_html_policy(template_str)
+    _create_sandbox(autoescape=True).from_string(template_str)
+
+
+def normalize_preview_event(event: Any) -> dict[str, Any]:
+    """校验并复制 preview event，拒绝超限和敏感键。"""
+    if not isinstance(event, dict):
+        raise ValueError("event 必须是 JSON object")
+    nodes = 0
+
+    def walk(value: Any, depth: int) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if nodes > MAX_PREVIEW_NODES:
+            raise ValueError("event 节点数超过限制")
+        if depth > MAX_PREVIEW_DEPTH:
+            raise ValueError("event 深度超过限制")
+        if isinstance(value, dict):
+            if len(value) > MAX_PREVIEW_CONTAINER:
+                raise ValueError("event 单容器元素数超过限制")
+            result: dict[str, Any] = {}
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise ValueError("event object key 必须是字符串")
+                normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+                if any(marker in normalized_key for marker in _SENSITIVE_KEYS):
+                    raise ValueError("event 包含敏感键")
+                result[key] = walk(child, depth + 1)
+            return result
+        if isinstance(value, list):
+            if len(value) > MAX_PREVIEW_CONTAINER:
+                raise ValueError("event 单容器元素数超过限制")
+            return [walk(child, depth + 1) for child in value]
+        if isinstance(value, str):
+            if len(value) > MAX_PREVIEW_STRING:
+                raise ValueError("event 字符串超过限制")
+            return value
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("event 数字必须是 finite")
+            return value
+        raise ValueError("event 包含非 JSON 值")
+
+    normalized = walk(event, 0)
+    canonical = json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if len(canonical) > MAX_PREVIEW_EVENT_BYTES:
+        raise ValueError("event canonical JSON 超过 64KiB")
+    return normalized
+
+
+def _inject_csp(html: str) -> str:
+    match = re.search(r"<head(?:\s[^>]*)?>", html, re.I)
+    if match:
+        return html[: match.end()] + CSP_META + html[match.end() :]
+    return CSP_META + html
+
+
+def render_html_template(template_str: str, event: dict[str, Any]) -> str:
+    """使用仅含 event 根变量的 sandbox 渲染并校验 HTML。"""
+    validate_html_template(template_str)
+    env = _create_sandbox(autoescape=True)
+    result = env.from_string(template_str).render(event=event)
+    if len(result.encode("utf-8")) > MAX_RENDERED_HTML_BYTES:
+        raise ValueError("渲染后 HTML 超过 2MiB")
+    validate_html_policy(result)
+    return _inject_csp(result)
+
+
+def render_preview(template_str: str, event: Any, canvas_width: Any) -> tuple[str, int]:
+    """校验 preview 输入并返回不持久化的 HTML 与宽度。"""
+    if isinstance(canvas_width, bool) or not isinstance(canvas_width, int):
+        raise ValueError("canvas_width 必须是整数")
+    if not 320 <= canvas_width <= 2048:
+        raise ValueError("canvas_width 必须在 320..2048")
+    normalized = normalize_preview_event(event)
+    return render_html_template(template_str, normalized), canvas_width
 
 
 def render_text(
@@ -490,10 +649,7 @@ def render_html(
         template_str = DEFAULT_HTML_TEMPLATE
 
     context = render_html_data(event)
-    env = _create_sandbox()
-    template = env.from_string(template_str)
-    result = template.render(**context)
-    return result
+    return render_html_template(template_str, context["event"])
 
 
 def render_html_default(event: NormalizedEvent) -> str:
@@ -577,7 +733,7 @@ def validate_image_result(result: Any) -> bool:
             try:
                 decoded = base64.b64decode(result_str)
             except Exception:
-                raise ValueError(f"无法识别的图片结果: 不是 URL、路径或 base64 编码")
+                raise ValueError("无法识别的图片结果: 不是 URL、路径或 base64 编码")
             return _validate_image_bytes(decoded)
 
     raise TypeError(f"不支持的图片结果类型: {type(result).__name__}")

@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "template-editor": {
+      "title": "通知模板管理",
+      "description": "管理 Webhook 通知模板、预览渲染结果并选择当前应用模板。"
+    }
+  }
+}

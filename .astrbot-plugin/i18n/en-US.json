@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "template-editor": {
+      "title": "Notification Templates",
+      "description": "Manage webhook notification templates, preview rendered output, and choose the active template."
+    }
+  }
+}

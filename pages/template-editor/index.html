@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>通知模板管理</title>
+    <script type="module" crossorigin src="./assets/index-BJAne2Pj.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DqKd4--X.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="page-header">
+        <div class="page-heading">
+          <div class="app-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M5 4.75h14v14.5H5z" />
+              <path d="m8 9 2.25 2.25L8 13.5M12.5 14h3.5" />
+            </svg>
+          </div>
+          <div>
+            <p class="page-kicker">Webhook Notifier</p>
+            <h1>通知模板管理</h1>
+            <p class="page-description">编辑通知卡片模板，并在应用前检查实际渲染结果。</p>
+          </div>
+        </div>
+        <div class="header-meta">
+          <span id="worker-status" class="status-chip" data-state="loading">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="worker-status-text">编辑器初始化中</span>
+          </span>
+        </div>
+      </header>
+
+      <div id="notice-region" class="notice-region" role="status" aria-live="polite"></div>
+
+      <section id="bridge-gate" class="gate-card" aria-live="polite">
+        <div class="gate-spinner" aria-hidden="true"></div>
+        <div>
+          <h2 id="gate-title">正在载入模板</h2>
+          <p id="gate-message">正在连接 AstrBot 插件页面并读取模板列表。</p>
+          <button id="retry-button" class="button button-secondary is-hidden" type="button">重新载入</button>
+        </div>
+      </section>
+
+      <main id="page-content" class="workspace is-hidden">
+        <aside class="template-rail" aria-labelledby="template-list-heading">
+          <div class="rail-heading">
+            <div>
+              <p class="section-kicker">模板库</p>
+              <h2 id="template-list-heading">通知模板</h2>
+            </div>
+            <button id="new-template-button" class="icon-button" type="button" aria-label="新建模板" title="新建模板">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            </button>
+          </div>
+
+          <div id="template-list" class="template-list" role="listbox" aria-label="模板列表"></div>
+          <div id="template-empty" class="empty-list is-hidden">
+            <strong>暂无可用模板</strong>
+            <span>请检查后端是否已初始化内置模板。</span>
+          </div>
+
+          <div class="rail-actions">
+            <button id="copy-template-button" class="button button-secondary" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h10v10H8z" /><path d="M6 15H4V4h11v2" /></svg>
+              复制当前模板
+            </button>
+            <button
+              id="delete-template-button"
+              class="button button-danger-quiet"
+              type="button"
+              aria-describedby="delete-template-help"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M7 7l1 13h8l1-13" /></svg>
+              <span id="delete-template-label">删除模板</span>
+            </button>
+            <p id="delete-template-help" class="rail-action-help">选择模板后可查看删除条件。</p>
+          </div>
+        </aside>
+
+        <section class="editor-workspace" aria-label="模板编辑工作区">
+          <div class="command-surface">
+            <div class="template-fields">
+              <label class="field field-name" for="template-name">
+                <span>模板名称</span>
+                <input id="template-name" type="text" maxlength="80" autocomplete="off" />
+              </label>
+              <label class="field field-width" for="canvas-width">
+                <span>画布宽度</span>
+                <span class="input-with-unit">
+                  <input id="canvas-width" type="number" min="320" max="2048" step="1" inputmode="numeric" />
+                  <span aria-hidden="true">px</span>
+                </span>
+              </label>
+              <div class="document-state" aria-live="polite">
+                <span id="dirty-indicator" class="dirty-indicator" data-dirty="false">
+                  <span aria-hidden="true"></span>
+                  <span id="dirty-label">已保存</span>
+                </span>
+                <span id="revision-label" class="revision-label"></span>
+              </div>
+            </div>
+
+            <div class="command-actions" aria-label="模板操作">
+              <button id="save-button" class="button button-secondary" type="button">保存</button>
+              <button id="apply-button" class="button button-secondary" type="button">应用</button>
+              <button id="save-apply-button" class="button button-primary" type="button">保存并应用</button>
+            </div>
+          </div>
+
+          <div id="field-error" class="field-error is-hidden" role="alert"></div>
+
+          <div class="edit-preview-grid">
+            <section class="panel editor-panel" aria-labelledby="template-editor-heading">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">HTML / Jinja2</p>
+                  <h2 id="template-editor-heading">模板内容</h2>
+                </div>
+                <span id="editor-mode-label" class="panel-meta">可编辑</span>
+              </div>
+              <div id="template-editor" class="monaco-host" aria-label="HTML 和 Jinja2 模板编辑器"></div>
+            </section>
+
+            <section class="panel preview-panel" aria-labelledby="preview-heading">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">安全预览</p>
+                  <h2 id="preview-heading">渲染结果</h2>
+                </div>
+                <div class="preview-heading-actions">
+                  <span id="preview-width-label" class="panel-meta">—</span>
+                  <button id="refresh-preview-button" class="icon-button icon-button-small" type="button" aria-label="刷新预览" title="刷新预览">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a7 7 0 1 0 1 5M19 4v4h-4" /></svg>
+                  </button>
+                </div>
+              </div>
+              <div
+                id="preview-stage"
+                class="preview-stage"
+                data-state="empty"
+                data-preview-layout="scale-to-fit"
+              >
+                <div id="preview-placeholder" class="preview-placeholder">
+                  <div class="preview-placeholder-icon" aria-hidden="true"></div>
+                  <strong id="preview-state-title">等待预览</strong>
+                  <span id="preview-state-message">模板载入后将在这里显示渲染结果。</span>
+                </div>
+                <div id="preview-canvas" class="preview-canvas is-hidden" aria-hidden="true">
+                  <iframe
+                    id="preview-frame"
+                    class="preview-frame"
+                    title="通知模板安全预览"
+                    sandbox=""
+                    referrerpolicy="no-referrer"
+                  ></iframe>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <details id="preview-data-panel" class="preview-data-panel">
+            <summary>
+              <span>
+                <span class="section-kicker">会话内数据</span>
+                <strong>预览数据</strong>
+              </span>
+              <span class="summary-hint">修改 JSON 以检查不同通知内容</span>
+            </summary>
+            <div class="preview-data-body">
+              <div class="preview-data-toolbar">
+                <p>仅用于本页预览，不会保存到模板。</p>
+                <button id="reset-event-button" class="button button-quiet" type="button">恢复默认</button>
+              </div>
+              <div id="event-editor" class="monaco-host event-editor" aria-label="预览数据 JSON 编辑器"></div>
+              <div id="json-error" class="json-error is-hidden" role="alert"></div>
+            </div>
+          </details>
+        </section>
+      </main>
+    </div>
+
+    <div id="confirm-overlay" class="confirm-overlay" hidden>
+      <section
+        id="confirm-dialog"
+        class="confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-message"
+        tabindex="-1"
+      >
+        <div class="confirm-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 8v5M12 17h.01" /><path d="M10.2 4.5 3.7 16a2 2 0 0 0 1.75 3h13.1a2 2 0 0 0 1.75-3L13.8 4.5a2.07 2.07 0 0 0-3.6 0Z" /></svg>
+        </div>
+        <div class="confirm-copy">
+          <h2 id="confirm-title">确认操作</h2>
+          <p id="confirm-message"></p>
+        </div>
+        <div class="confirm-actions">
+          <button id="confirm-cancel-button" class="button button-secondary" type="button">取消</button>
+          <button id="confirm-submit-button" class="button button-primary" type="button">确认</button>
+        </div>
+      </section>
+    </div>
+
+    <noscript>此模板管理页需要启用 JavaScript。</noscript>
+  </body>
+</html>

@@ -7,12 +7,14 @@ from unittest.mock import MagicMock
 
 import pytest
 from aiohttp import web
+from astrbot.api.star import Context
 
 from core.models import EndpointRecord, NormalizedEvent, ServerConfig, TargetAlias
 from core.registry import EndpointRegistry
 from core.renderer import render_text_default
 from core.sender import Sender
 from core.server import DEFAULT_RENDER_OPTIONS, WebhookServer
+from core.template_registry import TemplateRegistry
 
 
 def _make_event() -> NormalizedEvent:
@@ -58,6 +60,7 @@ class FakeSender(Sender):
         self.sent_texts: list[str] = []
         self.sent_images: list[str | bytes] = []
         self._fail_send: bool = False
+        self._enable_private_notifications = True
 
     def set_fail_send(self, fail: bool = True) -> None:
         self._fail_send = fail
@@ -276,6 +279,117 @@ class TestBuildRenderResponse:
         assert data["data"]["fallback_reason"] == "image_validation_failed"
         assert "send_results" in data["data"]
 
+    def test_skipped_and_partial_delivery_responses(self):
+        skipped = {
+            "name": "private",
+            "ok": True,
+            "skipped": True,
+            "error": None,
+            "reason": "private_notifications_disabled",
+        }
+        resp = WebhookServer._build_render_response(
+            "req-skip",
+            "omp",
+            "omp.session_stop",
+            "text",
+            "text",
+            False,
+            None,
+            [skipped],
+            rendered=False,
+        )
+        data = json.loads(resp.body)
+        assert data["message"] == "skipped"
+        assert data["data"]["delivered"] is False
+        assert data["data"]["skipped"] is True
+        assert data["data"]["retryable"] is False
+        assert data["data"]["rendered"] is False
+
+        resp = WebhookServer._build_render_response(
+            "req-partial",
+            "omp",
+            "omp.session_stop",
+            "text",
+            "text",
+            False,
+            None,
+            [skipped, {"name": "group", "ok": True, "error": None}],
+        )
+        data = json.loads(resp.body)
+        assert data["message"] == "partial_delivery"
+        assert data["data"]["delivered"] is True
+        assert data["data"]["skipped"] is True
+        assert data["data"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+class TestPrivatePolicyPreflight:
+    @pytest.mark.parametrize("render_mode", ["text", "html_image"])
+    async def test_all_private_skips_before_rendering(
+        self, render_mode: str, monkeypatch
+    ):
+        ctx = Context()
+        sender = Sender(ctx)
+        html_calls = 0
+
+        async def html_render(*args, **kwargs):
+            nonlocal html_calls
+            html_calls += 1
+            raise AssertionError("html_render must not be called")
+
+        def text_render(*args, **kwargs):
+            raise AssertionError("text renderer must not be called")
+
+        monkeypatch.setattr("core.server.render_text_default", text_render)
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            html_render,
+            {"render_mode": render_mode, "fallback_to_text": True},
+        )
+        endpoint = _make_endpoint()
+        endpoint.targets = [
+            TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001")
+        ]
+
+        response = await server._dispatch_event(
+            _make_event(), endpoint, None, f"req-{render_mode}"
+        )
+        data = json.loads(response.body)
+
+        assert response.status == 200
+        assert data["message"] == "skipped"
+        assert data["data"]["skip_reason"] == "private_notifications_disabled"
+        assert data["data"]["retryable"] is False
+        assert data["data"]["rendered"] is False
+        assert html_calls == 0
+        assert ctx.get_last_sent() is None
+
+    async def test_mixed_targets_render_and_return_partial_delivery(self):
+        ctx = Context()
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            Sender(ctx),
+            plugin_config={"render_mode": "text"},
+        )
+        endpoint = _make_endpoint()
+        endpoint.targets = [
+            TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001"),
+            TargetAlias(name="group", umo="aiocqhttp:GroupMessage:20001"),
+        ]
+
+        response = await server._dispatch_event(
+            _make_event(), endpoint, None, "req-mixed"
+        )
+        data = json.loads(response.body)
+
+        assert data["message"] == "partial_delivery"
+        assert data["data"]["delivered"] is True
+        assert data["data"]["skipped"] is True
+        assert ctx.get_last_sent()[0] == "aiocqhttp:GroupMessage:20001"
+
 
 # ─── _handle_text ──────────────────────────────────────────
 
@@ -477,6 +591,71 @@ class TestHandleHtmlImage:
         data = json.loads(resp.body)
         assert data["data"]["render_mode"] == "text"
         assert data["data"]["delivered"] is True
+
+    async def test_custom_width_and_second_jinja_is_not_executed(self, tmp_path):
+        registry = TemplateRegistry(tmp_path)
+        registry.save(
+            None,
+            "Custom",
+            "<html><body>{{ event.title }}</body></html>",
+            1000,
+            apply=True,
+        )
+        calls = []
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            calls.append((tmpl, data, options))
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        event = _make_event()
+        event.title = "literal {{ 7 * 7 }}"
+        srv = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            FakeSender(),
+            capture_render,
+            {"render_mode": "html_image"},
+            registry,
+        )
+        response = await srv._handle_html_image(
+            event, _make_endpoint(), None, "req-custom", True
+        )
+        assert json.loads(response.body)["data"]["render_mode"] == "html_image"
+        assert calls[0][0] == "{{ rendered_html | safe }}"
+        assert "literal {{ 7 * 7 }}" in calls[0][1]["rendered_html"]
+        assert calls[0][2]["viewport_width"] == 1000
+
+    async def test_custom_failure_retries_builtin_before_text(self, tmp_path):
+        registry = TemplateRegistry(tmp_path)
+        registry.save(
+            None,
+            "Broken at render",
+            "<html><body>{{ 1 / 0 }}</body></html>",
+            700,
+            apply=True,
+        )
+        calls = []
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            calls.append(options["viewport_width"])
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        sender = FakeSender()
+        srv = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+            registry,
+        )
+        response = await srv._handle_html_image(
+            _make_event(), _make_endpoint(), None, "req-retry", True
+        )
+        assert json.loads(response.body)["data"]["render_mode"] == "html_image"
+        assert calls == [812]
+        assert len(sender.sent_images) == 1
+        assert sender.sent_texts == []
 
 
 # ─── _fallback_to_text ─────────────────────────────────────
