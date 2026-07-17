@@ -2,20 +2,34 @@ from __future__ import annotations
 
 import inspect
 import os
+from hashlib import sha256
 from typing import Any, Awaitable, cast
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.message_type import MessageType
 
+from .core.help_card import (
+    HELP_CARD_BODY_PADDING,
+    HELP_CARD_CANVAS_WIDTH,
+    HELP_CARD_RENDER_OPTIONS,
+    HELP_CARD_WIDTH,
+    build_help_text,
+    render_help_card_html,
+)
 from .core.models import EndpointStatus, ServerConfig
 from .core.registry import (
     EndpointRegistry,
     build_endpoint_path,
     normalize_endpoint_name,
+)
+from .core.renderer import (
+    render_preview,
+    trim_viewport_whitespace,
+    validate_image_result,
 )
 from .core.sender import Sender
 from .core.server import WebhookServer
@@ -27,10 +41,26 @@ from .core.template_registry import (
     TemplateRegistry,
     TemplateRegistryError,
 )
-from .core.renderer import render_preview
 
 PLUGIN_NAME = "Webhook Notifier"
 COMMAND = "whn"
+
+
+def _command_positional_args_compat(handler: Any) -> Any:
+    """Allow legacy positional command args without exposing varargs to filters.
+
+    AstrBot versions that inspect command handler signatures should see only
+    ``self`` and ``event``. Older runtimes may still pass parsed command words
+    positionally, which the underlying function accepts via ``*args``.
+    """
+    signature = inspect.signature(handler)
+    visible_parameters = list(signature.parameters.values())[:2]
+    setattr(
+        handler,
+        "__signature__",
+        signature.replace(parameters=visible_parameters),
+    )
+    return handler
 
 
 @register(
@@ -336,16 +366,23 @@ class WebhookNotifierPlugin(Star):
         yield self._plain_text_result(event, self._build_status_text())
 
     @filter.command("whn")
-    async def status_short(self, event: AstrMessageEvent):
+    @_command_positional_args_compat
+    async def status_short(self, event: AstrMessageEvent, *command_args: object):
         """Webhook Notifier 短命令入口。"""
-        args = self._normalize_whn_args(event.message_str)
+        if command_args:
+            injected_text = " ".join(str(arg) for arg in command_args).strip()
+            args = self._normalize_whn_args(injected_text)
+        else:
+            args = self._normalize_whn_args(event.message_str)
         if not args:
             yield self._plain_text_result(event, self._build_status_text())
             return
 
         result = await self._dispatch_whn_command(event, args)
-        if result:
+        if isinstance(result, str):
             yield self._plain_text_result(event, result)
+        elif result is not None:
+            yield result
 
     def _plain_text_result(self, event: AstrMessageEvent, text: str):
         """构造强制纯文本的命令响应，避免 URL/Token 被 AstrBot T2I 转成图片。"""
@@ -370,9 +407,7 @@ class WebhookNotifierPlugin(Star):
             return parts[1].strip() if len(parts) > 1 else ""
         return text
 
-    async def _dispatch_whn_command(
-        self, event: AstrMessageEvent, args: str
-    ) -> str | None:
+    async def _dispatch_whn_command(self, event: AstrMessageEvent, args: str) -> Any:
         """分发 /whn 子命令。"""
         parts = args.split()
         if not parts:
@@ -380,23 +415,228 @@ class WebhookNotifierPlugin(Star):
 
         sub = parts[0].lower()
 
+        if sub in ("help", "帮助"):
+            return await self._build_help_result(event)
         if sub in ("status", "状态"):
             return self._build_status_text()
         if sub == "token":
             return await self._handle_token_command(event, parts[1:])
-        else:
-            return (
-                f"未知子命令: {sub}\n"
-                f"可用命令：\n"
-                f"  /whn                   查看状态\n"
-                f"  /whn status            查看状态\n"
-                f"  /whn token new private [名称]  创建私聊 endpoint\n"
-                f"  /whn token new group <群号> [名称]  创建群聊 endpoint\n"
-                f"  /whn token verify <request_id> <code>  验证群聊 endpoint\n"
-                f"  /whn token list        列出自己的 endpoint\n"
-                f"  /whn token rotate <名称>  轮换 token\n"
-                f"  /whn token revoke <名称>  撤销 endpoint"
+        if sub == "admin":
+            return self._handle_admin_command(event, parts[1:])
+        return f"❌ 未知子命令：{sub}\n发送 whn help 查看可用命令。"
+
+    async def _build_help_result(self, event: AstrMessageEvent):
+        """优先返回内置帮助图片，任何渲染异常都降级为纯文本。"""
+        is_admin = self._event_is_super_admin(event)
+        try:
+            rendered_html = render_help_card_html(is_admin)
+            image_result = await self.html_render(
+                "{{ rendered_html | safe }}",
+                {"rendered_html": rendered_html},
+                return_url=False,
+                options=dict(HELP_CARD_RENDER_OPTIONS),
             )
+            validate_image_result(image_result)
+            image_result = trim_viewport_whitespace(
+                image_result,
+                canvas_width=HELP_CARD_CANVAS_WIDTH,
+                card_width=HELP_CARD_WIDTH,
+                body_padding=HELP_CARD_BODY_PADDING,
+            )
+            return event.chain_result([Image(file=image_result)]).use_t2i(False)
+        except Exception as exc:
+            logger.warning(f"[WebhookNotifier] 帮助卡片渲染失败，回退纯文本: {exc}")
+            return self._plain_text_result(event, build_help_text(is_admin))
+
+    @staticmethod
+    def _event_is_super_admin(event: AstrMessageEvent) -> bool:
+        try:
+            return event.is_admin() is True
+        except (AttributeError, TypeError, NotImplementedError):
+            return False
+
+    def _handle_admin_command(self, event: AstrMessageEvent, args: list[str]) -> str:
+        """处理仅 AstrBot 全局超级管理员可用的 Registry 命令。"""
+        sender_id = event.get_sender_id()
+        action = " ".join(args[:2]) or "usage"
+        if not event.is_admin():
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作拒绝 sender={sender_id} "
+                f"action={action} result=permission_denied"
+            )
+            return "❌ 权限不足：此命令仅 AstrBot 全局超级管理员可用。"
+
+        if not self._is_private(event):
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作拒绝 sender={sender_id} "
+                f"action={action} result=private_only"
+            )
+            return "❌ Registry 管理命令请在私聊中执行。"
+
+        if not args:
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                "action=usage result=invalid_input"
+            )
+            return self._admin_command_usage()
+        if args[0].lower() != "token":
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                f"action={args[0].lower()} result=unknown_action"
+            )
+            return (
+                f"❌ 未知 admin 子命令：{args[0].lower()}\n发送 whn help 查看可用命令。"
+            )
+        if len(args) < 2:
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                "action=token result=invalid_input"
+            )
+            return self._admin_command_usage()
+
+        token_action = args[1].lower()
+        if token_action == "list":
+            if len(args) != 2:
+                logger.warning(
+                    f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                    "action=list result=invalid_input"
+                )
+                return "❌ 用法: /whn admin token list"
+            return self._handle_admin_token_list(sender_id)
+        if token_action == "revoke-path":
+            return self._handle_admin_token_revoke_path(sender_id, args[2:])
+        if token_action == "revoke-owner":
+            return self._handle_admin_token_revoke_owner(sender_id, args[2:])
+        logger.warning(
+            f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+            f"action={token_action} result=unknown_action"
+        )
+        return (
+            f"❌ 未知 admin token 子命令：{token_action}\n发送 whn help 查看可用命令。"
+        )
+
+    @staticmethod
+    def _admin_command_usage() -> str:
+        return (
+            "用法:\n"
+            "  /whn admin token list\n"
+            "  /whn admin token revoke-path <endpoint-path>\n"
+            "  /whn admin token revoke-owner <owner_user_id> <名称>\n"
+            "仅 AstrBot 全局超级管理员可用，且必须在私聊执行。"
+        )
+
+    def _handle_admin_token_list(self, sender_id: str) -> str:
+        registry = self._ensure_registry()
+        if not registry:
+            logger.error(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                "action=list result=registry_unavailable"
+            )
+            return "❌ Registry 未初始化，请检查日志。"
+
+        records = registry.list_all_for_admin()
+        logger.info(
+            f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+            f"action=list result=success count={len(records)}"
+        )
+        if not records:
+            return "📋 Registry 中暂无 endpoint。"
+
+        limit = 50
+        lines = [f"📋 全部 Endpoint（共 {len(records)} 条，最多显示 {limit} 条）:"]
+        for index, rec in enumerate(records[:limit], start=1):
+            target_names = ",".join(target.name for target in rec.targets) or "无"
+            lines.append(
+                f"{index}. owner={rec.owner_user_id} | name={rec.name} | "
+                f"path=/{rec.path} | status={rec.status} | "
+                f"targets={target_names} ({len(rec.targets)}) | "
+                f"created={rec.created_at[:19]}"
+            )
+        if len(records) > limit:
+            lines.append(f"… 另有 {len(records) - limit} 条未显示。")
+        lines.append("安全提示：此列表不会显示 Token 明文、hash 或完整目标 UMO。")
+        return "\n".join(lines)
+
+    def _handle_admin_token_revoke_path(self, sender_id: str, args: list[str]) -> str:
+        if len(args) != 1 or not args[0].strip():
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                "action=revoke-path result=invalid_input"
+            )
+            return "❌ 用法: /whn admin token revoke-path <endpoint-path>"
+
+        path = args[0].strip()
+        if path.startswith("/"):
+            path = path[1:]
+        if not path:
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                "action=revoke-path result=empty_path"
+            )
+            return "❌ endpoint path 不能为空。"
+        path_id = sha256(path.encode("utf-8")).hexdigest()[:12]
+
+        registry = self._ensure_registry()
+        if not registry:
+            logger.error(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                f"action=revoke-path path_id={path_id} result=registry_unavailable"
+            )
+            return "❌ Registry 未初始化，请检查日志。"
+
+        success, message = registry.revoke_endpoint_by_path(path)
+        log_message = (
+            f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+            f"action=revoke-path path_id={path_id} "
+            f"result={'success' if success else 'failed'}"
+        )
+        if success:
+            logger.info(log_message)
+            return f"✅ {message}（path: /{path}）"
+        logger.warning(log_message)
+        return f"❌ {message}（path: /{path}）"
+
+    def _handle_admin_token_revoke_owner(self, sender_id: str, args: list[str]) -> str:
+        if len(args) < 2 or not args[0].strip():
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                "action=revoke-owner result=invalid_input"
+            )
+            return "❌ 用法: /whn admin token revoke-owner <owner_user_id> <名称>"
+
+        owner_user_id = args[0].strip()
+        raw_name = " ".join(args[1:]).strip()
+        if not raw_name:
+            logger.warning(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                "action=revoke-owner result=empty_name"
+            )
+            return "❌ 用法: /whn admin token revoke-owner <owner_user_id> <名称>"
+        name = normalize_endpoint_name(raw_name)
+        target_id = sha256(f"{owner_user_id}\x1f{name}".encode("utf-8")).hexdigest()[
+            :12
+        ]
+
+        registry = self._ensure_registry()
+        if not registry:
+            logger.error(
+                f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+                f"action=revoke-owner target_id={target_id} "
+                "result=registry_unavailable"
+            )
+            return "❌ Registry 未初始化，请检查日志。"
+
+        success, message = registry.revoke_endpoint_by_owner_name(owner_user_id, name)
+        log_message = (
+            f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
+            f"action=revoke-owner target_id={target_id} "
+            f"result={'success' if success else 'failed'}"
+        )
+        if success:
+            logger.info(log_message)
+            return f"✅ {message}（owner/name: {owner_user_id}/{name}）"
+        logger.warning(log_message)
+        return f"❌ {message}（owner/name: {owner_user_id}/{name}）"
 
     async def _handle_token_command(
         self, event: AstrMessageEvent, args: list[str]
@@ -426,7 +666,7 @@ class WebhookNotifierPlugin(Star):
         elif action == "revoke":
             return await self._handle_token_revoke(event, args[1:])
         else:
-            return f"未知 token 子命令: {action}"
+            return f"❌ 未知 token 子命令：{action}\n发送 whn help 查看可用命令。"
 
     # ─── Token 管理 ──────────────────────────────────────────
 

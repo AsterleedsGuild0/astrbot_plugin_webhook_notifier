@@ -4,10 +4,26 @@
 
 - 适用插件：`astrbot_plugin_webhook_notifier`
 - 适用版本：v0.2.0 及后续兼容版本
-- 最后更新：2026-07-16
+- 最后更新：2026-07-18
 - 主题：Webhook 状态通知在 QQ 平台上的私聊安全默认值与架构边界
 
 工作区通用原则见 [`AstrBot 跨平台主动投递策略`](../../../.opencode/astrbot-platform-delivery-policy.md)；多 Bot 实例下 endpoint、Token、owner 与目标 UMO 的归属规则见 [`AstrBot 跨插件多 Bot 实例数据隔离`](../../../.opencode/astrbot-multi-bot-data-isolation.md)。本文仅保留 Webhook Notifier 的具体配置、响应与迁移契约，不表示尚未实现的 Registry v2 已完成。
+
+---
+
+## 已验证平台与能力矩阵
+
+平台声明表示已验证基础兼容，不表示该平台所有场景均已验证。
+
+| 平台 / 接入方式 | 验证状态 | 已验证能力与边界 |
+| --- | --- | --- |
+| `aiocqhttp` | 已验证 | 既有命令、群聊通知、HTML 图片卡片 |
+| `qq_official` WebSocket 私聊 | 已验证 | AstrBot v4.26.6 私聊命令、Webhook 鉴权、private 主动消息、OMP 状态图片卡片 |
+| `qq_official` WebSocket 普通 QQ 群 | 待验证 | 尚未验证主动发送 |
+| `qq_official` WebSocket Guild | 待验证 | 尚未验证 |
+| `qq_official_webhook` | 未验证、未声明支持 | 尚未验证，不在 `metadata.yaml` 的 `support_platforms` 中 |
+
+插件元数据仅声明 AstrBot 标准 adapter key `aiocqhttp` 与 `qq_official`。WebSocket 是 `qq_official` 的接入方式，不使用自定义的 `qq_official_websocket` key；在普通 QQ 群、Guild 或 `qq_official_webhook` 完成验证前，不应从现有私聊验证结果外推其兼容性。
 
 ---
 
@@ -79,6 +95,8 @@ enable_private_notifications: false
 - 仅私聊目标且开关关闭：不渲染、不发送，返回 HTTP 200、`message=skipped`、`delivered=false`、`rendered=false`、`retryable=false`。
 - 群聊与私聊混合且开关关闭：群聊正常发送，私聊标记为 `skipped`，返回 HTTP 200、`message=partial_delivery`、`retryable=false`。
 - 可投递目标在实际调用发送 API 后发生真实发送失败：逐目标标记 `failed`，此时才设置 `retryable=true`。渲染失败不标记为可重试发送失败。
+
+当一次请求的全部目标都因私聊通知关闭而在渲染前跳过时，服务端会写入一条请求级 INFO 日志，包含 `request_id`、provider、event、`result=skipped`、`reason=private_notifications_disabled`、跳过目标数量与 `rendered=false`。该日志只写一次，不包含 endpoint、owner、目标名称、UMO、Token、Authorization、请求 body 或真实 URL，可通过 `request_id` 和 `reason` 关联调用方响应与服务端策略判定。
 
 策略性跳过表示服务端已经按配置完成处理，不应触发外部系统重试。否则重试只会重复请求，并不能改变管理员关闭私聊通知的事实。
 

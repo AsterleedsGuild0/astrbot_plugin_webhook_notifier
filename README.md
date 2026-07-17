@@ -24,18 +24,40 @@
 - ✅ **WebUI 模板管理**：在插件详情页中创建、复制、编辑、预览、保存、应用和删除 HTML 模板。
 - ✅ **安全模板预览**：HTML Monaco 编辑器、JSON 预览数据和 sandbox `srcdoc` 预览。
 
+### 已验证平台与能力矩阵
+
+平台声明表示已验证基础兼容，不表示该平台所有场景均已验证。
+
+| 平台 / 接入方式 | 验证状态 | 已验证能力与边界 |
+| --- | --- | --- |
+| `aiocqhttp` | 已验证 | 既有命令、群聊通知、HTML 图片卡片 |
+| `qq_official` WebSocket 私聊 | 已验证 | AstrBot v4.26.6 私聊命令、Webhook 鉴权、private 主动消息、OMP 状态图片卡片 |
+| `qq_official` WebSocket 普通 QQ 群 | 待验证 | 尚未验证主动发送 |
+| `qq_official` WebSocket Guild | 待验证 | 尚未验证 |
+| `qq_official_webhook` | 未验证、未声明支持 | 尚未验证，不在 `metadata.yaml` 的 `support_platforms` 中 |
+
+`metadata.yaml` 使用 AstrBot 标准 adapter key `aiocqhttp` 与 `qq_official`；WebSocket 是 `qq_official` 的接入方式，不另造 `qq_official_websocket` key。完整平台投递说明见 [`docs/platform-delivery-policy.md`](docs/platform-delivery-policy.md)。
+
 可用命令：
 
 ```text
 /webhook_notifier
 /whn
+/whn help
 /whn token new private [名称]
 /whn token new group <群号> [名称]
 /whn token verify <request_id> <code>
 /whn token list
 /whn token rotate <名称>
 /whn token revoke <名称>
+/whn admin token list
+/whn admin token revoke-path <endpoint-path>
+/whn admin token revoke-owner <owner_user_id> <名称>
 ```
+
+`/whn help`（中文别名 `/whn 帮助`）使用插件内置专用模板生成图片帮助卡片，不读取或占用 Webhook 通知的 active 模板。普通用户只看到自己的创建与管理命令；AstrBot 超级管理员会额外看到仅限私聊执行的 Registry 管理区。若 HTML/T2I 渲染失败，命令会自动回退为结构化纯文本帮助。
+
+`/whn admin token ...` 仅 AstrBot 全局超级管理员可用，群管理员不具备该权限，并且必须在私聊中执行。`list` 跨用户展示 endpoint 的最小管理元数据，并限制单次最多显示 50 条；不会显示 Token 明文、`token_hash`、验证码或完整目标 UMO。撤销时可使用两个精确选择器：`revoke-path` 按完整 endpoint path 匹配（可省略开头的单个 `/`）；`revoke-owner` 按 `owner_user_id + 名称` 匹配，名称遵循普通 endpoint 名称的规范化规则。两者均不支持模糊匹配，也不会按全局名称推断 owner。
 
 ---
 

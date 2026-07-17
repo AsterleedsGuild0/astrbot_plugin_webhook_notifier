@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -347,6 +348,13 @@ class EndpointRegistry:
             if rec.owner_user_id == owner_user_id and rec.status in visible_states
         ]
 
+    def list_all_for_admin(self) -> list[EndpointRecord]:
+        """返回跨 owner 的管理视图副本，避免调用方修改 Registry 内部记录。"""
+        return sorted(
+            (deepcopy(rec) for rec in self._records.values()),
+            key=lambda rec: (rec.created_at, rec.owner_user_id, rec.path),
+        )
+
     def count_active(self) -> int:
         return sum(
             1
@@ -398,6 +406,68 @@ class EndpointRegistry:
         # 清理关联的 pending
         if record.pending_request_id:
             self._cleanup_pending(record.pending_request_id)
+            record.pending_request_id = None
+            record.pending_code = None
+            record.pending_expires_at = None
+        self._save()
+        return (True, "endpoint 已撤销")
+
+    def revoke_endpoint_by_path(self, path: str) -> tuple[bool, str]:
+        """按完整 endpoint path 精确撤销记录，供超级管理员使用。"""
+        normalized_path = path.strip()
+        if normalized_path.startswith("/"):
+            normalized_path = normalized_path[1:]
+        if not normalized_path:
+            return (False, "endpoint path 不能为空")
+
+        matches = [rec for rec in self._records.values() if rec.path == normalized_path]
+        if not matches:
+            return (False, "endpoint path 不存在")
+        if len(matches) > 1:
+            logger.error(
+                "[WebhookNotifier] Registry 数据异常：endpoint path "
+                f"存在 {len(matches)} 条重复记录，拒绝撤销"
+            )
+            return (False, "Registry 数据异常：该 path 存在重复记录，未执行撤销")
+
+        record = matches[0]
+        if record.status == EndpointStatus.REVOKED.value:
+            return (True, "endpoint 已撤销，无需重复操作")
+        if record.status not in {
+            EndpointStatus.PENDING_VERIFICATION.value,
+            EndpointStatus.ACTIVE.value,
+        }:
+            return (False, "该 endpoint 已是终态，无法撤销")
+
+        record.status = EndpointStatus.REVOKED.value
+        record.revoked_at = datetime.now(timezone.utc).isoformat()
+        if record.pending_request_id:
+            self._pending.pop(record.pending_request_id, None)
+            record.pending_request_id = None
+            record.pending_code = None
+            record.pending_expires_at = None
+        self._save()
+        return (True, "endpoint 已撤销")
+
+    def revoke_endpoint_by_owner_name(
+        self, owner_user_id: str, name: str
+    ) -> tuple[bool, str]:
+        """按 owner_user_id + name 精确撤销记录，供超级管理员使用。"""
+        record = self.get_by_owner_name(owner_user_id, name)
+        if not record:
+            return (False, "owner/name 对应的 endpoint 不存在")
+        if record.status == EndpointStatus.REVOKED.value:
+            return (True, "endpoint 已撤销，无需重复操作")
+        if record.status not in {
+            EndpointStatus.PENDING_VERIFICATION.value,
+            EndpointStatus.ACTIVE.value,
+        }:
+            return (False, "该 endpoint 已是终态，无法撤销")
+
+        record.status = EndpointStatus.REVOKED.value
+        record.revoked_at = datetime.now(timezone.utc).isoformat()
+        if record.pending_request_id:
+            self._pending.pop(record.pending_request_id, None)
             record.pending_request_id = None
             record.pending_code = None
             record.pending_expires_at = None

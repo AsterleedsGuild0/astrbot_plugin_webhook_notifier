@@ -789,6 +789,8 @@ def _validate_image_bytes(data: bytes, is_header: bool = False) -> bool:
 def trim_viewport_whitespace(
     image_result: Any,
     canvas_width: int = 812,
+    card_width: int = HTML_CARD_WIDTH,
+    body_padding: int = HTML_BODY_PADDING,
 ) -> Any:
     """裁切 HTML 卡片截图视口中右侧/底部多余背景空白。
 
@@ -802,6 +804,8 @@ def trim_viewport_whitespace(
     Args:
         image_result: html_render 返回的图片结果。
         canvas_width: 渲染时使用的视口宽度（CSS 像素），用于推算缩放比。
+        card_width: 当前卡片的 CSS 内容宽度。
+        body_padding: 卡片左侧的 CSS body padding。
 
     Returns:
         原 image_result（就地修改或原样返回）。
@@ -817,7 +821,12 @@ def trim_viewport_whitespace(
             if img.width < 360 or img.height < 240:
                 return image_result
 
-            crop_box = _detect_trim_box(img, canvas_width)
+            crop_box = _detect_trim_box(
+                img,
+                canvas_width,
+                card_width=card_width,
+                body_padding=body_padding,
+            )
             if crop_box is None:
                 return image_result
 
@@ -861,6 +870,8 @@ def trim_viewport_whitespace(
 def _detect_trim_box(
     image: Any,
     canvas_width: int,
+    card_width: int = HTML_CARD_WIDTH,
+    body_padding: int = HTML_BODY_PADDING,
 ) -> tuple[int, int, int, int] | None:
     """识别 HTML 卡片截图中左上对齐卡片内容的有效区域。
 
@@ -877,10 +888,15 @@ def _detect_trim_box(
     width, height = image.size
 
     # --- 右侧裁剪 ---
-    # 卡片设计宽度固定为 780px，在 812px 视口中两侧各 16px padding。
+    # 默认通知卡片为 780px；专用卡片可传入自己的宽度和 body padding。
     # 若 T2I 尊重 viewport_width，截图宽度约为 canvas_width * scale；
     # 若旧服务忽略 viewport_width，则常见截图宽度约为 1280 * scale。
-    expected_right = _expected_canvas_right(width, canvas_width)
+    expected_right = _expected_canvas_right(
+        width,
+        canvas_width,
+        card_width=card_width,
+        body_padding=body_padding,
+    )
 
     crop_right = width
     right_margin = _scaled_right_crop_padding(width, canvas_width)
@@ -904,9 +920,14 @@ def _detect_trim_box(
     return (0, 0, crop_right, crop_bottom)
 
 
-def _expected_canvas_right(image_width: int, canvas_width: int) -> int:
+def _expected_canvas_right(
+    image_width: int,
+    canvas_width: int,
+    card_width: int = HTML_CARD_WIDTH,
+    body_padding: int = HTML_BODY_PADDING,
+) -> int:
     """根据截图宽度推断画布右边界，兼容 viewport_width 生效/未生效两类情况。"""
-    content_right_css = max(HTML_BODY_PADDING + HTML_CARD_WIDTH, 1)
+    content_right_css = max(body_padding + card_width, 1)
     scale = _infer_device_scale(image_width, canvas_width)
     return int(content_right_css * scale)
 

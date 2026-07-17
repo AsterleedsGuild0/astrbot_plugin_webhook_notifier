@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
 
 import pytest
-from aiohttp import web
 from astrbot.api.star import Context
 
 from core.models import EndpointRecord, NormalizedEvent, ServerConfig, TargetAlias
 from core.registry import EndpointRegistry
-from core.renderer import render_text_default
 from core.sender import Sender
 from core.server import DEFAULT_RENDER_OPTIONS, WebhookServer
 from core.template_registry import TemplateRegistry
@@ -95,6 +92,17 @@ class FakeRegistry:
         return True
 
 
+class RequestStub:
+    def __init__(self, path: str, token: str) -> None:
+        self.content_type = "application/json"
+        self.content_length = 2
+        self.path = path
+        self.headers = {"Authorization": f"Bearer {token}"}
+
+    async def read(self) -> bytes:
+        return b"{}"
+
+
 @pytest.fixture
 def server() -> WebhookServer:
     config = ServerConfig()
@@ -129,6 +137,66 @@ def server() -> WebhookServer:
             "render_options": '{"full_page": true, "type": "png"}',
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_admin_revoke_immediately_blocks_old_token(tmp_path):
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        name="revoked-via-admin",
+        path="u/admin/revoked-via-admin",
+        owner_user_id="owner-admin-test",
+        target_umo="test:Platform:Message:1",
+    )
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        html_render=None,
+        plugin_config={"render_mode": "text"},
+    )
+
+    success, _ = registry.revoke_endpoint_by_path(record.path)
+    response = await srv._process_request(
+        RequestStub(f"/webhook/{record.path}", token),  # type: ignore[arg-type]
+        "request-after-admin-revoke",
+    )
+    payload = json.loads(response.body)
+
+    assert success is True
+    assert response.status == 403
+    assert payload["data"]["error"] == "endpoint_revoked"
+
+
+@pytest.mark.asyncio
+async def test_admin_revoke_owner_immediately_blocks_old_token(tmp_path):
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        name="revoked-via-owner",
+        path="u/admin/revoked-via-owner",
+        owner_user_id="owner-admin-test",
+        target_umo="test:Platform:Message:1",
+    )
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        html_render=None,
+        plugin_config={"render_mode": "text"},
+    )
+
+    success, _ = registry.revoke_endpoint_by_owner_name(
+        record.owner_user_id, record.name
+    )
+    response = await srv._process_request(
+        RequestStub(f"/webhook/{record.path}", token),  # type: ignore[arg-type]
+        "request-after-admin-owner-revoke",
+    )
+    payload = json.loads(response.body)
+
+    assert success is True
+    assert response.status == 403
+    assert payload["data"]["error"] == "endpoint_revoked"
 
 
 # ─── _get_render_mode ──────────────────────────────────────
@@ -331,6 +399,7 @@ class TestPrivatePolicyPreflight:
         ctx = Context()
         sender = Sender(ctx)
         html_calls = 0
+        info_logs: list[str] = []
 
         async def html_render(*args, **kwargs):
             nonlocal html_calls
@@ -341,6 +410,7 @@ class TestPrivatePolicyPreflight:
             raise AssertionError("text renderer must not be called")
 
         monkeypatch.setattr("core.server.render_text_default", text_render)
+        monkeypatch.setattr("core.server.logger.info", info_logs.append)
         server = WebhookServer(
             ServerConfig(),
             FakeRegistry(),
@@ -349,25 +419,64 @@ class TestPrivatePolicyPreflight:
             {"render_mode": render_mode, "fallback_to_text": True},
         )
         endpoint = _make_endpoint()
+        endpoint.name = "sensitive-endpoint-name"
+        endpoint.path = "sensitive/endpoint/path"
+        endpoint.owner_user_id = "sensitive-owner-id"
+        endpoint.token_hash = "sensitive-token-hash"
         endpoint.targets = [
-            TargetAlias(name="private", umo="aiocqhttp:FriendMessage:10001")
+            TargetAlias(
+                name="sensitive-target-one",
+                umo="aiocqhttp:FriendMessage:sensitive-openid-one",
+            ),
+            TargetAlias(
+                name="sensitive-target-two",
+                umo="qqofficial:FriendMessage:sensitive-openid-two",
+            ),
         ]
 
+        request_id = f"req-{render_mode}"
         response = await server._dispatch_event(
-            _make_event(), endpoint, None, f"req-{render_mode}"
+            _make_event(), endpoint, None, request_id
         )
         data = json.loads(response.body)
 
         assert response.status == 200
         assert data["message"] == "skipped"
+        assert data["data"]["skipped"] is True
         assert data["data"]["skip_reason"] == "private_notifications_disabled"
         assert data["data"]["retryable"] is False
         assert data["data"]["rendered"] is False
         assert html_calls == 0
         assert ctx.get_last_sent() is None
 
-    async def test_mixed_targets_render_and_return_partial_delivery(self):
+        assert len(info_logs) == 1
+        log = info_logs[0]
+        assert log.startswith("[WebhookNotifier] ")
+        assert f"request_id={request_id}" in log
+        assert "provider=omp" in log
+        assert "event=omp.session_stop" in log
+        assert "result=skipped" in log
+        assert "reason=private_notifications_disabled" in log
+        assert "skipped_target_count=2" in log
+        assert "rendered=false" in log
+        for sensitive_marker in (
+            endpoint.name,
+            endpoint.path,
+            endpoint.owner_user_id,
+            endpoint.token_hash,
+            "sensitive-target-one",
+            "sensitive-target-two",
+            "aiocqhttp:FriendMessage:sensitive-openid-one",
+            "qqofficial:FriendMessage:sensitive-openid-two",
+            "sensitive-openid-one",
+            "sensitive-openid-two",
+        ):
+            assert sensitive_marker not in log
+
+    async def test_mixed_targets_render_and_return_partial_delivery(self, monkeypatch):
         ctx = Context()
+        info_logs: list[str] = []
+        monkeypatch.setattr("core.server.logger.info", info_logs.append)
         server = WebhookServer(
             ServerConfig(),
             FakeRegistry(),
@@ -389,6 +498,26 @@ class TestPrivatePolicyPreflight:
         assert data["data"]["delivered"] is True
         assert data["data"]["skipped"] is True
         assert ctx.get_last_sent()[0] == "aiocqhttp:GroupMessage:20001"
+        assert not any("result=skipped" in log for log in info_logs)
+
+    async def test_normal_delivery_does_not_log_all_skipped(self, monkeypatch):
+        info_logs: list[str] = []
+        monkeypatch.setattr("core.server.logger.info", info_logs.append)
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            FakeSender(),
+            plugin_config={"render_mode": "text"},
+        )
+
+        response = await server._dispatch_event(
+            _make_event(), _make_endpoint(), None, "req-normal"
+        )
+        data = json.loads(response.body)
+
+        assert data["message"] == "ok"
+        assert data["data"]["delivered"] is True
+        assert not any("result=skipped" in log for log in info_logs)
 
 
 # ─── _handle_text ──────────────────────────────────────────

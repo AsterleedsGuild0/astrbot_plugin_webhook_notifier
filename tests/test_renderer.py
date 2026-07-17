@@ -5,7 +5,21 @@ from __future__ import annotations
 import pytest
 
 from core.models import NormalizedEvent
-from core.renderer import DEFAULT_TEXT_TEMPLATE, render_text, render_text_default
+from core.renderer import (
+    DEFAULT_HTML_TEMPLATE,
+    DEFAULT_TEXT_TEMPLATE,
+    _expected_canvas_right,
+    _scaled_right_crop_padding,
+    render_html,
+    render_html_data,
+    render_html_default,
+    render_preview,
+    render_text,
+    render_text_default,
+    trim_viewport_whitespace,
+    validate_html_template,
+    validate_image_result,
+)
 
 
 def _make_event(
@@ -108,7 +122,7 @@ class TestRenderTextDefault:
         )
         result = render_text_default(event)
         # 验证主要结构
-        lines = [l for l in result.split("\n") if l.strip()]
+        lines = [line for line in result.split("\n") if line.strip()]
         assert len(lines) >= 3
         assert "[oh-my-pi]" in lines[0]
         assert all(
@@ -142,7 +156,7 @@ class TestRenderTextJinja2:
         template = "{{ event.__class__.__mro__ }}"
         event = _make_event()
         try:
-            result = render_text(event, template)
+            render_text(event, template)
             # sandbox 应导致渲染失败或返回空
             assert False, "sandbox 未阻止危险操作"
         except Exception:
@@ -176,20 +190,6 @@ class TestRenderTextJinja2:
 
 
 # ─── HTML 渲染测试 ─────────────────────────────────────────
-
-
-from core.renderer import (
-    DEFAULT_HTML_TEMPLATE,
-    _expected_canvas_right,
-    _scaled_right_crop_padding,
-    render_html,
-    render_html_default,
-    render_html_data,
-    trim_viewport_whitespace,
-    validate_image_result,
-    render_preview,
-    validate_html_template,
-)
 
 
 class TestRenderHtmlData:
@@ -488,6 +488,12 @@ class TestTrimViewportWhitespace:
         """云端配置自定义 viewport_width=900 时，也应按实际卡片宽度裁剪。"""
         assert _expected_canvas_right(int(900 * 1.3), 900) == int(796 * 1.3)
 
+    def test_expected_canvas_right_accepts_dedicated_card_width(self):
+        """帮助卡片可传入 868px 专用宽度，避免按通知卡片宽度过度裁切。"""
+        assert _expected_canvas_right(
+            int(900 * 1.3), 900, card_width=868, body_padding=16
+        ) == int(884 * 1.3)
+
     def test_expected_canvas_right_when_default_viewport_used(self):
         """旧 T2I 忽略 viewport_width 时，按 1280px 默认视口兜底推断。"""
         # 1280 * 1.3 = 1664，仍应裁到 812px 画布附近，而不是保留 1280px 视口。
@@ -597,7 +603,7 @@ class TestTrimViewportWhitespace:
     def test_no_crop_needed(self):
         """内容已铺满的图片不应被裁切（也不归一化）。"""
         try:
-            from PIL import Image, ImageDraw
+            from PIL import Image
         except ImportError:
             pytest.skip("PIL not available")
 

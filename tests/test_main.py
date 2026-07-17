@@ -1,10 +1,15 @@
 """Template Web API registration tests."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import sys
 import json
+import logging
+import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,13 +18,325 @@ if str(PLUGIN_PARENT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_PARENT))
 
 from astrbot.api import AstrBotConfig
+from astrbot.api.event import MessageChain
 from astrbot.api.star import Context
 from astrbot.api.web import request
 from astrbot_plugin_webhook_notifier.core.template_registry import (
     BUILT_IN_ID,
     TemplateRegistry,
 )
+from astrbot_plugin_webhook_notifier.core.registry import EndpointRegistry
 from astrbot_plugin_webhook_notifier.main import WebhookNotifierPlugin
+
+
+class AdminEventStub:
+    def __init__(
+        self,
+        *,
+        super_admin: bool,
+        sender_id: str = "admin-001",
+        private: bool = True,
+    ) -> None:
+        self._super_admin = super_admin
+        self._sender_id = sender_id
+        self.session = SimpleNamespace(message_type="friend" if private else "group")
+
+    def is_admin(self):
+        return self._super_admin
+
+    def get_sender_id(self):
+        return self._sender_id
+
+
+class PlainResultStub:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.t2i = True
+
+    def use_t2i(self, value: bool):
+        self.t2i = value
+        return self
+
+
+class CommandEventStub:
+    def __init__(self, message_str: str, *, super_admin: bool = False) -> None:
+        self.message_str = message_str
+        self._super_admin = super_admin
+
+    def plain_result(self, text: str) -> PlainResultStub:
+        return PlainResultStub(text)
+
+    def chain_result(self, components) -> MessageChain:
+        return MessageChain(list(components))
+
+    def is_admin(self) -> bool:
+        return self._super_admin
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("injected_args", "message_str", "expected"),
+    [
+        (("help",), "whn ignored", "help"),
+        (("admin", "token", "list"), "whn ignored", "admin token list"),
+        (("admin token list",), "whn ignored", "admin token list"),
+        (
+            (),
+            "whn token new group 123456 test-group",
+            "token new group 123456 test-group",
+        ),
+    ],
+)
+async def test_status_short_uses_injected_args_then_falls_back_to_message(
+    injected_args, message_str, expected
+):
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = CommandEventStub(message_str)
+    dispatched: list[str] = []
+
+    async def record_dispatch(_event, args):
+        dispatched.append(args)
+        return f"handled:{args}"
+
+    plugin._dispatch_whn_command = record_dispatch  # type: ignore[method-assign]
+
+    yielded = [item async for item in plugin.status_short(event, *injected_args)]
+
+    assert dispatched == [expected]
+    assert len(yielded) == 1
+    assert yielded[0].text == f"handled:{expected}"
+    assert yielded[0].t2i is False
+
+
+@pytest.mark.asyncio
+async def test_status_short_root_command_without_injected_args_shows_status():
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = CommandEventStub("whn")
+
+    yielded = [item async for item in plugin.status_short(event)]
+
+    assert len(yielded) == 1
+    assert "Webhook Notifier" in yielded[0].text
+    assert yielded[0].t2i is False
+
+
+def test_status_short_signature_hides_variadic_compatibility_parameter():
+    parameters = list(inspect.signature(WebhookNotifierPlugin.status_short).parameters)
+    assert parameters == ["self", "event"]
+
+
+@pytest.fixture
+def admin_plugin(tmp_path):
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    registry = EndpointRegistry(tmp_path)
+    active, token = registry.create_private_endpoint(
+        name="admin-active",
+        path="u/owner-a/admin-active",
+        owner_user_id="owner-a",
+        target_umo="aiocqhttp:FriendMessage:secret-umo-id",
+    )
+    pending, _, pending_code = registry.create_pending_verification(
+        name="admin-pending",
+        path="u/owner-b/admin-pending",
+        owner_user_id="owner-b",
+        target_group_id="123456789",
+    )
+    plugin._registry = registry
+    return plugin, active, pending, token, pending_code
+
+
+@pytest.mark.asyncio
+async def test_super_admin_can_list_and_revoke_path(admin_plugin):
+    plugin, active, _, _, _ = admin_plugin
+    event = AdminEventStub(super_admin=True)
+
+    listing = await plugin._dispatch_whn_command(event, "admin token list")
+    revoked = await plugin._dispatch_whn_command(
+        event, "admin token revoke-path /u/owner-a/admin-active"
+    )
+
+    assert "owner-a" in listing
+    assert "owner-b" in listing
+    assert "admin-active" in listing
+    assert "endpoint 已撤销" in revoked
+    assert active.status == "revoked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "admin token list",
+        "admin token revoke-path u/owner-a/admin-active",
+        "admin token revoke-owner owner-a admin-active",
+    ],
+)
+async def test_super_admin_admin_commands_are_private_only(command):
+    class RegistryMustNotBeQueried:
+        def __getattr__(self, name):
+            raise AssertionError(f"Registry 不应被访问: {name}")
+
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    plugin._registry = RegistryMustNotBeQueried()  # type: ignore[assignment]
+    event = AdminEventStub(super_admin=True, private=False)
+
+    result = await plugin._dispatch_whn_command(event, command)
+
+    assert "请在私聊中执行" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private", [True, False])
+async def test_non_super_admin_is_rejected_before_registry_query(private):
+    class RegistryMustNotBeQueried:
+        def __getattr__(self, name):
+            raise AssertionError(f"Registry 不应被访问: {name}")
+
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    plugin._registry = RegistryMustNotBeQueried()  # type: ignore[assignment]
+    event = AdminEventStub(
+        super_admin=False,
+        sender_id="normal-or-group-admin",
+        private=private,
+    )
+
+    result = await plugin._dispatch_whn_command(event, "admin token list")
+
+    assert "仅 AstrBot 全局超级管理员" in result
+
+
+@pytest.mark.asyncio
+async def test_admin_revoke_owner_normalizes_name_and_is_owner_scoped(tmp_path):
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    registry = EndpointRegistry(tmp_path)
+    selected, _ = registry.create_private_endpoint(
+        name="Fancy-Name",
+        path="u/selected/Fancy-Name",
+        owner_user_id="selected-owner",
+        target_umo="aiocqhttp:FriendMessage:10001",
+    )
+    other, _ = registry.create_private_endpoint(
+        name="Fancy-Name",
+        path="u/other/Fancy-Name",
+        owner_user_id="other-owner",
+        target_umo="aiocqhttp:FriendMessage:10002",
+    )
+    plugin._registry = registry
+    event = AdminEventStub(super_admin=True)
+
+    result = await plugin._dispatch_whn_command(
+        event, "admin token revoke-owner selected-owner Fancy Name!!"
+    )
+
+    assert "endpoint 已撤销" in result
+    assert selected.status == "revoked"
+    assert other.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_admin_revoke_owner_not_found_and_idempotent(admin_plugin):
+    plugin, active, _, _, _ = admin_plugin
+    event = AdminEventStub(super_admin=True)
+
+    missing_owner = await plugin._dispatch_whn_command(
+        event, "admin token revoke-owner missing-owner admin-active"
+    )
+    missing_name = await plugin._dispatch_whn_command(
+        event, "admin token revoke-owner owner-a missing-name"
+    )
+    first = await plugin._dispatch_whn_command(
+        event, "admin token revoke-owner owner-a admin-active"
+    )
+    repeated = await plugin._dispatch_whn_command(
+        event, "admin token revoke-owner owner-a admin-active"
+    )
+
+    assert "不存在" in missing_owner
+    assert "不存在" in missing_name
+    assert "已撤销" in first
+    assert "无需重复" in repeated
+    assert active.status == "revoked"
+
+
+@pytest.mark.parametrize("empty_name", ["", "   "])
+def test_admin_revoke_owner_rejects_empty_name_before_registry_query(empty_name):
+    class RegistryMustNotBeQueried:
+        def __getattr__(self, name):
+            raise AssertionError(f"Registry 不应被访问: {name}")
+
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    plugin._registry = RegistryMustNotBeQueried()  # type: ignore[assignment]
+
+    result = plugin._handle_admin_token_revoke_owner(
+        "admin-001", ["some-owner", empty_name]
+    )
+
+    assert "revoke-owner <owner_user_id> <名称>" in result
+
+
+@pytest.mark.asyncio
+async def test_admin_command_usage_unknown_action_and_wrong_path(admin_plugin):
+    plugin, _, _, _, _ = admin_plugin
+    event = AdminEventStub(super_admin=True)
+
+    no_args = await plugin._dispatch_whn_command(event, "admin")
+    unknown = await plugin._dispatch_whn_command(event, "admin token delete")
+    empty_path = await plugin._dispatch_whn_command(event, "admin token revoke-path")
+    wrong_path = await plugin._dispatch_whn_command(
+        event, "admin token revoke-path u/owner-a/admin"
+    )
+
+    assert "/whn admin token list" in no_args
+    assert "未知 admin token 子命令" in unknown
+    assert "revoke-path <endpoint-path>" in empty_path
+    assert "revoke-owner <owner_user_id> <名称>" in no_args
+    assert "path 不存在" in wrong_path
+
+
+@pytest.mark.asyncio
+async def test_admin_list_does_not_expose_secrets_or_full_umo(admin_plugin):
+    plugin, active, pending, token, pending_code = admin_plugin
+    event = AdminEventStub(super_admin=True)
+
+    listing = await plugin._dispatch_whn_command(event, "admin token list")
+
+    assert active.token_hash not in listing
+    assert "token_hash" not in listing
+    assert token not in listing
+    assert pending_code not in listing
+    assert pending.pending_code not in listing
+    assert "aiocqhttp:FriendMessage:secret-umo-id" not in listing
+
+
+@pytest.mark.asyncio
+async def test_admin_outputs_and_logs_do_not_leak_secrets_or_raw_targets(
+    admin_plugin, caplog
+):
+    plugin, active, pending, token, pending_code = admin_plugin
+    event = AdminEventStub(super_admin=True, sender_id="audit-admin")
+    target_owner = active.owner_user_id
+    target_path = active.path
+    target_umo = active.targets[0].umo
+
+    caplog.set_level(logging.INFO, logger="astrbot")
+    caplog.clear()
+    listing = await plugin._dispatch_whn_command(event, "admin token list")
+    path_result = await plugin._dispatch_whn_command(
+        event, f"admin token revoke-path {target_path}"
+    )
+    owner_result = await plugin._dispatch_whn_command(
+        event, "admin token revoke-owner owner-b admin-pending"
+    )
+    output = "\n".join((listing, path_result, owner_result))
+
+    assert token not in output
+    assert active.token_hash not in output
+    assert pending_code not in output
+    assert target_umo not in output
+    assert target_owner not in caplog.text
+    assert target_path not in caplog.text
+    assert pending.owner_user_id not in caplog.text
+    assert "audit-admin" in caplog.text
 
 
 def test_private_notifications_schema_defaults_to_false():

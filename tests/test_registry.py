@@ -331,6 +331,26 @@ class TestRegistryQuery:
         )
         assert registry.count_active() == 2
 
+    def test_list_all_for_admin_crosses_owners_and_returns_copies(self, registry):
+        first, _ = registry.create_private_endpoint(
+            name="admin_a",
+            path="u/a/admin_a",
+            owner_user_id="owner_a",
+            target_umo="aiocqhttp:FriendMessage:10001",
+        )
+        registry.create_private_endpoint(
+            name="admin_b",
+            path="u/b/admin_b",
+            owner_user_id="owner_b",
+            target_umo="aiocqhttp:GroupMessage:20002",
+        )
+
+        records = registry.list_all_for_admin()
+
+        assert {record.owner_user_id for record in records} == {"owner_a", "owner_b"}
+        records[0].status = EndpointStatus.REVOKED.value
+        assert first.status == EndpointStatus.ACTIVE.value
+
     def test_is_endpoint_active(self, registry):
         registry.create_private_endpoint(
             name="active_check",
@@ -383,6 +403,122 @@ class TestRegistryRevoke:
         success, msg = registry.revoke_endpoint("nonexistent_endpoint", "user_080")
         assert success is False
         assert "不存在" in msg
+
+    def test_admin_revoke_by_exact_path(self, registry):
+        record, _ = registry.create_private_endpoint(
+            name="admin_revoke",
+            path="u/admin/exact-path",
+            owner_user_id="owner_admin_target",
+            target_umo="aiocqhttp:FriendMessage:10050",
+        )
+
+        success, msg = registry.revoke_endpoint_by_path("u/admin/exact-path")
+
+        assert success is True
+        assert "已撤销" in msg
+        assert record.status == EndpointStatus.REVOKED.value
+        assert registry.is_endpoint_active(record.name, record.owner_user_id) is False
+
+    def test_admin_revoke_accepts_single_leading_slash(self, registry):
+        record, _ = registry.create_private_endpoint(
+            name="leading_slash",
+            path="u/admin/leading-slash",
+            owner_user_id="owner_leading",
+            target_umo="aiocqhttp:FriendMessage:10051",
+        )
+
+        success, _ = registry.revoke_endpoint_by_path("/u/admin/leading-slash")
+
+        assert success is True
+        assert record.status == EndpointStatus.REVOKED.value
+
+    def test_admin_revoke_nonexistent_path(self, registry):
+        success, msg = registry.revoke_endpoint_by_path("u/admin/missing")
+        assert success is False
+        assert "不存在" in msg
+
+    def test_admin_revoke_is_idempotent(self, registry):
+        registry.create_private_endpoint(
+            name="idempotent",
+            path="u/admin/idempotent",
+            owner_user_id="owner_idempotent",
+            target_umo="aiocqhttp:FriendMessage:10052",
+        )
+        assert registry.revoke_endpoint_by_path("u/admin/idempotent")[0] is True
+
+        success, msg = registry.revoke_endpoint_by_path("u/admin/idempotent")
+
+        assert success is True
+        assert "无需重复" in msg
+
+    def test_admin_revoke_rejects_duplicate_path_without_changes(self, registry):
+        first, _ = registry.create_private_endpoint(
+            name="duplicate_a",
+            path="u/corrupt/duplicate",
+            owner_user_id="owner_duplicate_a",
+            target_umo="aiocqhttp:FriendMessage:10053",
+        )
+        second, _ = registry.create_private_endpoint(
+            name="duplicate_b",
+            path="u/corrupt/duplicate",
+            owner_user_id="owner_duplicate_b",
+            target_umo="aiocqhttp:FriendMessage:10054",
+        )
+
+        success, msg = registry.revoke_endpoint_by_path("u/corrupt/duplicate")
+
+        assert success is False
+        assert "重复记录" in msg
+        assert first.status == EndpointStatus.ACTIVE.value
+        assert second.status == EndpointStatus.ACTIVE.value
+
+    def test_admin_revoke_by_owner_name_is_exact_and_idempotent(self, registry):
+        selected, _ = registry.create_private_endpoint(
+            name="same_name",
+            path="u/selected/same_name",
+            owner_user_id="selected_owner",
+            target_umo="aiocqhttp:FriendMessage:10055",
+        )
+        other, _ = registry.create_private_endpoint(
+            name="same_name",
+            path="u/other/same_name",
+            owner_user_id="other_owner",
+            target_umo="aiocqhttp:FriendMessage:10056",
+        )
+
+        success, msg = registry.revoke_endpoint_by_owner_name(
+            "selected_owner", "same_name"
+        )
+        repeated_success, repeated_msg = registry.revoke_endpoint_by_owner_name(
+            "selected_owner", "same_name"
+        )
+
+        assert success is True
+        assert "已撤销" in msg
+        assert repeated_success is True
+        assert "无需重复" in repeated_msg
+        assert selected.status == EndpointStatus.REVOKED.value
+        assert other.status == EndpointStatus.ACTIVE.value
+
+    def test_admin_revoke_by_owner_name_not_found(self, registry):
+        registry.create_private_endpoint(
+            name="known_name",
+            path="u/known/known_name",
+            owner_user_id="known_owner",
+            target_umo="aiocqhttp:FriendMessage:10057",
+        )
+
+        missing_owner = registry.revoke_endpoint_by_owner_name(
+            "missing_owner", "known_name"
+        )
+        missing_name = registry.revoke_endpoint_by_owner_name(
+            "known_owner", "missing_name"
+        )
+
+        assert missing_owner[0] is False
+        assert "不存在" in missing_owner[1]
+        assert missing_name[0] is False
+        assert "不存在" in missing_name[1]
 
     def test_revoked_name_and_path_can_be_reused(self, registry):
         record1, token1 = registry.create_private_endpoint(

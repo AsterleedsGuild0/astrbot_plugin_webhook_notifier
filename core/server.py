@@ -319,6 +319,12 @@ class WebhookServer:
             endpoint, target_alias
         )
         if skipped_results is not None:
+            logger.info(
+                f"[WebhookNotifier] request_id={request_id} "
+                f"provider={event.provider} event={event.event} result=skipped "
+                "reason=private_notifications_disabled "
+                f"skipped_target_count={len(skipped_results)} rendered=false"
+            )
             return self._build_render_response(
                 request_id=request_id,
                 provider=event.provider,
