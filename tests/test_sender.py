@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import Image
 from astrbot.api.star import Context
 
 from core.models import EndpointRecord, TargetAlias

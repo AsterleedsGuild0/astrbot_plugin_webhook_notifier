@@ -45,6 +45,19 @@ class EndpointRecord:
     pending_code: str | None = None  # 群聊验证的 code
     pending_expires_at: str | None = None  # 验证码过期时间 ISO-8601
     description: str | None = None
+    owner_platform_id: str = ""
+    management_state: str = "managed"
+    legacy_record_key: str | None = None
+
+
+@dataclass(frozen=True)
+class DeliveryAuthentication:
+    """一次一致性快照中的投递鉴权结果。"""
+
+    authorized: bool
+    error_code: str | None
+    message: str
+    record: EndpointRecord | None = None
 
 
 @dataclass
@@ -90,8 +103,12 @@ class PendingVerification:
     request_id: str  # UUID4
     code: str  # 6 位小写十六进制
     endpoint_name: str
+    owner_platform_id: str
     owner_user_id: str
-    target_group_id: str  # QQ 群号
+    group_binding_mode: str  # prebound_group | bind_current_group
+    phase: str  # awaiting_group_admin | group_verified_waiting_owner
+    target_group_id: str | None
+    verified_group_id: str | None
     created_at: str  # ISO-8601 UTC
     expires_at: str  # ISO-8601 UTC
 

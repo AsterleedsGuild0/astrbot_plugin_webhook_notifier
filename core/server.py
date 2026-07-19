@@ -20,7 +20,6 @@ from .renderer import (
     validate_image_result,
 )
 from .template_registry import BUILT_IN_ID, ActiveTemplate, TemplateRegistry
-from .security import verify_token
 from .sender import Sender
 
 DEFAULT_RENDER_OPTIONS: dict[str, Any] = {
@@ -220,62 +219,35 @@ class WebhookServer:
             path[len(base) :].lstrip("/") if path.startswith(base) else path.lstrip("/")
         )
 
-        # 6. 查找 endpoint
-        endpoint = self._registry.get_by_path(endpoint_path)
-        if not endpoint:
-            logger.warning(
-                f"[WebhookNotifier] request_id={request_id} endpoint 未找到: {endpoint_path}"
-            )
-            return self._error_response(404, "not_found", "endpoint 未找到", request_id)
-
-        # 7. 校验 endpoint 状态
-        if not self._registry.is_endpoint_active(endpoint.name, endpoint.owner_user_id):
-            logger.warning(
-                f"[WebhookNotifier] request_id={request_id} "
-                f"endpoint {endpoint.name} 状态不可用: {endpoint.status}"
-            )
-            if endpoint.status == "revoked":
-                return self._error_response(
-                    403, "endpoint_revoked", "endpoint 已撤销", request_id
-                )
-            return self._error_response(
-                403,
+        # 6. Registry 在单一接口中保持 header/path/status/token 的既有错误优先级。
+        auth = self._registry.authenticate_delivery(
+            endpoint_path, request.headers.get("Authorization")
+        )
+        if not auth.authorized:
+            status = 404 if auth.error_code == "not_found" else 401
+            if auth.error_code in {
+                "token_unclaimed",
+                "endpoint_revoked",
                 "endpoint_disabled",
-                f"endpoint 状态: {endpoint.status}",
-                request_id,
-            )
-
-        # 8. 校验 Authorization
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header:
-            return self._error_response(
-                401, "missing_authorization", "缺少 Authorization 请求头", request_id
-            )
-
-        if not auth_header.startswith("Bearer "):
-            return self._error_response(
-                401,
-                "invalid_token",
-                "Authorization 格式必须为 Bearer <token>",
-                request_id,
-            )
-
-        token = auth_header[7:].strip()
-        if not verify_token(
-            self._registry.server_secret,
-            token,
-            endpoint.token_hash,
-            endpoint.token_hash_algorithm,
-        ):
+            }:
+                status = 403
             logger.warning(
                 f"[WebhookNotifier] request_id={request_id} "
-                f"endpoint={endpoint.name} token 校验失败"
+                f"endpoint 鉴权失败: {auth.error_code}"
             )
             return self._error_response(
-                401, "invalid_token", "Bearer Token 不匹配", request_id
+                status,
+                auth.error_code or "invalid_token",
+                auth.message,
+                request_id,
+            )
+        endpoint = auth.record
+        if endpoint is None:  # 防御性检查，authorized 结果必须携带快照。
+            return self._error_response(
+                500, "internal_error", "Registry 鉴权结果无效", request_id
             )
 
-        # 9. 识别 OMP 事件
+        # 7. 识别 OMP 事件
         headers_dict = dict(request.headers)
         is_valid, err_msg = is_omp_session_stop(headers_dict, body)
         if not is_valid:

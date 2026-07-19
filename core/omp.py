@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -111,8 +110,6 @@ def normalize_omp_payload(
     )
     assistant_stop_reason = _string_or_empty(last_assistant.get("stopReason"))
     assistant_timestamp = _string_or_empty(last_assistant.get("timestamp"))
-    assistant_duration_ms = last_assistant.get("durationMs")
-
     if not session_model and assistant_model:
         session_model = assistant_model
 
@@ -133,9 +130,7 @@ def normalize_omp_payload(
     )
 
     # 生成标题
-    title = f"会话完成"
-    if session_name:
-        title = f"会话完成"
+    title = "会话完成"
 
     # 生成摘要
     summary = ""

@@ -14,6 +14,7 @@ class MessageChain:
     def __init__(self, components: list[Any] | None = None) -> None:
         self.chain: list[Any] = components or []
         self._use_t2i_value: bool = True
+        self._use_markdown_value: bool = True
 
     def use_t2i(self, value: bool) -> MessageChain:
         self._use_t2i_value = value
@@ -21,6 +22,13 @@ class MessageChain:
 
     def get_use_t2i(self) -> bool:
         return self._use_t2i_value
+
+    def use_markdown(self, value: bool) -> MessageChain:
+        self._use_markdown_value = value
+        return self
+
+    def get_use_markdown(self) -> bool:
+        return self._use_markdown_value
 
     def __repr__(self) -> str:
         return f"MessageChain({self.chain!r})"

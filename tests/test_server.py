@@ -43,6 +43,7 @@ def _make_endpoint() -> EndpointRecord:
         token_hash="abc123",
         token_hash_algorithm="hmac-sha256",
         owner_user_id="user_001",
+        owner_platform_id="aiocqhttp",
         targets=[TargetAlias(name="default", umo="test:Platform:Message:1")],
         status="active",
         created_at="2026-07-09T12:00:00",
@@ -88,8 +89,10 @@ class FakeRegistry:
     def __init__(self) -> None:
         self.server_secret = "a" * 128
 
-    def is_endpoint_active(self, name: str, owner_user_id: str) -> bool:
-        return True
+    def authenticate_delivery(self, path: str, authorization_header: str | None):
+        from core.models import DeliveryAuthentication
+
+        return DeliveryAuthentication(True, None, "ok", _make_endpoint())
 
 
 class RequestStub:
@@ -101,6 +104,38 @@ class RequestStub:
 
     async def read(self) -> bytes:
         return b"{}"
+
+
+class HeaderRequestStub(RequestStub):
+    def __init__(self, path: str, authorization: str | None) -> None:
+        super().__init__(path, "unused")
+        self.headers = {} if authorization is None else {"Authorization": authorization}
+
+
+@pytest.mark.asyncio
+async def test_server_uses_single_registry_authentication_api():
+    class AtomicAuthRegistry:
+        def __init__(self):
+            self.calls = []
+
+        def authenticate_delivery(self, path, token):
+            from core.models import DeliveryAuthentication
+
+            self.calls.append((path, token))
+            return DeliveryAuthentication(True, None, "ok", _make_endpoint())
+
+        def __getattr__(self, name):
+            raise AssertionError(f"Server 不得调用二次 Registry 查询: {name}")
+
+    registry = AtomicAuthRegistry()
+    srv = WebhookServer(
+        ServerConfig(), registry, FakeSender(), plugin_config={"render_mode": "text"}
+    )  # type: ignore[arg-type]
+    await srv._process_request(
+        RequestStub("/webhook/u/hash/test_ep", "token"),  # type: ignore[arg-type]
+        "atomic-auth",
+    )
+    assert registry.calls == [("u/hash/test_ep", "Bearer token")]
 
 
 @pytest.fixture
@@ -143,8 +178,8 @@ def server() -> WebhookServer:
 async def test_admin_revoke_immediately_blocks_old_token(tmp_path):
     registry = EndpointRegistry(tmp_path)
     record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
         name="revoked-via-admin",
-        path="u/admin/revoked-via-admin",
         owner_user_id="owner-admin-test",
         target_umo="test:Platform:Message:1",
     )
@@ -172,8 +207,8 @@ async def test_admin_revoke_immediately_blocks_old_token(tmp_path):
 async def test_admin_revoke_owner_immediately_blocks_old_token(tmp_path):
     registry = EndpointRegistry(tmp_path)
     record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
         name="revoked-via-owner",
-        path="u/admin/revoked-via-owner",
         owner_user_id="owner-admin-test",
         target_umo="test:Platform:Message:1",
     )
@@ -186,7 +221,7 @@ async def test_admin_revoke_owner_immediately_blocks_old_token(tmp_path):
     )
 
     success, _ = registry.revoke_endpoint_by_owner_name(
-        record.owner_user_id, record.name
+        record.owner_platform_id, record.owner_user_id, record.name
     )
     response = await srv._process_request(
         RequestStub(f"/webhook/{record.path}", token),  # type: ignore[arg-type]
@@ -197,6 +232,45 @@ async def test_admin_revoke_owner_immediately_blocks_old_token(tmp_path):
     assert success is True
     assert response.status == 403
     assert payload["data"]["error"] == "endpoint_revoked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authorization", "header_error"),
+    [(None, "missing_authorization"), ("Basic abc", "invalid_token")],
+)
+@pytest.mark.parametrize("state", ["not-found", "revoked", "tokenless", "active"])
+async def test_real_registry_header_error_priority_matrix(
+    tmp_path, authorization, header_error, state
+):
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        "aiocqhttp", "owner", "matrix", "aiocqhttp:FriendMessage:1"
+    )
+    path = record.path
+    if state == "not-found":
+        path = "missing"
+    elif state == "revoked":
+        registry.revoke_endpoint("aiocqhttp", "owner", "matrix")
+    elif state == "tokenless":
+        registry._records[next(iter(registry._records))].token_hash = ""
+    server = WebhookServer(
+        ServerConfig(), registry, FakeSender(), plugin_config={"render_mode": "text"}
+    )
+    response = await server._process_request(
+        HeaderRequestStub(f"/webhook/{path}", authorization),  # type: ignore[arg-type]
+        f"matrix-{state}",
+    )
+    payload = json.loads(response.body)
+    expected = {
+        "not-found": (404, "not_found"),
+        "revoked": (403, "endpoint_revoked"),
+        "tokenless": (403, "token_unclaimed"),
+        "active": (401, header_error),
+    }[state]
+    assert response.status == expected[0]
+    assert payload["data"]["error"] == expected[1]
+    assert token
 
 
 # ─── _get_render_mode ──────────────────────────────────────

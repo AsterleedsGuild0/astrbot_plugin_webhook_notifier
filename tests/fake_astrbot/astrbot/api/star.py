@@ -10,14 +10,27 @@ from .event import MessageChain
 class Context:
     """AstrBot 上下文，用于发送消息等操作。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        configs: dict[str, Any] | None = None,
+        config_exceptions: dict[str, Exception] | None = None,
+    ) -> None:
         self._sent_messages: list[tuple[str, MessageChain]] = []
         self.web_apis: list[tuple[str, Any, list[str], str]] = []
+        self._configs = configs or {}
+        self._config_exceptions = config_exceptions or {}
+        self.get_config_calls: list[str] = []
 
     def register_web_api(
         self, route: str, handler: Any, methods: list[str], description: str
     ) -> None:
         self.web_apis.append((route, handler, methods, description))
+
+    def get_config(self, umo: str) -> Any:
+        self.get_config_calls.append(umo)
+        if umo in self._config_exceptions:
+            raise self._config_exceptions[umo]
+        return self._configs.get(umo, {"wake_prefix": ["/"]})
 
     async def send_message(self, umo: str, message_chain: MessageChain) -> bool:
         """发送消息。
