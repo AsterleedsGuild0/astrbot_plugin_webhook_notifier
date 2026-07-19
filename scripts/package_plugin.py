@@ -28,6 +28,7 @@ PACKAGE_ROOT_FILES = [
     "README.md",
     "LICENSE",
     "logo.png",
+    "scripts/rebind_platform_id.py",
 ]
 
 PACKAGE_DIRS = [

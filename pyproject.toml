@@ -11,4 +11,5 @@ dev = [
     "pyyaml>=6.0.2",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
+    "pillow>=12.3.0",
 ]

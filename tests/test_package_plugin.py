@@ -65,6 +65,17 @@ def test_help_card_template_is_in_package_file_list() -> None:
     assert "templates/help_card.html" in package_plugin.iter_package_files()
 
 
+def test_rebind_cli_is_explicitly_in_package_file_list() -> None:
+    package_plugin = load_package_module()
+
+    package_files = package_plugin.iter_package_files()
+    assert "scripts/rebind_platform_id.py" in package_files
+    assert not any(
+        path.startswith("scripts/") and path != "scripts/rebind_platform_id.py"
+        for path in package_files
+    )
+
+
 def test_metadata_declares_exact_verified_platforms() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
 

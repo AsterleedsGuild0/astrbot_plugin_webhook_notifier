@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
-
 from core.security import (
     TOKEN_PREFIX,
     constant_time_compare,
