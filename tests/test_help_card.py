@@ -39,6 +39,7 @@ class PlainResultStub:
 class HelpEventStub:
     def __init__(self, message_str: str, *, super_admin: bool = False) -> None:
         self.message_str = message_str
+        self.unified_msg_origin = "aiocqhttp:FriendMessage:test-user"
         self._super_admin = super_admin
         self.session = SimpleNamespace(message_type="friend")
 
@@ -85,6 +86,9 @@ async def test_help_aliases_render_image_result(alias):
     assert captured["return_url"] is False
     assert captured["options"]["viewport_width"] == HELP_CARD_CANVAS_WIDTH
     assert "管理员工具" not in captured["html"]
+    assert "/whn token list" in captured["html"]
+    assert "/whn token delete &lt;名称&gt;" in captured["html"]
+    assert "不可恢复" in captured["html"]
 
 
 @pytest.mark.asyncio
@@ -104,10 +108,10 @@ async def test_super_admin_help_includes_private_admin_tools():
     assert isinstance(yielded[0], MessageChain)
     assert "管理员工具" in captured["html"]
     assert "仅 AstrBot 超级管理员 · 仅私聊" in captured["html"]
-    assert "admin token list" in captured["html"]
-    assert "admin token revoke-path &lt;endpoint-path&gt;" in captured["html"]
+    assert "/whn admin token list" in captured["html"]
+    assert "/whn admin token revoke-path &lt;endpoint-path&gt;" in captured["html"]
     assert (
-        "admin token revoke-owner &lt;owner_user_id&gt; &lt;名称&gt;"
+        "/whn admin token revoke-owner &lt;platform_id&gt; &lt;owner_user_id&gt; &lt;名称&gt;"
         in captured["html"]
     )
 
@@ -129,7 +133,9 @@ async def test_help_render_failure_falls_back_to_plain_text():
     assert isinstance(result, PlainResultStub)
     assert result.t2i is False
     assert "【创建与验证】" in result.text
-    assert "token new private [名称]" in result.text
+    assert "/whn token new private [名称]" in result.text
+    assert "/whn token delete <名称>" in result.text
+    assert "永久删除" in result.text
     assert "管理员工具" not in result.text
 
 
@@ -145,7 +151,7 @@ async def test_unknown_subcommand_is_short_and_points_to_help():
     assert isinstance(result, PlainResultStub)
     assert result.t2i is False
     assert result.text == (
-        "❌ 未知子命令：does-not-exist\n发送 whn help 查看可用命令。"
+        "❌ 未知子命令：does-not-exist\n发送 /whn help 查看可用命令。"
     )
     assert "token new private" not in result.text
 
@@ -154,7 +160,7 @@ async def test_unknown_subcommand_is_short_and_points_to_help():
 @pytest.mark.parametrize(
     ("command", "super_admin", "expected"),
     [
-        ("whn token delete", False, "未知 token 子命令：delete"),
+        ("whn token unknown", False, "未知 token 子命令：unknown"),
         ("whn admin token delete", True, "未知 admin token 子命令：delete"),
         ("whn admin delete", True, "未知 admin 子命令：delete"),
     ],
@@ -168,16 +174,16 @@ async def test_nested_unknown_subcommands_stay_short(command, super_admin, expec
     result = yielded[0]
     assert isinstance(result, PlainResultStub)
     assert expected in result.text
-    assert result.text.endswith("发送 whn help 查看可用命令。")
+    assert result.text.endswith("发送 /whn help 查看可用命令。")
     assert "admin token list" not in result.text
     assert "token new private" not in result.text
 
 
 def test_public_and_admin_help_content_are_separated():
-    public_html = render_help_card_html(False)
-    admin_html = render_help_card_html(True)
-    public_text = build_help_text(False)
-    admin_text = build_help_text(True)
+    public_html = render_help_card_html(False, "/whn")
+    admin_html = render_help_card_html(True, "/whn")
+    public_text = build_help_text(False, "/whn")
+    admin_text = build_help_text(True, "/whn")
 
     assert "管理员工具" not in public_html
     assert "管理员工具" not in public_text
@@ -187,7 +193,7 @@ def test_public_and_admin_help_content_are_separated():
 
 
 def test_help_card_uses_only_syntax_placeholders_without_sensitive_examples():
-    html = render_help_card_html(True)
+    html = render_help_card_html(True, "/whn")
     command_syntaxes = [
         command["syntax"]
         for section in (*PUBLIC_HELP_SECTIONS, ADMIN_HELP_SECTION)
@@ -197,9 +203,11 @@ def test_help_card_uses_only_syntax_placeholders_without_sensitive_examples():
     assert "whn_" not in html
     assert "http://" not in html
     assert "https://" not in html
-    assert "aiocqhttp" not in html
+    assert "aiocqhttp" in html
+    assert "qq_official" in html
     assert "Bearer " not in html
     assert "123456" not in html
     assert all(not syntax.startswith(("/", "&")) for syntax in command_syntaxes)
-    assert "<群号>" in command_syntaxes[3]
+    assert "<数字群号>" in command_syntaxes[3]
+    assert "current" in command_syntaxes[4]
     assert "<owner_user_id>" in command_syntaxes[-1]

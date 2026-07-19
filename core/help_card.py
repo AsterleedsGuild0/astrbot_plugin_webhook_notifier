@@ -48,12 +48,20 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
                 "description": "创建私聊 Endpoint；名称可选",
             },
             {
-                "syntax": "token new group <群号> [名称]",
-                "description": "申请群聊 Endpoint；请先在私聊执行",
+                "syntax": "token new group <数字群号> [名称]",
+                "description": "aiocqhttp：私聊申请并预绑定数字群号",
+            },
+            {
+                "syntax": "token new group current [名称]",
+                "description": "qq_official：私聊申请，验证时绑定当前群",
             },
             {
                 "syntax": "token verify <request_id> <code>",
-                "description": "在目标群完成验证；需群主或群管理员",
+                "description": "aiocqhttp 须原申请者管理验证；QQ 官方可由任一群管理批准",
+            },
+            {
+                "syntax": "token confirm <request_id>",
+                "description": "qq_official：原申请者私聊激活并领取 Token；若 Token 消息发送失败可 rotate",
             },
         ),
     },
@@ -61,7 +69,7 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
         "number": "03",
         "tone": "violet",
         "title": "管理自己的 Endpoint",
-        "description": "列表、轮换和撤销均按当前用户隔离，建议在私聊中操作。",
+        "description": "列表、轮换、撤销和永久删除均按当前平台与用户隔离，并在私聊中操作。",
         "commands": (
             {
                 "syntax": "token list",
@@ -73,7 +81,11 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
             },
             {
                 "syntax": "token revoke <名称>",
-                "description": "撤销自己的 Endpoint",
+                "description": "撤销自己的 Endpoint，并保留审计记录",
+            },
+            {
+                "syntax": "token delete <名称>",
+                "description": "永久删除 revoked/expired 终态 Endpoint；不可恢复",
             },
         ),
     },
@@ -94,7 +106,7 @@ ADMIN_HELP_SECTION: dict[str, Any] = {
             "description": "按完整 path 精确撤销",
         },
         {
-            "syntax": "admin token revoke-owner <owner_user_id> <名称>",
+            "syntax": "admin token revoke-owner <platform_id> <owner_user_id> <名称>",
             "description": "按 owner 与名称精确撤销",
         },
     ),
@@ -107,21 +119,59 @@ def _load_help_card_template() -> str:
     return template_path.read_text(encoding="utf-8")
 
 
-def render_help_card_html(is_admin: bool) -> str:
+def _sections_with_command_root(
+    sections: tuple[dict[str, Any], ...], command_root: str
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            **section,
+            "commands": tuple(
+                {**command, "syntax": f"{command_root} {command['syntax']}"}
+                for command in section["commands"]
+            ),
+        }
+        for section in sections
+    )
+
+
+def _section_with_command_root(
+    section: dict[str, Any], command_root: str
+) -> dict[str, Any]:
+    return _sections_with_command_root((section,), command_root)[0]
+
+
+def render_help_card_html(
+    is_admin: bool, command_root: str, config_error: bool = False
+) -> str:
     """渲染插件内置帮助卡片，不读取或占用 active 通知模板。"""
     event = {
-        "sections": PUBLIC_HELP_SECTIONS,
-        "admin_section": ADMIN_HELP_SECTION if is_admin else None,
+        "command_root": command_root,
+        "config_error": config_error,
+        "diagnostic": (
+            "无法读取当前会话唤醒词，请检查 AstrBot 配置和插件日志"
+            if config_error
+            else ""
+        ),
+        "sections": _sections_with_command_root(PUBLIC_HELP_SECTIONS, command_root),
+        "admin_section": (
+            _section_with_command_root(ADMIN_HELP_SECTION, command_root)
+            if is_admin
+            else None
+        ),
     }
     return render_html_template(_load_help_card_template(), event)
 
 
-def build_help_text(is_admin: bool) -> str:
+def build_help_text(
+    is_admin: bool, command_root: str, config_error: bool = False
+) -> str:
     """构造卡片失败时使用的结构化纯文本帮助。"""
     lines = [
         "Webhook Notifier 命令帮助",
-        "在当前 AstrBot 唤醒词后输入 whn 和以下子命令。",
+        f"当前命令根：{command_root}",
     ]
+    if config_error:
+        lines.append("无法读取当前会话唤醒词，请检查 AstrBot 配置和插件日志")
     sections = list(PUBLIC_HELP_SECTIONS)
     if is_admin:
         sections.append(ADMIN_HELP_SECTION)
@@ -131,7 +181,9 @@ def build_help_text(is_admin: bool) -> str:
         if section is ADMIN_HELP_SECTION:
             lines.append(str(section["description"]))
         for command in section["commands"]:
-            lines.append(f"- {command['syntax']}：{command['description']}")
+            lines.append(
+                f"- {command_root} {command['syntax']}：{command['description']}"
+            )
 
     lines.extend(("", "参数提示：[ ] 为可选参数，< > 为必填参数。"))
     return "\n".join(lines)

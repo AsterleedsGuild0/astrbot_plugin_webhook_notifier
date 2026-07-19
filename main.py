@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import logging
 import os
+import re
+import traceback
+import unicodedata
+from collections.abc import Mapping
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, cast
+from urllib.parse import urlsplit
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -22,8 +30,9 @@ from .core.help_card import (
 )
 from .core.models import EndpointStatus, ServerConfig
 from .core.registry import (
+    BIND_CURRENT_GROUP,
+    PREBOUND_GROUP,
     EndpointRegistry,
-    build_endpoint_path,
     normalize_endpoint_name,
 )
 from .core.renderer import (
@@ -32,6 +41,7 @@ from .core.renderer import (
     validate_image_result,
 )
 from .core.sender import Sender
+from .core.security import TOKEN_PREFIX
 from .core.server import WebhookServer
 from .core.template_registry import (
     MAX_TEMPLATE_BYTES,
@@ -44,6 +54,75 @@ from .core.template_registry import (
 
 PLUGIN_NAME = "Webhook Notifier"
 COMMAND = "whn"
+WAKE_PREFIX_PLACEHOLDER = "<AstrBot唤醒词>"
+WAKE_PREFIX_DIAGNOSTIC = "无法读取当前会话唤醒词，请检查 AstrBot 配置和插件日志"
+
+
+@dataclass(frozen=True)
+class _CommandRoots:
+    short: str
+    long: str
+    config_error: bool = False
+
+
+PLACEHOLDER_COMMAND_ROOTS = _CommandRoots(
+    short=f"{WAKE_PREFIX_PLACEHOLDER}whn",
+    long=f"{WAKE_PREFIX_PLACEHOLDER}webhook_notifier",
+    config_error=True,
+)
+
+
+class _SafeStatusText(str):
+    """由受控字段构造、可绕过通用 URL/domain 清洗的状态文本。"""
+
+
+class _TokenDeliveryText(str):
+    """仅用于 direct send 的敏感 Token 文本，禁止转为 yield result。"""
+
+    endpoint_name: str
+
+    def __new__(cls, value: str, endpoint_name: str):
+        instance = super().__new__(cls, value)
+        instance.endpoint_name = endpoint_name
+        return instance
+
+
+class _ExactSecretFilter(logging.Filter):
+    """仅清洗当前 direct-send Token 精确值。"""
+
+    def __init__(self, secret: str) -> None:
+        super().__init__()
+        self.secret = secret
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = str(record.msg)
+        if self.secret in rendered:
+            record.msg = rendered.replace(self.secret, "[REDACTED]")
+            record.args = ()
+        for key, value in tuple(record.__dict__.items()):
+            if isinstance(value, str) and self.secret in value:
+                record.__dict__[key] = value.replace(self.secret, "[REDACTED]")
+        if record.exc_info:
+            try:
+                formatted_exc = "".join(traceback.format_exception(*record.exc_info))
+            except Exception:
+                formatted_exc = ""
+            if self.secret in formatted_exc:
+                record.exc_info = None
+                record.exc_text = "[REDACTED]"
+        if isinstance(record.exc_text, str) and self.secret in record.exc_text:
+            record.exc_text = record.exc_text.replace(self.secret, "[REDACTED]")
+        if isinstance(record.stack_info, str) and self.secret in record.stack_info:
+            record.stack_info = record.stack_info.replace(self.secret, "[REDACTED]")
+        return True
+
+
+TOKEN_PLAINTEXT_PATTERN = re.compile(
+    rf"\b{re.escape(TOKEN_PREFIX)}[A-Za-z0-9_-]{{43}}\b"
+)
 
 
 def _command_positional_args_compat(handler: Any) -> Any:
@@ -130,7 +209,7 @@ class WebhookNotifierPlugin(Star):
         )
 
         # 如果有任何 active endpoint，启动 HTTP 服务
-        if self._registry.count_active() > 0:
+        if self._registry.count_deliverable() > 0:
             await self._start_server()
         else:
             logger.info(
@@ -144,7 +223,7 @@ class WebhookNotifierPlugin(Star):
         if legacy_token:
             logger.warning(
                 "[WebhookNotifier] 检测到早期占位 webhook_token 配置，该配置在 MVP 中未启用。"
-                "请使用 /whn token new 命令创建 managed endpoint。"
+                "请使用 <AstrBot唤醒词>whn token new 命令创建 managed endpoint。"
             )
 
         logger.info("[WebhookNotifier] 插件已初始化")
@@ -157,9 +236,10 @@ class WebhookNotifierPlugin(Star):
     # ─── Template Web API ───────────────────────────────────
 
     def _register_template_web_apis(self) -> None:
-        """在构造期注册模板管理 API。"""
+        """在构造期注册 Plugin Page API。"""
         prefix = "/astrbot_plugin_webhook_notifier"
         routes = (
+            ("base-url", self._api_base_url, ["GET"], "Get Webhook Base URL"),
             ("templates", self._api_templates, ["GET"], "List templates"),
             (
                 "templates/<template_id>",
@@ -191,6 +271,24 @@ class WebhookNotifierPlugin(Star):
             self.context.register_web_api(
                 f"{prefix}/{endpoint}", handler, methods, description
             )
+
+    async def _api_base_url(self):
+        """返回 Plugin Page 展示 Webhook Base URL 所需的最小只读数据。"""
+        config = self._server_config or ServerConfig.from_plugin_config(
+            self.config  # type: ignore[arg-type]
+        )
+        configured_base = str(config.public_base_url).strip()
+        if configured_base:
+            return json_response(
+                {"base_url": configured_base.rstrip("/"), "configured": True}
+            )
+        base_path = config.base_path.rstrip("/")
+        return json_response(
+            {
+                "base_url": f"http://{config.host}:{config.port}{base_path}",
+                "configured": False,
+            }
+        )
 
     def _template_registry_or_response(self):
         if self._template_registry is None:
@@ -363,30 +461,193 @@ class WebhookNotifierPlugin(Star):
     @filter.command("webhook_notifier")
     async def status_long(self, event: AstrMessageEvent):
         """查看 Webhook Notifier 完整状态。"""
-        yield self._plain_text_result(event, self._build_status_text())
+        commands = self._resolve_command_roots(event)
+        yield self._plain_text_result(event, self._build_status_text(commands))
 
     @filter.command("whn")
     @_command_positional_args_compat
     async def status_short(self, event: AstrMessageEvent, *command_args: object):
         """Webhook Notifier 短命令入口。"""
+        commands = self._resolve_command_roots(event)
         if command_args:
             injected_text = " ".join(str(arg) for arg in command_args).strip()
             args = self._normalize_whn_args(injected_text)
         else:
             args = self._normalize_whn_args(event.message_str)
         if not args:
-            yield self._plain_text_result(event, self._build_status_text())
+            yield self._plain_text_result(event, self._build_status_text(commands))
             return
 
-        result = await self._dispatch_whn_command(event, args)
-        if isinstance(result, str):
+        result = await self._dispatch_whn_command(event, args, commands)
+        if isinstance(result, _SafeStatusText):
             yield self._plain_text_result(event, result)
+        elif isinstance(result, _TokenDeliveryText):
+            sent = await self._send_sensitive_plain(event, result)
+            if not sent:
+                yield self._credential_delivery_failure_result(
+                    event, result.endpoint_name, commands
+                )
+        elif isinstance(result, str):
+            yield self._plain_text_result(event, self._sanitize_chat_text(result))
+        elif isinstance(result, list):
+            for item in result:
+                if isinstance(item, _TokenDeliveryText):
+                    sent = await self._send_sensitive_plain(event, item)
+                    if not sent:
+                        yield self._credential_delivery_failure_result(
+                            event, item.endpoint_name, commands
+                        )
+                elif isinstance(item, str):
+                    yield self._plain_text_result(event, self._sanitize_chat_text(item))
+                else:
+                    yield item
         elif result is not None:
             yield result
 
     def _plain_text_result(self, event: AstrMessageEvent, text: str):
         """构造强制纯文本的命令响应，避免 URL/Token 被 AstrBot T2I 转成图片。"""
         return event.plain_result(text).use_t2i(False)
+
+    def _credential_delivery_failure_result(
+        self,
+        event: AstrMessageEvent,
+        endpoint_name: str,
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ):
+        return self._plain_text_result(
+            event,
+            "⚠️ 凭据发送未确认，endpoint 状态已保存。请在同一 Bot 私聊执行 "
+            f"{commands.short} token rotate {endpoint_name} 生成并发送新 Token。",
+        )
+
+    async def _send_sensitive_plain(
+        self, event: AstrMessageEvent, delivery: _TokenDeliveryText
+    ) -> bool:
+        """绕过 RespondStage 单次发送敏感 Plain，并精确清洗当前 Token 日志。"""
+        text = str(delivery)
+        prefix = "Bearer Token: "
+        if not text.startswith(prefix):
+            raise ValueError("敏感凭据消息格式非法")
+        secret = text.removeprefix(prefix)
+        chain = MessageChain([Plain(text)]).use_t2i(False).use_markdown(False)
+        secret_filter = _ExactSecretFilter(secret)
+        targets = self._install_sensitive_log_filter(secret_filter)
+        try:
+            await event.send(chain)
+            return True
+        except Exception as exc:
+            logger.error(
+                "[WebhookNotifier] 敏感凭据 direct send 失败 "
+                f"error={type(exc).__name__}"
+            )
+            return False
+        finally:
+            self._remove_sensitive_log_filter(secret_filter, targets)
+
+    @staticmethod
+    def _install_sensitive_log_filter(
+        secret_filter: logging.Filter,
+    ) -> list[logging.Filterer]:
+        targets: list[logging.Filterer] = []
+        seen: set[int] = set()
+
+        def attach(target: logging.Filterer) -> None:
+            identity = id(target)
+            if identity in seen:
+                return
+            seen.add(identity)
+            target.addFilter(secret_filter)
+            targets.append(target)
+
+        root = logging.getLogger()
+        attach(root)
+        for handler in root.handlers:
+            attach(handler)
+
+        prefixes = ("astrbot", "botpy", "aiocqhttp")
+        for name in prefixes:
+            attach(logging.getLogger(name))
+        for name, candidate in logging.Logger.manager.loggerDict.items():
+            if not isinstance(candidate, logging.Logger):
+                continue
+            if not any(
+                name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes
+            ):
+                continue
+            attach(candidate)
+            for handler in candidate.handlers:
+                attach(handler)
+        return targets
+
+    @staticmethod
+    def _remove_sensitive_log_filter(
+        secret_filter: logging.Filter, targets: list[logging.Filterer]
+    ) -> None:
+        for target in reversed(targets):
+            target.removeFilter(secret_filter)
+
+    def _sanitize_chat_text(self, text: str) -> str:
+        """对所有文本命令回复执行 URL 与配置值的最终防泄漏处理。"""
+        sanitized = str(text)
+        server_config = self._server_config or ServerConfig.from_plugin_config(
+            self.config  # type: ignore[arg-type]
+        )
+        configured = str(server_config.public_base_url).strip()
+        if configured:
+            sanitized = sanitized.replace(configured, "[已隐藏]")
+            parsed = urlsplit(configured)
+            for sensitive_value in (parsed.netloc, parsed.hostname):
+                if sensitive_value:
+                    sanitized = sanitized.replace(sensitive_value, "[已隐藏]")
+        sanitized = re.sub(r"https?://\S+", "[已隐藏]", sanitized, flags=re.I)
+        sanitized = TOKEN_PLAINTEXT_PATTERN.sub("[Token 已隐藏]", sanitized)
+        sanitized = re.sub(
+            r"(?m)^.*OMP_SESSION_WEBHOOK_URL\s*=.*(?:\n|$)", "", sanitized
+        )
+        return sanitized.rstrip()
+
+    def _resolve_command_roots(self, event: AstrMessageEvent) -> _CommandRoots:
+        """同步读取并严格校验当前会话的 AstrBot 唤醒词。"""
+        try:
+            config = self.context.get_config(event.unified_msg_origin)
+        except Exception as exc:
+            self._log_wake_prefix_error("get_config_exception", type(exc).__name__)
+            return PLACEHOLDER_COMMAND_ROOTS
+
+        if not isinstance(config, Mapping):
+            self._log_wake_prefix_error("config_container_type", type(config).__name__)
+            return PLACEHOLDER_COMMAND_ROOTS
+        if "wake_prefix" not in config:
+            self._log_wake_prefix_error("wake_prefix_missing", "missing_key")
+            return PLACEHOLDER_COMMAND_ROOTS
+
+        wake_prefix = config["wake_prefix"]
+        if not isinstance(wake_prefix, list):
+            self._log_wake_prefix_error(
+                "wake_prefix_container_type", type(wake_prefix).__name__
+            )
+            return PLACEHOLDER_COMMAND_ROOTS
+        for prefix in wake_prefix:
+            if not isinstance(prefix, str):
+                self._log_wake_prefix_error(
+                    "wake_prefix_element_type", type(prefix).__name__
+                )
+                return PLACEHOLDER_COMMAND_ROOTS
+            if any(unicodedata.category(character) == "Cc" for character in prefix):
+                self._log_wake_prefix_error(
+                    "wake_prefix_control_character", "unicode_control_character"
+                )
+                return PLACEHOLDER_COMMAND_ROOTS
+
+        prefix = wake_prefix[0] if wake_prefix else ""
+        return _CommandRoots(short=f"{prefix}whn", long=f"{prefix}webhook_notifier")
+
+    @staticmethod
+    def _log_wake_prefix_error(category: str, reason: str) -> None:
+        logger.error(
+            f"[WebhookNotifier] 当前会话 wake_prefix 配置异常 "
+            f"category={category} reason={reason}"
+        )
 
     def _normalize_whn_args(self, message: str) -> str:
         """规范化 /whn 命令参数。
@@ -407,29 +668,40 @@ class WebhookNotifierPlugin(Star):
             return parts[1].strip() if len(parts) > 1 else ""
         return text
 
-    async def _dispatch_whn_command(self, event: AstrMessageEvent, args: str) -> Any:
+    async def _dispatch_whn_command(
+        self,
+        event: AstrMessageEvent,
+        args: str,
+        commands: _CommandRoots | None = None,
+    ) -> Any:
         """分发 /whn 子命令。"""
+        if commands is None:
+            commands = self._resolve_command_roots(event)
         parts = args.split()
         if not parts:
-            return self._build_status_text()
+            return self._build_status_text(commands)
 
         sub = parts[0].lower()
 
         if sub in ("help", "帮助"):
-            return await self._build_help_result(event)
+            return await self._build_help_result(event, commands)
         if sub in ("status", "状态"):
-            return self._build_status_text()
+            return self._build_status_text(commands)
         if sub == "token":
-            return await self._handle_token_command(event, parts[1:])
+            return await self._handle_token_command(event, parts[1:], commands)
         if sub == "admin":
-            return self._handle_admin_command(event, parts[1:])
-        return f"❌ 未知子命令：{sub}\n发送 whn help 查看可用命令。"
+            return self._handle_admin_command(event, parts[1:], commands)
+        return f"❌ 未知子命令：{sub}\n发送 {commands.short} help 查看可用命令。"
 
-    async def _build_help_result(self, event: AstrMessageEvent):
+    async def _build_help_result(
+        self, event: AstrMessageEvent, commands: _CommandRoots
+    ):
         """优先返回内置帮助图片，任何渲染异常都降级为纯文本。"""
         is_admin = self._event_is_super_admin(event)
         try:
-            rendered_html = render_help_card_html(is_admin)
+            rendered_html = render_help_card_html(
+                is_admin, commands.short, commands.config_error
+            )
             image_result = await self.html_render(
                 "{{ rendered_html | safe }}",
                 {"rendered_html": rendered_html},
@@ -446,7 +718,9 @@ class WebhookNotifierPlugin(Star):
             return event.chain_result([Image(file=image_result)]).use_t2i(False)
         except Exception as exc:
             logger.warning(f"[WebhookNotifier] 帮助卡片渲染失败，回退纯文本: {exc}")
-            return self._plain_text_result(event, build_help_text(is_admin))
+            return self._plain_text_result(
+                event, build_help_text(is_admin, commands.short, commands.config_error)
+            )
 
     @staticmethod
     def _event_is_super_admin(event: AstrMessageEvent) -> bool:
@@ -455,7 +729,12 @@ class WebhookNotifierPlugin(Star):
         except (AttributeError, TypeError, NotImplementedError):
             return False
 
-    def _handle_admin_command(self, event: AstrMessageEvent, args: list[str]) -> str:
+    def _handle_admin_command(
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> str:
         """处理仅 AstrBot 全局超级管理员可用的 Registry 命令。"""
         sender_id = event.get_sender_id()
         action = " ".join(args[:2]) or "usage"
@@ -478,21 +757,22 @@ class WebhookNotifierPlugin(Star):
                 f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
                 "action=usage result=invalid_input"
             )
-            return self._admin_command_usage()
+            return self._admin_command_usage(commands.short)
         if args[0].lower() != "token":
             logger.warning(
                 f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
                 f"action={args[0].lower()} result=unknown_action"
             )
             return (
-                f"❌ 未知 admin 子命令：{args[0].lower()}\n发送 whn help 查看可用命令。"
+                f"❌ 未知 admin 子命令：{args[0].lower()}\n"
+                f"发送 {commands.short} help 查看可用命令。"
             )
         if len(args) < 2:
             logger.warning(
                 f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
                 "action=token result=invalid_input"
             )
-            return self._admin_command_usage()
+            return self._admin_command_usage(commands.short)
 
         token_action = args[1].lower()
         if token_action == "list":
@@ -501,27 +781,32 @@ class WebhookNotifierPlugin(Star):
                     f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
                     "action=list result=invalid_input"
                 )
-                return "❌ 用法: /whn admin token list"
+                return f"❌ 用法: {commands.short} admin token list"
             return self._handle_admin_token_list(sender_id)
         if token_action == "revoke-path":
-            return self._handle_admin_token_revoke_path(sender_id, args[2:])
+            return self._handle_admin_token_revoke_path(
+                sender_id, args[2:], commands.short
+            )
         if token_action == "revoke-owner":
-            return self._handle_admin_token_revoke_owner(sender_id, args[2:])
+            return self._handle_admin_token_revoke_owner(
+                sender_id, args[2:], commands.short
+            )
         logger.warning(
             f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
             f"action={token_action} result=unknown_action"
         )
         return (
-            f"❌ 未知 admin token 子命令：{token_action}\n发送 whn help 查看可用命令。"
+            f"❌ 未知 admin token 子命令：{token_action}\n"
+            f"发送 {commands.short} help 查看可用命令。"
         )
 
     @staticmethod
-    def _admin_command_usage() -> str:
+    def _admin_command_usage(command_root: str) -> str:
         return (
             "用法:\n"
-            "  /whn admin token list\n"
-            "  /whn admin token revoke-path <endpoint-path>\n"
-            "  /whn admin token revoke-owner <owner_user_id> <名称>\n"
+            f"  {command_root} admin token list\n"
+            f"  {command_root} admin token revoke-path <endpoint-path>\n"
+            f"  {command_root} admin token revoke-owner <platform_id> <owner_user_id> <名称>\n"
             "仅 AstrBot 全局超级管理员可用，且必须在私聊执行。"
         )
 
@@ -548,7 +833,7 @@ class WebhookNotifierPlugin(Star):
             target_names = ",".join(target.name for target in rec.targets) or "无"
             lines.append(
                 f"{index}. owner={rec.owner_user_id} | name={rec.name} | "
-                f"path=/{rec.path} | status={rec.status} | "
+                f"Endpoint Path={rec.path} | status={rec.status} | "
                 f"targets={target_names} ({len(rec.targets)}) | "
                 f"created={rec.created_at[:19]}"
             )
@@ -557,13 +842,18 @@ class WebhookNotifierPlugin(Star):
         lines.append("安全提示：此列表不会显示 Token 明文、hash 或完整目标 UMO。")
         return "\n".join(lines)
 
-    def _handle_admin_token_revoke_path(self, sender_id: str, args: list[str]) -> str:
+    def _handle_admin_token_revoke_path(
+        self,
+        sender_id: str,
+        args: list[str],
+        command_root: str = PLACEHOLDER_COMMAND_ROOTS.short,
+    ) -> str:
         if len(args) != 1 or not args[0].strip():
             logger.warning(
                 f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
                 "action=revoke-path result=invalid_input"
             )
-            return "❌ 用法: /whn admin token revoke-path <endpoint-path>"
+            return f"❌ 用法: {command_root} admin token revoke-path <endpoint-path>"
 
         path = args[0].strip()
         if path.startswith("/"):
@@ -592,30 +882,42 @@ class WebhookNotifierPlugin(Star):
         )
         if success:
             logger.info(log_message)
-            return f"✅ {message}（path: /{path}）"
+            return f"✅ {message}（Endpoint Path: {path}）"
         logger.warning(log_message)
-        return f"❌ {message}（path: /{path}）"
+        return f"❌ {message}（Endpoint Path: {path}）"
 
-    def _handle_admin_token_revoke_owner(self, sender_id: str, args: list[str]) -> str:
-        if len(args) < 2 or not args[0].strip():
+    def _handle_admin_token_revoke_owner(
+        self,
+        sender_id: str,
+        args: list[str],
+        command_root: str = PLACEHOLDER_COMMAND_ROOTS.short,
+    ) -> str:
+        if len(args) < 3 or not args[0].strip() or not args[1].strip():
             logger.warning(
                 f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
                 "action=revoke-owner result=invalid_input"
             )
-            return "❌ 用法: /whn admin token revoke-owner <owner_user_id> <名称>"
+            return (
+                f"❌ 用法: {command_root} admin token revoke-owner "
+                "<platform_id> <owner_user_id> <名称>"
+            )
 
-        owner_user_id = args[0].strip()
-        raw_name = " ".join(args[1:]).strip()
+        platform_id = args[0].strip()
+        owner_user_id = args[1].strip()
+        raw_name = " ".join(args[2:]).strip()
         if not raw_name:
             logger.warning(
                 f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
                 "action=revoke-owner result=empty_name"
             )
-            return "❌ 用法: /whn admin token revoke-owner <owner_user_id> <名称>"
+            return (
+                f"❌ 用法: {command_root} admin token revoke-owner "
+                "<platform_id> <owner_user_id> <名称>"
+            )
         name = normalize_endpoint_name(raw_name)
-        target_id = sha256(f"{owner_user_id}\x1f{name}".encode("utf-8")).hexdigest()[
-            :12
-        ]
+        target_id = sha256(
+            f"{platform_id}\x1f{owner_user_id}\x1f{name}".encode("utf-8")
+        ).hexdigest()[:12]
 
         registry = self._ensure_registry()
         if not registry:
@@ -626,7 +928,9 @@ class WebhookNotifierPlugin(Star):
             )
             return "❌ Registry 未初始化，请检查日志。"
 
-        success, message = registry.revoke_endpoint_by_owner_name(owner_user_id, name)
+        success, message = registry.revoke_endpoint_by_owner_name(
+            platform_id, owner_user_id, name
+        )
         log_message = (
             f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
             f"action=revoke-owner target_id={target_id} "
@@ -634,43 +938,66 @@ class WebhookNotifierPlugin(Star):
         )
         if success:
             logger.info(log_message)
-            return f"✅ {message}（owner/name: {owner_user_id}/{name}）"
+            return f"✅ {message}（platform/owner/name: {platform_id}/{owner_user_id}/{name}）"
         logger.warning(log_message)
-        return f"❌ {message}（owner/name: {owner_user_id}/{name}）"
+        return (
+            f"❌ {message}（platform/owner/name: {platform_id}/{owner_user_id}/{name}）"
+        )
 
     async def _handle_token_command(
-        self, event: AstrMessageEvent, args: list[str]
-    ) -> str:
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> Any:
         """处理 /whn token 子命令。"""
         if not args:
             return (
                 "用法:\n"
-                "  /whn token new private [名称]\n"
-                "  /whn token new group <群号> [名称]\n"
-                "  /whn token verify <request_id> <code>\n"
-                "  /whn token list\n"
-                "  /whn token rotate <名称>\n"
-                "  /whn token revoke <名称>"
+                f"  {commands.short} token new private [名称]\n"
+                f"  {commands.short} token new group <数字群号> [名称]  (aiocqhttp)\n"
+                f"  {commands.short} token new group current [名称]  (qq_official)\n"
+                f"  {commands.short} token verify <request_id> <code>\n"
+                f"  {commands.short} token confirm <request_id>  (qq_official)\n"
+                f"  {commands.short} token list\n"
+                f"  {commands.short} token rotate <名称>\n"
+                f"  {commands.short} token revoke <名称>\n"
+                f"  {commands.short} token delete <名称>\n\n"
+                "aiocqhttp：原申请者须在预指定群以群主/管理员身份 verify，随后私聊 rotate。\n"
+                "qq_official：当前群任一群主/管理员可 verify；原申请者随后同 Bot 私聊 confirm。\n"
+                "revoke 保留审计记录；delete 仅永久删除 revoked/expired 终态记录。"
             )
 
         action = args[0].lower()
 
         if action == "new":
-            return await self._handle_token_new(event, args[1:])
+            return await self._handle_token_new(event, args[1:], commands)
         elif action == "verify":
-            return await self._handle_token_verify(event, args[1:])
+            return await self._handle_token_verify(event, args[1:], commands)
+        elif action == "confirm":
+            return await self._handle_token_confirm(event, args[1:], commands)
         elif action == "list":
-            return self._handle_token_list(event)
+            return self._handle_token_list(event, commands)
         elif action == "rotate":
-            return await self._handle_token_rotate(event, args[1:])
+            return await self._handle_token_rotate(event, args[1:], commands)
         elif action == "revoke":
-            return await self._handle_token_revoke(event, args[1:])
+            return await self._handle_token_revoke(event, args[1:], commands)
+        elif action == "delete":
+            return await self._handle_token_delete(event, args[1:], commands)
         else:
-            return f"❌ 未知 token 子命令：{action}\n发送 whn help 查看可用命令。"
+            return (
+                f"❌ 未知 token 子命令：{action}\n"
+                f"发送 {commands.short} help 查看可用命令。"
+            )
 
     # ─── Token 管理 ──────────────────────────────────────────
 
-    async def _handle_token_new(self, event: AstrMessageEvent, args: list[str]) -> str:
+    async def _handle_token_new(
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> list[str] | str:
         """处理 /whn token new 命令。"""
         # 必须是私聊
         if not self._is_private(event):
@@ -679,8 +1006,9 @@ class WebhookNotifierPlugin(Star):
         if not args:
             return (
                 "用法:\n"
-                "  /whn token new private [名称]\n"
-                "  /whn token new group <群号> [名称]"
+                f"  {commands.short} token new private [名称]\n"
+                f"  {commands.short} token new group <数字群号> [名称]  (aiocqhttp)\n"
+                f"  {commands.short} token new group current [名称]  (qq_official)"
             )
 
         mode = args[0].lower()
@@ -689,52 +1017,44 @@ class WebhookNotifierPlugin(Star):
         if mode == "private":
             return await self._create_private_endpoint(event, name_param)
         elif mode == "group":
-            return await self._create_group_pending(event, args[1:])
+            return await self._create_group_pending(event, args[1:], commands)
         else:
             return (
                 f"未知类型: {mode}\n"
-                "用法: /whn token new private [名称] 或 /whn token new group <群号> [名称]"
+                f"用法: {commands.short} token new private [名称]；"
+                "群聊请按当前平台使用数字群号或 current"
             )
 
     async def _create_private_endpoint(
         self, event: AstrMessageEvent, name_param: str
-    ) -> str:
+    ) -> list[str] | str:
         """创建私聊 endpoint。"""
         registry = self._ensure_registry()
         if not registry:
             return "❌ Registry 未初始化，请检查日志。"
 
         owner_id = event.get_sender_id()
+        platform_id = event.get_platform_id()
         target_umo = event.unified_msg_origin
 
         endpoint_name = normalize_endpoint_name(name_param or "private")
-        endpoint_path = build_endpoint_path(owner_id, endpoint_name)
-
-        # 检查是否已存在
-        if not registry.is_owner_name_available(owner_id, endpoint_name):
-            return (
-                f"❌ 你已经创建过名为 '{endpoint_name}' 的 endpoint，请使用其他名称。"
-            )
-        if not registry.is_path_available(endpoint_path):
-            return f"❌ endpoint 路径 '{endpoint_path}' 已存在，请使用其他名称。"
 
         try:
             record, token = registry.create_private_endpoint(
+                owner_platform_id=platform_id,
                 name=endpoint_name,
-                path=endpoint_path,
                 owner_user_id=owner_id,
                 target_umo=target_umo,
                 description=f"私聊 endpoint for {owner_id}",
             )
         except Exception as e:
             logger.error(f"[WebhookNotifier] 创建私聊 endpoint 失败: {e}")
-            return f"❌ 创建失败: {e}"
+            return "❌ 创建失败，请检查插件日志。"
+        endpoint_path = record.path
 
         # 如果 HTTP 服务未运行，启动
         await self._ensure_server_running()
 
-        # 构造返回信息
-        url = self._build_webhook_url(endpoint_path)
         private_notification_notice = ""
         if not bool(self.config.get("enable_private_notifications", False)):
             private_notification_notice = (
@@ -743,73 +1063,102 @@ class WebhookNotifierPlugin(Star):
                 "enable_private_notifications 并 reload 后恢复。"
             )
 
-        return (
-            f"✅ 私聊 endpoint 创建成功\n\n"
+        summary = (
+            "✅ 私聊 endpoint 创建成功\n"
             f"名称: {endpoint_name}\n"
-            f"URL: {url}\n"
-            f"Bearer Token: {token}\n\n"
-            f"OMP 环境变量配置:\n"
-            f"  OMP_SESSION_WEBHOOK_URL={url}\n"
-            f"  OMP_SESSION_WEBHOOK_TOKEN={token}\n\n"
-            f"⚠️ 安全提示：Token 只展示一次，泄露后请立即使用 /whn token rotate {endpoint_name} 轮换。"
+            f"Endpoint Path: {endpoint_path}\n"
+            "Base URL：请在 Plugin Page 中复制"
             f"{private_notification_notice}"
         )
+        return [summary, _TokenDeliveryText(f"Bearer Token: {token}", endpoint_name)]
 
     async def _create_group_pending(
-        self, event: AstrMessageEvent, args: list[str]
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
     ) -> str:
         """创建群聊待验证 endpoint。"""
         registry = self._ensure_registry()
         if not registry:
             return "❌ Registry 未初始化，请检查日志。"
 
-        if not args:
-            return "❌ 请指定 QQ 群号: /whn token new group <群号> [名称]"
-
-        group_id = args[0].strip()
-        # 简单校验群号格式
-        if not group_id.isdigit():
-            return "❌ 群号必须是数字。"
-
-        name_param = " ".join(args[1:]).strip() if len(args) > 1 else ""
         owner_id = event.get_sender_id()
-
-        endpoint_name = normalize_endpoint_name(name_param or f"group_{group_id}")
-        endpoint_path = build_endpoint_path(owner_id, endpoint_name)
-
-        if not registry.is_owner_name_available(owner_id, endpoint_name):
-            return (
-                f"❌ 你已经创建过名为 '{endpoint_name}' 的 endpoint，请使用其他名称。"
-            )
-        if not registry.is_path_available(endpoint_path):
-            return f"❌ endpoint 路径 '{endpoint_path}' 已存在，请使用其他名称。"
+        platform_id = event.get_platform_id()
+        adapter_kind = self._get_adapter_kind(event)
+        if adapter_kind == "aiocqhttp":
+            if not args:
+                return (
+                    f"❌ 请指定 QQ 群号: {commands.short} token new group "
+                    "<数字群号> [名称]"
+                )
+            group_id = args[0].strip()
+            if not group_id.isdigit():
+                return "❌ aiocqhttp 群号必须是数字。"
+            binding_mode = PREBOUND_GROUP
+            target_group_id: str | None = group_id
+            name_param = " ".join(args[1:]).strip() if len(args) > 1 else ""
+            endpoint_name = normalize_endpoint_name(name_param or f"group_{group_id}")
+        elif adapter_kind == "qq_official":
+            if not args or args[0].lower() != "current":
+                return (
+                    f"❌ QQ 官方平台用法: {commands.short} "
+                    "token new group current [名称]"
+                )
+            binding_mode = BIND_CURRENT_GROUP
+            target_group_id = None
+            name_param = " ".join(args[1:]).strip() if len(args) > 1 else ""
+            endpoint_name = normalize_endpoint_name(name_param or "group_current")
+        else:
+            return "❌ 当前平台不支持群聊 endpoint 验证。"
 
         try:
-            record, request_id, code = registry.create_pending_verification(
+            record, request_id, code = registry.create_group_pending(
+                owner_platform_id=platform_id,
                 name=endpoint_name,
-                path=endpoint_path,
                 owner_user_id=owner_id,
-                target_group_id=group_id,
-                description=f"群聊 endpoint for {owner_id} 目标群 {group_id}",
+                group_binding_mode=binding_mode,
+                target_group_id=target_group_id,
+                description=f"群聊 endpoint for {owner_id}",
             )
         except Exception as e:
             logger.error(f"[WebhookNotifier] 创建群聊待验证 endpoint 失败: {e}")
-            return f"❌ 创建失败: {e}"
+            return "❌ 创建失败，请检查插件日志。"
+        endpoint_path = record.path
 
+        target_line = (
+            f"目标群: {target_group_id}\n"
+            if binding_mode == PREBOUND_GROUP
+            else "目标群: 验证时绑定当前群\n"
+        )
+        binding_notice = (
+            "请在目标群中由群主或群管理员执行以下命令批准当前群。\n"
+            if binding_mode == BIND_CURRENT_GROUP
+            else "请在目标群中发送以下命令完成验证：\n"
+        )
+        completion_notice = (
+            "群管理员批准后，请由原申请者在同一 QQ 官方 Bot 私聊执行消息中提示的 confirm 命令。"
+            if binding_mode == BIND_CURRENT_GROUP
+            else f"验证通过后，请由创建者主动私聊执行 {commands.short} token rotate {endpoint_name} 领取新 Token。"
+        )
         return (
             f"✅ 待验证申请已创建\n\n"
             f"名称: {endpoint_name}\n"
-            f"目标群: {group_id}\n"
+            f"{target_line}"
+            f"Endpoint Path: {endpoint_path}\n"
             f"请求 ID: {request_id}\n"
             f"验证码: {code}\n"
             f"有效期: 10 分钟\n\n"
-            f"请在目标群中发送以下命令完成验证：\n"
-            f"  /whn token verify {request_id} {code}\n\n"
-            f"验证通过后，Token 将通过私聊发送给您。"
+            f"{binding_notice}"
+            f"  {commands.short} token verify {request_id} {code}\n\n"
+            f"{completion_notice}"
         )
 
     async def _handle_token_verify(
-        self, event: AstrMessageEvent, args: list[str]
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
     ) -> str:
         """处理 /whn token verify 命令。"""
         registry = self._ensure_registry()
@@ -821,90 +1170,109 @@ class WebhookNotifierPlugin(Star):
             return "❌ 验证命令必须在目标群中执行。"
 
         if len(args) < 2:
-            return "❌ 用法: /whn token verify <request_id> <code>"
+            return f"❌ 用法: {commands.short} token verify <request_id> <code>"
 
         request_id = args[0].strip()
         code = args[1].strip()
-        verify_user_id = event.get_sender_id()
-        verify_group_id = event.get_group_id()
-
-        if not verify_group_id:
-            return "❌ 无法获取当前群 ID，请确认 Bot 已在群内。"
-
-        # 检查群管理员权限
-        is_admin = await self._check_group_admin(event)
-        if is_admin is None:
-            return "❌ 当前平台无法校验群管理员身份，群聊 token 验证失败。"
-        if not is_admin:
-            return (
-                "❌ 权限不足：群聊 token 验证需要执行者是群主或群管理员。\n"
-                "如需创建群聊 endpoint，请联系群主或管理员操作。"
-            )
-
-        # 构造群聊 UMO
         platform_id = event.get_platform_id()
-        group_umo = f"{platform_id}:GroupMessage:{verify_group_id}"
+        pending_info = registry.get_pending_descriptor(platform_id, request_id)
+        if pending_info is None:
+            return "❌ 验证请求不存在或已过期"
 
-        pending_info = dict(registry._pending.get(request_id, {}))
-        result_status, result_msg, token = registry.verify_group_endpoint(
+        adapter_kind = self._get_adapter_kind(event)
+        if adapter_kind == "aiocqhttp":
+            stable_owner_user_id = event.get_sender_id()
+            verify_group_id = event.get_group_id()
+            if not verify_group_id:
+                return "❌ 无法获取当前群 ID，请确认 Bot 已在群内。"
+            verified_role = await self._check_aiocqhttp_group_role(event)
+        elif adapter_kind == "qq_official":
+            context = self._get_qq_official_verification_context(event)
+            if context is None:
+                return "❌ 当前平台无法校验群管理员身份，群聊 token 验证失败。"
+            verify_group_id, verified_role = context
+            stable_owner_user_id = None
+        else:
+            return "❌ 当前平台无法校验群管理员身份，群聊 token 验证失败。"
+        if verified_role is None:
+            return "❌ 当前平台无法校验群管理员身份，群聊 token 验证失败。"
+
+        result_status, result_msg, _ = registry.verify_group_endpoint(
+            owner_platform_id=platform_id,
             request_id=request_id,
             code=code,
-            verify_user_id=verify_user_id,
-            verify_group_id=str(verify_group_id),
-            group_target_umo=group_umo,
+            stable_owner_user_id=stable_owner_user_id,
+            group_id=str(verify_group_id),
+            verified_role=verified_role,
         )
 
-        if result_status == "ok" and token:
-            # 验证成功：私聊返回 token
+        if result_status == "ok":
             await self._ensure_server_running()
 
             # 获取 endpoint 信息。verify_group_endpoint 会清理 pending，
             # 因此这里使用验证前复制出的 pending_info。
             endpoint_name = pending_info.get("endpoint_name", "unknown")
-            owner_user_id = pending_info.get("owner_user_id", verify_user_id)
-            record = registry.get_by_owner_name(owner_user_id, endpoint_name)
-            endpoint_path = record.path if record else endpoint_name
-            url = self._build_webhook_url(endpoint_path)
-
-            # 仅在私聊返回 token。verify 命令发生在群聊事件中，不能使用
-            # event.unified_msg_origin，否则 token 明文会被发送到群内。
-            private_umo = f"{platform_id}:FriendMessage:{verify_user_id}"
-            private_msg = (
-                f"✅ 群聊 endpoint 验证成功！\n\n"
+            return (
+                "✅ 群聊 endpoint 验证成功！\n"
                 f"名称: {endpoint_name}\n"
-                f"URL: {url}\n"
-                f"Bearer Token: {token}\n\n"
-                f"OMP 环境变量配置:\n"
-                f"  OMP_SESSION_WEBHOOK_URL={url}\n"
-                f"  OMP_SESSION_WEBHOOK_TOKEN={token}\n\n"
-                f"⚠️ 安全提示：Token 只展示一次，泄露后请立即使用 /whn token rotate {endpoint_name} 轮换。"
+                "Token 尚未发放。请由创建者主动私聊执行 "
+                f"{commands.short} token rotate {endpoint_name} 领取新 Token。"
             )
-            # 尝试私聊发送 token
-            try:
-                sent = await self.context.send_message(
-                    private_umo, MessageChain([Plain(private_msg)]).use_t2i(False)
-                )
-                if not sent:
-                    logger.error(
-                        f"[WebhookNotifier] 私聊发送 token 失败: 找不到平台会话 {private_umo}"
-                    )
-                    return (
-                        "❌ 验证成功但私聊发送 Token 失败：无法找到私聊会话。"
-                        "请先私聊 Bot 任意消息后，再使用 /whn token rotate "
-                        f"{endpoint_name} 重新生成 Token。"
-                    )
-                logger.info(
-                    f"[WebhookNotifier] 群聊验证成功，Token 已私聊发送给用户 {verify_user_id}"
-                )
-            except Exception as e:
-                logger.error(f"[WebhookNotifier] 私聊发送 token 失败: {e}")
-                return f"❌ 验证成功但私聊发送 Token 失败: {e}"
-
-            return "✅ 验证成功！Token 已通过私聊发送给您，请查看私聊消息。"
+        elif result_status == "waiting_owner":
+            endpoint_name = pending_info.get("endpoint_name", "unknown")
+            return (
+                "✅ 群管理员验证成功！\n"
+                f"名称: {endpoint_name}\n"
+                "Endpoint 仍在等待原申请者确认，尚未生成 Token。\n"
+                "请原申请者在同一 QQ 官方 Bot 私聊执行：\n"
+                f"  {commands.short} token confirm {request_id}"
+            )
         else:
             return f"❌ {result_msg}"
 
-    def _handle_token_list(self, event: AstrMessageEvent) -> str:
+    async def _handle_token_confirm(
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> list[str] | str:
+        """由 QQ 官方原 C2C 申请者私聊完成群绑定并领取 Token。"""
+        registry = self._ensure_registry()
+        if not registry:
+            return "❌ Registry 未初始化，请检查日志。"
+        if not self._is_private(event):
+            return "❌ confirm 必须由原申请者在同一 Bot 私聊中执行。"
+        if len(args) != 1 or not args[0].strip():
+            return f"❌ 用法: {commands.short} token confirm <request_id>"
+
+        request_id = args[0].strip()
+        platform_id = event.get_platform_id()
+        pending_info = registry.get_pending_descriptor(platform_id, request_id)
+        if pending_info is None:
+            return "❌ 验证请求不存在或已过期"
+
+        status, message, record, token = registry.confirm_group_endpoint(
+            platform_id,
+            request_id,
+            event.get_sender_id(),
+        )
+        if status != "ok" or record is None or token is None:
+            return f"❌ {message}"
+
+        await self._ensure_server_running()
+        summary = (
+            "✅ QQ 官方群聊 endpoint 确认成功\n"
+            f"名称: {record.name}\n"
+            f"Endpoint Path: {record.path}\n"
+            "Base URL：请在 Plugin Page 中复制"
+        )
+        return [summary, _TokenDeliveryText(f"Bearer Token: {token}", record.name)]
+
+    def _handle_token_list(
+        self,
+        event: AstrMessageEvent,
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> str:
         """列出用户的所有 endpoint。"""
         registry = self._ensure_registry()
         if not registry:
@@ -915,13 +1283,14 @@ class WebhookNotifierPlugin(Star):
             return "❌ 查看 endpoint 列表请在私聊中执行。"
 
         owner_id = event.get_sender_id()
-        records = registry.list_visible_by_owner(owner_id)
+        platform_id = event.get_platform_id()
+        records = registry.list_visible_by_owner(platform_id, owner_id)
 
         if not records:
             return (
                 "📋 您当前没有可用的 endpoint。\n"
                 "已撤销或已过期的 endpoint 不在默认列表中显示。\n"
-                "使用 /whn token new private [名称] 创建。"
+                f"使用 {commands.short} token new private [名称] 创建。"
             )
 
         lines = ["📋 您的 Endpoint 列表:\n"]
@@ -939,7 +1308,7 @@ class WebhookNotifierPlugin(Star):
 
             lines.append(
                 f"{status_emoji} {rec.name}\n"
-                f"   路径: /{rec.path}\n"
+                f"   Endpoint Path: {rec.path}\n"
                 f"   状态: {rec.status}\n"
                 f"   目标: {targets_str}\n"
                 f"   创建: {rec.created_at[:19]}\n"
@@ -950,8 +1319,11 @@ class WebhookNotifierPlugin(Star):
         return "\n".join(lines).strip()
 
     async def _handle_token_rotate(
-        self, event: AstrMessageEvent, args: list[str]
-    ) -> str:
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> list[str] | str:
         """轮换 token。"""
         registry = self._ensure_registry()
         if not registry:
@@ -961,29 +1333,31 @@ class WebhookNotifierPlugin(Star):
             return "❌ 轮换 token 请在私聊中执行。"
 
         if not args:
-            return "❌ 请指定 endpoint 名称: /whn token rotate <名称>"
+            return f"❌ 请指定 endpoint 名称: {commands.short} token rotate <名称>"
 
         name = normalize_endpoint_name(" ".join(args))
         owner_id = event.get_sender_id()
+        platform_id = event.get_platform_id()
 
-        success, result = registry.rotate_token(name, owner_id)
+        success, result = registry.rotate_token(platform_id, owner_id, name)
         if not success:
             return f"❌ {result}"
 
-        record = registry.get_by_owner_name(owner_id, name)
+        record = registry.get_by_owner_name(platform_id, owner_id, name)
         endpoint_path = record.path if record else name
-        url = self._build_webhook_url(endpoint_path)
-
-        return (
-            f"✅ Token 已轮换\n\n"
+        summary = (
+            "✅ Token 已轮换\n"
             f"名称: {name}\n"
-            f"新的 Bearer Token: {result}\n"
-            f"URL: {url}\n\n"
-            f"⚠️ 旧 Token 已立即失效。请更新外部系统配置。"
+            f"Endpoint Path: {endpoint_path}\n"
+            "⚠️ 旧 Token 已立即失效。请更新外部系统配置。"
         )
+        return [summary, _TokenDeliveryText(f"Bearer Token: {result}", name)]
 
     async def _handle_token_revoke(
-        self, event: AstrMessageEvent, args: list[str]
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
     ) -> str:
         """撤销 endpoint。"""
         registry = self._ensure_registry()
@@ -994,16 +1368,75 @@ class WebhookNotifierPlugin(Star):
             return "❌ 撤销 endpoint 请在私聊中执行。"
 
         if not args:
-            return "❌ 请指定 endpoint 名称: /whn token revoke <名称>"
+            return f"❌ 请指定 endpoint 名称: {commands.short} token revoke <名称>"
 
         name = normalize_endpoint_name(" ".join(args))
         owner_id = event.get_sender_id()
+        platform_id = event.get_platform_id()
 
-        success, message = registry.revoke_endpoint(name, owner_id)
+        success, message = registry.revoke_endpoint(platform_id, owner_id, name)
         if not success:
             return f"❌ {message}"
 
         return f"✅ {message}"
+
+    async def _handle_token_delete(
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> str:
+        """永久删除用户自己的 revoked/expired endpoint。"""
+        if not self._is_private(event):
+            return "❌ 永久删除 endpoint 请在私聊中执行。"
+        if not args:
+            return f"❌ 请指定 endpoint 名称: {commands.short} token delete <名称>"
+
+        registry = self._ensure_registry()
+        if not registry:
+            return "❌ Registry 未初始化，请检查日志。"
+
+        name = normalize_endpoint_name(" ".join(args))
+        platform_id = event.get_platform_id()
+        try:
+            result, status = registry.delete_endpoint(
+                platform_id, event.get_sender_id(), name
+            )
+        except Exception as exc:
+            logger.error(
+                "[WebhookNotifier] endpoint delete audit "
+                f"operation=delete result=error platform={platform_id} "
+                f"error={type(exc).__name__}"
+            )
+            return "❌ 永久删除失败，请检查插件日志。"
+
+        log_message = (
+            "[WebhookNotifier] endpoint delete audit "
+            f"operation=delete result={result} status={status or 'none'} "
+            f"platform={platform_id}"
+        )
+        if result == "deleted":
+            logger.info(log_message)
+            return (
+                "✅ Endpoint 已永久删除\n"
+                f"名称: {name}\n"
+                "⚠️ 此操作不可恢复；原 Token 已失效。"
+            )
+
+        logger.warning(log_message)
+        if result == "active":
+            return (
+                "❌ active endpoint 不能永久删除。请先执行 "
+                f"{commands.short} token revoke {name}。"
+            )
+        if result == "pending":
+            return (
+                "❌ pending_verification endpoint 不能永久删除。"
+                "请先完成验证、等待过期，或执行 revoke。"
+            )
+        if result == "not_found":
+            return "❌ endpoint 不存在（可能已永久删除）。"
+        return "❌ endpoint 状态不支持永久删除。"
 
     # ─── 辅助方法 ───────────────────────────────────────────
 
@@ -1034,24 +1467,6 @@ class WebhookNotifierPlugin(Star):
         except Exception as e:
             logger.error(f"[WebhookNotifier] 启动 HTTP 服务失败: {e}")
 
-    def _build_webhook_url(self, endpoint_path: str) -> str:
-        """构建 Webhook URL。"""
-        if self._server_config and self._server_config.public_base_url:
-            base = self._server_config.public_base_url.rstrip("/")
-            return f"{base}/{endpoint_path}"
-        else:
-            host = self._server_config.host if self._server_config else "127.0.0.1"
-            port = self._server_config.port if self._server_config else 18080
-            base_path = (
-                self._server_config.base_path if self._server_config else "/webhook"
-            )
-            local_url = f"http://{host}:{port}{base_path}/{endpoint_path}"
-            return (
-                f"{local_url}\n\n"
-                f"⚠️ 未配置 public_base_url，返回的是本地监听地址。"
-                f"如需公网访问，请配置 server.public_base_url 并确保 HTTPS 反向代理。"
-            )
-
     def _get_render_mode(self) -> str:
         mode = self.config.get("render_mode", "text")
         if mode == "html_image":
@@ -1069,65 +1484,100 @@ class WebhookNotifierPlugin(Star):
         """检查是否为群聊消息。"""
         return event.session.message_type == MessageType.GROUP_MESSAGE
 
-    async def _check_group_admin(self, event: AstrMessageEvent) -> bool | None:
-        """检查当前用户在当前群是否是群主或群管理员。
-
-        Returns:
-            bool: 是管理员。
-            None: 无法判断（平台不支持）。
-        """
-        # 先尝试 event.is_admin()
+    @staticmethod
+    def _get_adapter_kind(event: AstrMessageEvent) -> str:
         try:
-            if event.is_admin():
-                return True
+            value = event.get_platform_name()
         except (AttributeError, TypeError, NotImplementedError):
-            pass
+            return ""
+        return value if isinstance(value, str) else ""
 
-        # 尝试通过群对象获取管理员信息
+    async def _check_aiocqhttp_group_role(self, event: AstrMessageEvent) -> str | None:
+        """仅通过 aiocqhttp 群资料判断 owner/admin/member。"""
         try:
-            group_info = event.get_group()
-            if group_info is None:
-                return None
-
-            sender_id = event.get_sender_id()
-
-            # 检查是否为群主
-            owner_id = (
-                getattr(group_info, "group_owner", None)
-                or getattr(group_info, "owner", None)
-                or getattr(group_info, "owner_id", None)
+            group_info = await event.get_group()
+        except Exception as exc:
+            if not self._is_controlled_aiocqhttp_error(exc):
+                raise
+            logger.warning(
+                "[WebhookNotifier] aiocqhttp 群资料查询失败 "
+                f"platform={event.get_platform_id()} error={type(exc).__name__}"
             )
-            if owner_id and str(owner_id) == str(sender_id):
-                return True
+            return None
+        if group_info is None:
+            return None
 
-            # 检查是否为管理员
-            admins = (
-                getattr(group_info, "group_admins", None)
-                or getattr(group_info, "admins", None)
-                or getattr(group_info, "admin_ids", None)
-            )
-            if admins and isinstance(admins, (list, tuple)):
-                for admin in admins:
-                    admin_id = (
-                        admin
-                        if isinstance(admin, (str, int))
-                        else getattr(admin, "user_id", None)
-                        or getattr(admin, "id", None)
-                    )
-                    if admin_id and str(admin_id) == str(sender_id):
-                        return True
-        except (AttributeError, TypeError, NotImplementedError):
-            pass
+        sender_id = event.get_sender_id()
+        owner_id = (
+            getattr(group_info, "group_owner", None)
+            or getattr(group_info, "owner", None)
+            or getattr(group_info, "owner_id", None)
+        )
+        if owner_id and str(owner_id) == str(sender_id):
+            return "owner"
 
-        # 无法判断
-        return None
+        admins = (
+            getattr(group_info, "group_admins", None)
+            or getattr(group_info, "admins", None)
+            or getattr(group_info, "admin_ids", None)
+        )
+        if admins and isinstance(admins, (list, tuple)):
+            for admin in admins:
+                admin_id = (
+                    admin
+                    if isinstance(admin, (str, int))
+                    else getattr(admin, "user_id", None) or getattr(admin, "id", None)
+                )
+                if admin_id and str(admin_id) == str(sender_id):
+                    return "admin"
+        return "member"
+
+    @staticmethod
+    def _is_controlled_aiocqhttp_error(exc: Exception) -> bool:
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+            return True
+        error_type = type(exc)
+        return error_type.__name__ in {"ActionFailed", "NetworkError"} and (
+            "aiocqhttp" in error_type.__module__.lower()
+        )
+
+    @staticmethod
+    def _get_qq_official_verification_context(
+        event: AstrMessageEvent,
+    ) -> tuple[str, str] | None:
+        """仅从 QQ 官方群消息 raw_data 提取群与管理员角色。"""
+        try:
+            raw_data = event.message_obj.raw_message.raw_data
+        except AttributeError:
+            return None
+        if not isinstance(raw_data, dict):
+            return None
+        group_openid = raw_data.get("group_openid")
+        author = raw_data.get("author")
+        if not isinstance(group_openid, str) or not group_openid.strip():
+            return None
+        if not isinstance(author, dict):
+            return None
+        member_openid = author.get("member_openid")
+        member_role = author.get("member_role")
+        if not isinstance(member_openid, str) or not member_openid.strip():
+            return None
+        if not isinstance(member_role, str) or member_role not in {
+            "owner",
+            "admin",
+            "member",
+        }:
+            return None
+        return group_openid, member_role
 
     # ─── 状态构建 ───────────────────────────────────────────
 
-    def _build_status_text(self) -> str:
+    def _build_status_text(
+        self, commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS
+    ) -> _SafeStatusText:
         enabled = self._enabled
         server_running = self._server is not None and self._server.running
-        active_count = self._registry.count_active() if self._registry else 0
+        active_count = self._registry.count_deliverable() if self._registry else 0
         render_mode = self._get_render_mode()
         fallback = self.config.get("fallback_to_text", True)
         private_notifications = bool(
@@ -1149,27 +1599,32 @@ class WebhookNotifierPlugin(Star):
             f"渲染模式：{render_mode}",
             f"渲染降级：{'开启' if fallback else '关闭'}",
             f"Webhook 私聊状态通知：{'开启' if private_notifications else '关闭'}",
-            f"监听地址：http://{host}:{port}{base_path}",
+            f"监听 IP：{host}",
+            f"监听端口：{port}",
+            f"基础路径：{base_path}",
+            "Base URL：请在 Plugin Page 中复制",
         ]
-
-        if self._server_config and self._server_config.public_base_url:
-            lines.append(f"公网地址：{self._server_config.public_base_url}")
 
         if legacy_token:
             lines.append("")
             lines.append("⚠️ 检测到早期占位 webhook_token 配置（MVP 未启用）")
-            lines.append("   请使用 /whn token new 命令创建 managed endpoint。")
+            lines.append(
+                f"   请使用 {commands.short} token new 命令创建 managed endpoint。"
+            )
+
+        if commands.config_error:
+            lines.extend(("", f"⚠️ {WAKE_PREFIX_DIAGNOSTIC}"))
 
         lines.extend(
             [
                 "",
                 "可用命令：",
-                "  /webhook_notifier  查看完整状态",
-                "  /whn               查看状态 / 管理 endpoint",
+                f"  {commands.long}  查看完整状态",
+                f"  {commands.short}  查看状态 / 管理 endpoint",
             ]
         )
 
-        return "\n".join(lines)
+        return _SafeStatusText("\n".join(lines))
 
     @property
     def _enabled(self) -> bool:

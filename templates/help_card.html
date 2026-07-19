@@ -376,13 +376,17 @@
           <h1>命令帮助</h1>
           <p class="hero-description">创建、验证并管理你的 Webhook Endpoint。</p>
         </div>
-        <div class="hero-mark">whn</div>
+        <div class="hero-mark">WHN</div>
       </div>
       <div class="wake-note">
-        <span>在当前 AstrBot 唤醒词后输入</span>
-        <code>whn</code>
-        <span>和以下子命令</span>
+        <span>当前命令根</span>
+        <code>{{ event.command_root|e }}</code>
       </div>
+      {% if event.config_error %}
+      <div class="wake-note">
+        <span>{{ event.diagnostic|e }}</span>
+      </div>
+      {% endif %}
     </header>
 
     <div class="content">
