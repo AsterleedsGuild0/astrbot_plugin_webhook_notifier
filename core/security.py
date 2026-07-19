@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import os
 import secrets
 import uuid
 from hashlib import sha256

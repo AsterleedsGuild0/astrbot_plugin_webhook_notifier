@@ -1,4 +1,5 @@
 const ENDPOINTS = Object.freeze({
+  baseUrl: 'base-url',
   templates: 'templates',
   save: 'templates/save',
   apply: 'templates/apply',
@@ -29,6 +30,9 @@ export async function connectBridge() {
 
 export function createTemplateApi(bridge) {
   return {
+    getBaseUrl() {
+      return bridge.apiGet(ENDPOINTS.baseUrl)
+    },
     listTemplates() {
       return bridge.apiGet(ENDPOINTS.templates)
     },

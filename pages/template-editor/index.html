@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>通知模板管理</title>
-    <script type="module" crossorigin src="./assets/index-BJAne2Pj.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-DqKd4--X.css">
+    <script type="module" crossorigin src="./assets/index-DkS3bSUT.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-D_ttYp4I.css">
   </head>
   <body>
     <div class="app-shell">
@@ -44,6 +44,65 @@
       </section>
 
       <main id="page-content" class="workspace is-hidden">
+        <section
+          id="base-url-panel"
+          class="base-url-panel"
+          data-state="loading"
+          aria-labelledby="base-url-heading"
+        >
+          <div class="base-url-heading">
+            <div>
+              <p class="section-kicker">连接信息</p>
+              <h2 id="base-url-heading">Webhook Base URL</h2>
+            </div>
+            <span id="base-url-config-status" class="connection-chip" data-state="loading">正在读取</span>
+          </div>
+
+          <div class="base-url-content">
+            <div class="base-url-copy-block">
+              <div class="base-url-copy-row">
+                <div
+                  id="base-url-display"
+                  class="base-url-display"
+                  data-state="loading"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <code id="base-url-value" class="is-hidden"></code>
+                  <span id="base-url-state-text">正在读取 Base URL…</span>
+                </div>
+                <button
+                  id="copy-base-url-button"
+                  class="button button-secondary"
+                  type="button"
+                  aria-describedby="base-url-help"
+                  disabled
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 8h10v10H8z" />
+                    <path d="M6 15H4V4h11v2" />
+                  </svg>
+                  <span id="copy-base-url-label">复制</span>
+                </button>
+                <button id="retry-base-url-button" class="button button-quiet is-hidden" type="button">
+                  重试
+                </button>
+              </div>
+              <p id="base-url-help" class="base-url-help">
+                聊天命令只返回 <code>Endpoint Path</code>。配置外部系统时，请由管理员自行将此 Base URL 与 Endpoint Path 组合。
+              </p>
+            </div>
+
+            <div id="base-url-warning" class="base-url-warning is-hidden" role="status">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 8v5M12 17h.01" />
+                <path d="M10.2 4.5 3.7 16a2 2 0 0 0 1.75 3h13.1a2 2 0 0 0 1.75-3L13.8 4.5a2.07 2.07 0 0 0-3.6 0Z" />
+              </svg>
+              <span>当前为本地监听地址，外部系统通常无法直接访问。建议管理员配置公网 Base URL。</span>
+            </div>
+          </div>
+        </section>
+
         <aside class="template-rail" aria-labelledby="template-list-heading">
           <div class="rail-heading">
             <div>

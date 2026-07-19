@@ -105,6 +105,7 @@ def test_built_page_contains_phase1_bridge_contract_and_management_ui() -> None:
     html = (PAGE_DIR / "index.html").read_text(encoding="utf-8")
 
     endpoints = (
+        b"base-url",
         b"templates",
         b"templates/save",
         b"templates/apply",
@@ -121,6 +122,67 @@ def test_built_page_contains_phase1_bridge_contract_and_management_ui() -> None:
     assert "template-list" in html
     assert "save-apply-button" in html
     assert "preview-data-panel" in html
+    assert "Webhook Base URL" in html
+    assert "copy-base-url-button" in html
+    assert "Endpoint Path" in html
+
+
+def test_base_url_ui_uses_minimum_bridge_contract_without_sensitive_management() -> (
+    None
+):
+    html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+    api_source = (ROOT / "frontend" / "src" / "api.js").read_text(encoding="utf-8")
+    main_source = (ROOT / "frontend" / "src" / "main.js").read_text(encoding="utf-8")
+    frontend_source = "\n".join((html, api_source, main_source)).lower()
+
+    assert "baseUrl: 'base-url'" in api_source
+    assert "getBaseUrl()" in api_source
+    assert "bridge.apiGet(ENDPOINTS.baseUrl)" in api_source
+    assert 'id="base-url-value"' in html
+    assert 'id="copy-base-url-button"' in html
+    assert 'id="base-url-warning"' in html
+    assert "当前为本地监听地址" in html
+    assert "自行将此 Base URL 与 Endpoint Path 组合" in html
+    assert "navigator.clipboard" in main_source
+    assert "document.execCommand('copy')" in main_source
+    assert "baseUrl = result.base_url" in main_source
+    assert "value.textContent = ''" in main_source
+    assert "showNotice('已复制')" in main_source
+    assert "console." not in frontend_source
+    assert "/webhook" not in frontend_source
+    assert 'type="url"' not in html
+    assert "localstorage" not in frontend_source
+    assert "sessionstorage" not in frontend_source
+    assert "indexeddb" not in frontend_source
+
+    forbidden_management_terms = (
+        "server_secret",
+        "endpoint-list",
+        "endpoint-input",
+        "token-input",
+        "token-list",
+        "token",
+        "registry",
+        "owner",
+        "umo",
+    )
+    assert all(term not in frontend_source for term in forbidden_management_terms)
+
+
+def test_built_base_url_ui_is_synced_without_embedding_sensitive_fields() -> None:
+    scripts = list((PAGE_DIR / "assets").glob("*.js"))
+    payload = b"\n".join(path.read_bytes() for path in scripts).lower()
+    html = (PAGE_DIR / "index.html").read_text(encoding="utf-8")
+    built_source = html.lower().encode() + b"\n" + payload
+
+    assert b"base-url" in payload
+    assert b"navigator.clipboard" in payload
+    assert "Webhook Base URL" in html
+    assert "copy-base-url-button" in html
+    assert "当前为本地监听地址" in html
+    assert b"server_secret" not in built_source
+    assert b"endpoint-list" not in built_source
+    assert b"token-input" not in built_source
 
 
 def test_preview_uses_responsive_scale_to_fit_without_iframe_dom_access() -> None:

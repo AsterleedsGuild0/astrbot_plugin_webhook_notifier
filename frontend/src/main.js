@@ -31,6 +31,10 @@ let previewBusyVersion = null
 let previewCanvasWidth = null
 let previewResizeObserver = null
 let noticeTimer = null
+let baseUrl = null
+let baseUrlConfigured = null
+let baseUrlStatus = 'loading'
+let copyFeedbackTimer = null
 
 const elements = Object.fromEntries(
   [
@@ -40,6 +44,15 @@ const elements = Object.fromEntries(
     'retry-button',
     'page-content',
     'notice-region',
+    'base-url-panel',
+    'base-url-config-status',
+    'base-url-display',
+    'base-url-value',
+    'base-url-state-text',
+    'base-url-warning',
+    'copy-base-url-button',
+    'copy-base-url-label',
+    'retry-base-url-button',
     'worker-status',
     'worker-status-text',
     'template-list',
@@ -120,6 +133,132 @@ function showNotice(message, tone = 'success') {
   noticeTimer = window.setTimeout(() => {
     elements['notice-region'].classList.remove('is-visible')
   }, tone === 'error' ? 6500 : 3500)
+}
+
+function renderBaseUrl() {
+  const ready = baseUrlStatus === 'ready' && typeof baseUrl === 'string'
+  const display = elements['base-url-display']
+  const value = elements['base-url-value']
+  const stateText = elements['base-url-state-text']
+  const configStatus = elements['base-url-config-status']
+
+  elements['base-url-panel'].dataset.state = baseUrlStatus
+  display.dataset.state = baseUrlStatus
+  value.classList.toggle('is-hidden', !ready)
+  stateText.classList.toggle('is-hidden', ready)
+  elements['copy-base-url-button'].disabled = !ready
+  elements['retry-base-url-button'].classList.toggle(
+    'is-hidden',
+    !['empty', 'error'].includes(baseUrlStatus),
+  )
+  elements['base-url-warning'].classList.toggle(
+    'is-hidden',
+    !(ready && baseUrlConfigured === false),
+  )
+
+  if (ready) {
+    value.textContent = baseUrl
+    stateText.textContent = ''
+    configStatus.textContent = baseUrlConfigured ? '已配置' : '本地监听'
+    configStatus.dataset.state = baseUrlConfigured ? 'configured' : 'local'
+    return
+  }
+
+  value.textContent = ''
+  const states = {
+    loading: ['正在读取 Base URL…', '正在读取'],
+    empty: ['后端未返回可用的 Base URL。请联系管理员检查插件配置。', '暂无地址'],
+    error: ['无法读取 Base URL，请稍后重试。', '读取失败'],
+  }
+  const [message, label] = states[baseUrlStatus] ?? states.error
+  stateText.textContent = message
+  configStatus.textContent = label
+  configStatus.dataset.state = baseUrlStatus
+}
+
+async function loadBaseUrl() {
+  baseUrl = null
+  baseUrlConfigured = null
+  baseUrlStatus = 'loading'
+  renderBaseUrl()
+
+  try {
+    const result = await api.getBaseUrl()
+    if (
+      !result ||
+      typeof result.base_url !== 'string' ||
+      result.base_url.trim() === '' ||
+      typeof result.configured !== 'boolean'
+    ) {
+      baseUrlStatus = 'empty'
+      return
+    }
+    baseUrl = result.base_url
+    baseUrlConfigured = result.configured
+    baseUrlStatus = 'ready'
+  } catch {
+    baseUrlStatus = 'error'
+  } finally {
+    renderBaseUrl()
+  }
+}
+
+function selectBaseUrlText() {
+  const selection = window.getSelection?.()
+  if (!selection || !elements['base-url-value'].textContent) return
+  const range = document.createRange()
+  range.selectNodeContents(elements['base-url-value'])
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+function copyWithFallback(value) {
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', '')
+  textarea.setAttribute('aria-hidden', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.append(textarea)
+  textarea.select()
+  let copied = false
+  try {
+    copied = document.execCommand('copy')
+  } catch {
+    copied = false
+  }
+  textarea.remove()
+  return copied
+}
+
+async function copyBaseUrl() {
+  if (baseUrlStatus !== 'ready' || typeof baseUrl !== 'string') return
+
+  let copied = false
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(baseUrl)
+      copied = true
+    } else {
+      copied = copyWithFallback(baseUrl)
+    }
+  } catch {
+    copied = copyWithFallback(baseUrl)
+  }
+
+  if (!copied) {
+    selectBaseUrlText()
+    showNotice('复制失败，请手动复制已选中的 Base URL。', 'error')
+    return
+  }
+
+  window.clearTimeout(copyFeedbackTimer)
+  elements['copy-base-url-label'].textContent = '已复制'
+  showNotice('已复制')
+  copyFeedbackTimer = window.setTimeout(() => {
+    elements['copy-base-url-label'].textContent = '复制'
+  }, 2000)
 }
 
 function setBusy(operation) {
@@ -655,6 +794,8 @@ function resetPreviewEvent() {
 
 function bindEvents() {
   elements['retry-button'].addEventListener('click', initialize)
+  elements['copy-base-url-button'].addEventListener('click', copyBaseUrl)
+  elements['retry-base-url-button'].addEventListener('click', loadBaseUrl)
   elements['new-template-button'].addEventListener('click', createNewTemplate)
   elements['copy-template-button'].addEventListener('click', copyCurrentTemplate)
   elements['delete-template-button'].addEventListener('click', deleteCurrent)
@@ -725,6 +866,7 @@ async function initialize() {
     updateActiveFlags()
     state.initialized = true
     showWorkspace()
+    void loadBaseUrl()
     renderTemplateList()
 
     const initialId = state.activeId ?? state.effectiveActiveId ?? state.templates[0]?.id
