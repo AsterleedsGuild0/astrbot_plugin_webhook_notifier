@@ -22,6 +22,25 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 - 在认证后的 Plugin Page 中预览、复制、编辑、保存、应用和删除自定义 HTML 模板。
 - 为每次请求返回可观察的投递、跳过、降级与重试信息，便于调用方判断结果。
 
+## 完整使用流程
+
+```mermaid
+flowchart LR
+    A["oh-my-pi"] --> B["omp-config<br/>onebot.ts 社区 Hook"] --> C["HTTPS 反向代理<br/>Caddy（推荐参考）或其他方案<br/>非强依赖"]
+    C --> D["Webhook Notifier<br/>HTTP Server"] --> E["Token 鉴权<br/>事件标准化"]
+    E --> F["文本或 HTML 卡片"] --> G["AstrBot adapter"] --> H["私聊或普通 QQ 群"]
+```
+
+1. 安装并重载 Webhook Notifier 插件。
+2. 配置 HTTP 监听地址、端口与 `public_base_url`；同机或可信内网可直接访问。
+3. 跨主机或公网接入时，按需部署 HTTPS 反向代理；Caddy 是推荐参考，也可使用其他方案。
+4. 通过聊天命令创建私聊或普通 QQ 群 Endpoint，分别保存 Base URL、Endpoint Path 与 Token。
+5. 使用 `curl` 验证 URL、Token 鉴权和实际投递或跳过结果。
+6. 部署社区 onebot post hook，并配置 `OMP_SESSION_WEBHOOK_URL` 与 `OMP_SESSION_WEBHOOK_TOKEN`。
+7. 触发真实 oh-my-pi 会话结束事件，确认目标私聊或普通 QQ 群收到通知。
+
+**完整教程：** 请阅读[端到端部署](docs/end-to-end-setup.md)，其中集中说明 Caddy HTTPS 反代与社区 Hook 的完整配置，README 不重复展开运维细节。
+
 ---
 
 ## 快速开始
@@ -50,7 +69,7 @@ git clone https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier.gi
 进入 **AstrBot WebUI → 插件管理 → Webhook Notifier → 配置**：
 
 - 保持 `enabled: true`；默认文本模式无需额外配置。
-- 社区 hook 需要向 AstrBot 发送请求时，在 `server.public_base_url` 配置经 HTTPS 反向代理暴露、且包含 Webhook base path 的 Base URL；不要在公开文档、截图或 Issue 中粘贴真实值。
+- 按部署方式配置 `server.host`、`server.port` 和包含 Webhook base path 的 `server.public_base_url`：同机或可信内网可直连，跨主机或公网建议通过 Caddy 等反向代理提供 HTTPS；不要公开真实值。
 - 本节使用私聊 endpoint 验证。只有在确认平台主动消息规则和风险后，才将 `enable_private_notifications` 设为 `true`，然后重载插件。
 
 ### 3. 创建第一个私聊 endpoint
@@ -94,7 +113,7 @@ JSON
 
 ### 接入自动通知
 
-完整步骤见[客户端接入](docs/client-integration.md)。简要来说，需要从上游获取并部署 onebot post hook，再为其配置完整 URL 变量 `OMP_SESSION_WEBHOOK_URL` 和 Token 变量 `OMP_SESSION_WEBHOOK_TOKEN`。
+端到端部署见[专题教程](docs/end-to-end-setup.md)，[客户端接入文档](docs/client-integration.md)包含 `onebot.ts` 的 OMP 用户级/项目级目录、进程环境变量、加载验证和 `session_stop` 触发方法。从上游部署 onebot post hook 后，为其配置完整 URL 变量 `OMP_SESSION_WEBHOOK_URL` 和 Token 变量 `OMP_SESSION_WEBHOOK_TOKEN`。
 
 `ParticleG/omp-config` 是独立维护的社区仓库，当前未明确 LICENSE；本项目仅链接上游源文件，不复制或分发其代码，也不代表该 hook 由本项目或 OMP 官方维护。
 
@@ -167,6 +186,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 ## 文档索引
 
 - [命令参考](docs/command-reference.md)
+- [端到端部署](docs/end-to-end-setup.md)
 - [客户端接入](docs/client-integration.md)
 - [安全与运维](docs/security-and-operations.md)
 - [平台投递策略](docs/platform-delivery-policy.md)
