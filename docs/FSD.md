@@ -23,7 +23,7 @@
 - 插件功能模块与边界。
 - HTTP Webhook 接口行为。
 - 鉴权、事件识别和错误响应。
-- OMP `session_stop` payload 适配规则。
+- `ParticleG/omp-config` 社区 post Hook 的 OMP `session_stop` version 1 payload 适配规则。
 - 标准化事件对象结构。
 - 目标会话路由和消息发送规则。
 - Webhook 私聊通知的安全默认值、投递 preflight 与 Sender 兜底职责。
@@ -60,6 +60,7 @@ Webhook Notifier 依赖：
 - AstrBot `html_render` / T2I 能力，用于 HTML 卡片图片模式。
 - AstrBot `aiocqhttp` 与 `qq_official` 消息平台，用于 QQ 群聊、私聊和图片消息投递。
 - OneBot 验证环境使用 NapCat；QQ 官方 WebSocket 私聊与普通 QQ 群均已完成对应能力验证。
+- OMP 原生 extension/Hook 加载机制与 `session_stop` 生命周期事件，以及独立维护的 `ParticleG/omp-config` 社区 post Hook；HTTP POST、环境变量和 version 1 payload 由该社区 Hook 提供，不是 OMP 内建 Webhook。
 
 MVP 支持范围：
 
@@ -487,7 +488,7 @@ preview 安全语义：
 
 负责处理不同外部系统的专用 payload。
 
-MVP 仅要求实现 OMP provider。
+MVP 仅要求实现 `omp` provider。该名称是服务端兼容标识，当前具体适配 `ParticleG/omp-config` 的 `agent/hooks/post/onebot.ts` 社区 Hook 输出的 version 1 payload，不表示 OMP 原生定义了此 HTTP Webhook 契约。
 
 后续 provider：
 
@@ -841,10 +842,13 @@ Webhook HTTP Server
 
 ## OMP Provider 规格
 
+本节适配对象为 `ParticleG/omp-config` 社区 post Hook 输出的 `omp.session_stop` version 1 payload。OMP 原生只提供 Hook 加载和 `session_stop` 生命周期事件；Header、HTTP POST、环境变量与本节 payload 结构属于外部社区实现。
+
 ### 事件识别
 
 事件识别规则：
 
+- Body `version` 的当前兼容版本为 `1`；缺失或结构变化按既有宽容字段策略处理，但未来不兼容版本不在承诺范围内。
 - 仅存在 Header `X-OMP-Event: session_stop` 时，识别为 `omp.session_stop`。
 - 仅存在 Body `event: omp.session_stop` 时，识别为 `omp.session_stop`。
 - Header 与 Body 同时存在且语义一致时，识别为 `omp.session_stop`。

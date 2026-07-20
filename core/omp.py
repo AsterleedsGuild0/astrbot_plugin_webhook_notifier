@@ -11,7 +11,7 @@ OMP_SOURCE_NAME = "oh-my-pi"
 def is_omp_session_stop(
     headers: dict[str, str], body: dict[str, Any]
 ) -> tuple[bool, str]:
-    """判断请求是否为 OMP session_stop 事件。
+    """判断请求是否兼容 omp-config onebot post hook 的 session_stop 输出。
 
     Args:
         headers: HTTP 请求头（小写 key）。
@@ -25,7 +25,7 @@ def is_omp_session_stop(
     header_event = None
     body_event = None
 
-    # 读取 header（大小写不敏感）
+    # 读取 omp-config onebot post hook 使用的 header（大小写不敏感）
     headers_lower = {k.lower(): v for k, v in headers.items()}
     raw_header = headers_lower.get("x-omp-event", "")
     if raw_header:
@@ -65,10 +65,10 @@ def normalize_omp_payload(
     body: dict[str, Any],
     request_time: str | None = None,
 ) -> NormalizedEvent:
-    """将 OMP session_stop payload 标准化为 NormalizedEvent。
+    """将兼容 omp-config onebot post hook 的 payload 标准化为 NormalizedEvent。
 
     Args:
-        body: OMP 请求体 JSON。
+        body: omp-config onebot post hook 请求体 JSON。
         request_time: 请求接收时间的 ISO-8601 字符串，None 则使用当前时间。
 
     Returns:
@@ -231,7 +231,7 @@ def _string_or_empty(value: Any) -> str:
 
 
 def _model_display_name(model: Any, fallback_provider: str = "") -> str:
-    """提取 OMP 模型展示名。
+    """提取兼容 omp-config onebot post hook 输出的模型展示名。
 
     OMP 客户端可能发送字符串模型名，也可能发送形如
     {"provider": "openai", "id": "gpt-5.5", "name": "GPT-5.5"} 的对象。

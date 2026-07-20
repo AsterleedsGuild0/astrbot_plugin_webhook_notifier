@@ -11,14 +11,14 @@
 - 产品名称：Webhook Notifier
 - 目标仓库：`AsterleedsGuild0/astrbot_plugin_webhook_notifier`
 - 当前阶段：HTML 卡片、WebUI 模板管理、Registry v2 与多 Bot 安全管理已随 v0.3.0 交付
-- 首个目标集成：`oh-my-pi` / OMP `session_stop` 任务完成通知
+- 首个目标集成：兼容 `ParticleG/omp-config` 社区 post Hook 发送的 OMP `session_stop` version 1 通知
 - 目标平台：AstrBot `aiocqhttp` 与 `qq_official`；OneBot 验证环境使用 NapCat，QQ 官方普通群真实主动 Webhook / OMP 图片卡片 smoke 已通过
 
 ---
 
 ## 背景
 
-当前 `oh-my-pi` 已具备在会话结束后向外部 URL 发送 HTTP Webhook 的能力。Webhook payload 中包含会话、轮次、模型、耗时、输入长度、图片数量、消息增量和最后一条 assistant 元数据等信息。
+OMP 原生提供 extension/Hook 加载机制和 `session_stop` 生命周期事件。当前 HTTP POST、环境变量和 version 1 payload 由外部 `ParticleG/omp-config` 的 `agent/hooks/post/onebot.ts` 社区 Hook 实现，不是 OMP 内建 Webhook；payload 可包含会话、轮次、模型、耗时、输入长度、图片数量、消息增量和最后一条 assistant 元数据等信息。
 
 我们希望在 AstrBot 侧提供一个通用通知插件，使外部工具可以通过 Webhook 把任务完成、构建结果、仓库事件或自定义事件推送到指定聊天会话中。
 
@@ -35,7 +35,7 @@ Webhook Notifier 是一个 AstrBot 通用 Webhook 通知插件。
 核心定位：
 
 - 面向 AstrBot 的通用通知入口。
-- 第一阶段服务 `oh-my-pi` / OMP 任务完成通知。
+- 第一阶段服务 `oh-my-pi` / OMP 任务完成通知；服务端 `omp` provider 为兼容命名，当前适配对象是上述社区 Hook 的 version 1 payload。
 - 后续扩展到 OpenCode、GitHub、GitLab、Gitea、自定义 JSON 和 CloudEvents 风格事件。
 - 第一阶段声明支持 AstrBot `aiocqhttp` 与 `qq_official` 的已验证私聊和普通 QQ 群能力边界；QQ 频道（Guild）与 `qq_official_webhook` 明确不在支持范围内，也没有支持计划。
 - 支持纯文本通知和 HTML 卡片图片通知。
@@ -68,7 +68,7 @@ Registry v2 的产品隔离键固定为 managed `(owner_platform_id, owner_user_
 
 ### 场景一：oh-my-pi 会话完成通知
 
-`oh-my-pi` 在本轮会话结束时发送 `omp.session_stop` Webhook。
+OMP 在本轮会话结束时触发原生 `session_stop` 生命周期事件；已部署的 `omp-config` 社区 post Hook 随后发送 `omp.session_stop` version 1 HTTP 请求。
 
 插件收到请求后：
 
@@ -144,9 +144,9 @@ Bot 将 endpoint 绑定到申请者私聊会话
   ↓
 Bot 先通过正常结果返回安全摘要，再绕过 RespondStage 单次 direct send 仅含 Bearer Token 的 Plain
   ↓
-用户从 Plugin Page 复制 Base URL，并结合 Endpoint Path 和 Token 配置 OMP
+用户从 Plugin Page 复制 Base URL，并结合 Endpoint Path 和 Token 配置社区 Hook
   ↓
-后续 OMP 自动向 Webhook 推送，会通知到该用户私聊
+后续 OMP `session_stop` 由社区 Hook 发送 HTTP POST，会通知到该用户私聊
 ```
 
 产品要求：
@@ -184,7 +184,7 @@ qq_official：Bot 提示原申请者同平台私聊 <唤醒词>whn token confirm
   ↓
 私聊 rotate/confirm 成功后，先收到摘要，凭据由单次 direct send 独立发送
   ↓
-后续 OMP 自动向 Webhook 推送，会通知到该 QQ 群
+后续 OMP `session_stop` 由社区 Hook 发送 HTTP POST，会通知到该 QQ 群
 ```
 
 产品要求：
@@ -307,7 +307,7 @@ Authorization: Bearer <token>
 - token 不匹配时返回 401。
 - 不支持从 URL query 中读取 token。
 
-Token 应由插件生成，而不是由用户手动指定。用户通过私聊申请后获得 token，并配置到 `oh-my-pi` / OMP 推送端。
+Token 应由插件生成，而不是由用户手动指定。用户通过私聊申请后获得 token，并配置到 `ParticleG/omp-config` 社区 Hook 的独立 Token 环境变量。
 
 ### Token 申请与目标绑定
 
@@ -363,7 +363,7 @@ MVP 选择 endpoint/token 绑定目标白名单，而不是单全局 token。
 
 ### OMP Provider
 
-MVP 支持 `oh-my-pi` / OMP `session_stop` payload。
+`omp` 是服务端既有 provider 兼容名称。MVP 适配 `ParticleG/omp-config` 的 `agent/hooks/post/onebot.ts` 社区 Hook 输出的 `omp.session_stop` version 1 payload；该 HTTP 契约不属于 OMP 原生能力。
 
 事件识别优先级：
 
@@ -470,7 +470,7 @@ MVP 阶段渲染模式由插件全局 `render_mode` 统一决定，所有 endpoi
 
 ## OMP Payload 映射
 
-根据当前 `oh-my-pi` hook 设计，MVP 关注这些字段：
+根据当前 `ParticleG/omp-config` 社区 post Hook 的 version 1 payload，MVP 关注这些字段：
 
 ```text
 event
@@ -598,7 +598,7 @@ HTML 模板只允许来自插件侧受信任配置：
 
 ## 配置设计
 
-MVP 初始配置：
+示例配置如下。这里显式选择 `html_image` 用于展示 HTML 图片模式；实际默认 `render_mode` 仍为 `text`：
 
 ```yaml
 enabled: true
@@ -796,7 +796,7 @@ MVP 需要有基础日志：
 
 ### Webhook 验收
 
-- 使用正确 Bearer Token 发送 OMP `session_stop` payload 后，插件能识别事件。
+- 使用正确 Bearer Token 发送兼容社区 Hook 的 OMP `session_stop` version 1 payload 后，插件能识别事件。
 - 使用错误 Token 时返回 401。
 - 非 JSON 请求被拒绝。
 - 未知事件不会导致插件崩溃。
