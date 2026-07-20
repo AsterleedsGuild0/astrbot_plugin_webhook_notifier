@@ -79,7 +79,7 @@ git push origin v0.3.0
 当前 `.github/workflows/release.yml` 在创建 Release 前实际执行以下步骤：
 
 - 使用 `actions/setup-python@v5` 配置 Python 3.13 和 pip cache，并使用 `actions/setup-node@v4` 配置 Node.js 20。
-- 运行 `python -m pip install --upgrade pip`，再从 `requirements.txt` 并附加 `pyyaml pytest pytest-asyncio` 安装依赖。
+- 运行 `python -m pip install --upgrade pip`，再从 `requirements.txt` 并附加 `pyyaml pytest pytest-asyncio pillow` 安装依赖；Pillow 用于 HTML 图片渲染与裁剪测试。
 - 使用 `npm ci --prefix frontend` 和 `npm run build --prefix frontend` 重建 Plugin Page。
 - 校验 tag、`metadata.yaml` 与 `pyproject.toml` 版本一致。
 - 运行 `python -m pytest`。

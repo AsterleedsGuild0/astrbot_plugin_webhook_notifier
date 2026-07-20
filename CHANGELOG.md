@@ -14,6 +14,7 @@
 - 完善全局超级管理员私聊命令 `list`、`revoke-path`、`revoke-owner`，使用精确选择器和脱敏审计，绝不展示 Token。
 - Plugin Page 增加认证 `GET /astrbot_plugin_webhook_notifier/base-url`，只返回 `base_url` 与 `configured`，并提供 Base URL 复制入口。
 - 增加 `uv.lock` 与 `pyproject.toml` 的 `dev` dependency group，用于本地锁定 PyYAML、pytest、pytest-asyncio 与 Pillow 等验证依赖；当前 GitHub Actions 发布流程仍使用 pip，尚未启用 Ruff 门禁或 `uv.lock` 强制同步。
+- 补齐 GitHub Actions Release 环境的 Pillow 测试依赖，确保 HTML 图片渲染与裁剪测试在正式发布流水线中执行。
 
 ---
 
