@@ -64,6 +64,7 @@ Webhook Notifier 依赖：
 MVP 支持范围：
 
 - 声明支持 `aiocqhttp` 与 `qq_official` 的已验证能力边界；QQ 官方普通群真实主动 Webhook / OMP HTML 图片卡片 smoke 已通过，但仍受官方主动消息规则、额度与 Bot 授权范围约束。
+- QQ 频道（Guild）与 `qq_official_webhook` 明确不在插件支持范围内，也没有支持计划；不得从 `qq_official` 私聊或普通群验证结果外推兼容性。
 - `aiocqhttp` 验证环境使用 NapCat，群主/群管理员识别依赖 `await event.get_group()` 的权威群资料。
 - `qq_official` 群批准只读取当前群 raw `group_openid`、`author.member_openid` 与 `author.member_role`，不调用不存在的成员查询 API。
 - 其他 AstrBot 平台适配器未测试，不在当前支持承诺内。

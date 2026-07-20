@@ -37,7 +37,7 @@ Webhook Notifier 是一个 AstrBot 通用 Webhook 通知插件。
 - 面向 AstrBot 的通用通知入口。
 - 第一阶段服务 `oh-my-pi` / OMP 任务完成通知。
 - 后续扩展到 OpenCode、GitHub、GitLab、Gitea、自定义 JSON 和 CloudEvents 风格事件。
-- 第一阶段声明支持 AstrBot `aiocqhttp` 与 `qq_official` 的已验证能力边界；QQ 官方普通群主动发送 smoke 已通过，但不外推到 Guild 或 `qq_official_webhook`。
+- 第一阶段声明支持 AstrBot `aiocqhttp` 与 `qq_official` 的已验证私聊和普通 QQ 群能力边界；QQ 频道（Guild）与 `qq_official_webhook` 明确不在支持范围内，也没有支持计划。
 - 支持纯文本通知和 HTML 卡片图片通知。
 - HTML 模板由管理员在插件详情页维护，不允许普通聊天用户随意提交 HTML。
 - Registry v2 提供独立离线 `platform_id` rebind helper，用于 adapter 实例 ID 变化后的 managed record 运维迁移；不扩展聊天命令或 Plugin Page UI。

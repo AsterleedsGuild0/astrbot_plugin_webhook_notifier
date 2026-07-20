@@ -20,10 +20,10 @@
 | `aiocqhttp` | 已验证 | 既有命令、群聊通知、HTML 图片卡片 |
 | `qq_official` WebSocket 私聊 | 已验证 | AstrBot v4.26.6 私聊命令、Webhook 鉴权、private 主动消息、OMP 状态图片卡片 |
 | `qq_official` WebSocket 普通 QQ 群 | 已验证 | 真实主动 Webhook、OMP `session_stop`、HTML/T2I 图片卡片已成功送达；仍受官方主动消息规则、额度与 Bot 授权范围约束 |
-| `qq_official` WebSocket Guild | 待验证 | 尚未验证 |
-| `qq_official_webhook` | 未验证、未声明支持 | 尚未验证，不在 `metadata.yaml` 的 `support_platforms` 中 |
+| `qq_official` WebSocket QQ 频道（Guild） | 不支持、暂无支持计划 | 当前命令、身份和群验证状态机仅覆盖私聊与普通 QQ 群，不外推到 QQ 频道 |
+| `qq_official_webhook` | 不支持、暂无支持计划 | 不在 `metadata.yaml` 的 `support_platforms` 中；插件不适配该接入方式 |
 
-插件元数据仅声明 AstrBot 标准 adapter key `aiocqhttp` 与 `qq_official`。WebSocket 是 `qq_official` 的接入方式，不使用自定义的 `qq_official_websocket` key。普通 QQ 群的验证结果只覆盖上述真实 smoke 环境，不免除官方规则、额度与授权范围限制，也不得外推到仍待验证的 Guild 或未验证且未声明支持的 `qq_official_webhook`。
+插件元数据仅声明 AstrBot 标准 adapter key `aiocqhttp` 与 `qq_official`。WebSocket 是 `qq_official` 的接入方式，不使用自定义的 `qq_official_websocket` key。普通 QQ 群的验证结果只覆盖上述真实 smoke 环境，不免除官方规则、额度与授权范围限制。QQ 频道（Guild）和 `qq_official_webhook` 明确不在插件支持范围内，也没有支持计划。
 
 ---
 

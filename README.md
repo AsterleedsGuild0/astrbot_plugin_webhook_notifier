@@ -36,8 +36,8 @@
 | `aiocqhttp` | 已验证 | 既有命令、群聊通知、HTML 图片卡片 |
 | `qq_official` WebSocket 私聊 | 已验证 | AstrBot v4.26.6 私聊命令、Webhook 鉴权、private 主动消息、OMP 状态图片卡片 |
 | `qq_official` WebSocket 普通 QQ 群 | 已验证 | 双阶段群验证、真实主动 Webhook / OMP HTML 图片卡片 smoke 已通过；仍受 QQ 官方主动消息规则、额度和具体 Bot 授权范围约束 |
-| `qq_official` WebSocket Guild | 待验证 | 尚未验证 |
-| `qq_official_webhook` | 未验证、未声明支持 | 尚未验证，不在 `metadata.yaml` 的 `support_platforms` 中 |
+| `qq_official` WebSocket QQ 频道（Guild） | 不支持、暂无支持计划 | 当前命令、身份和群验证状态机仅覆盖私聊与普通 QQ 群，不外推到 QQ 频道 |
+| `qq_official_webhook` | 不支持、暂无支持计划 | 不在 `metadata.yaml` 的 `support_platforms` 中；插件不适配该接入方式 |
 
 `metadata.yaml` 使用 AstrBot 标准 adapter key `aiocqhttp` 与 `qq_official`；WebSocket 是 `qq_official` 的接入方式，不另造 `qq_official_websocket` key。完整平台投递说明见 [`docs/platform-delivery-policy.md`](docs/platform-delivery-policy.md)。
 
