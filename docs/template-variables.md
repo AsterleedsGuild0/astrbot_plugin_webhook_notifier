@@ -10,6 +10,8 @@ HTML 模板只提供一个根变量：`event`。不要使用顶层 `title`、`fi
 
 生产渲染先调用 `NormalizedEvent.to_dict()`，再由 `render_html_data()` 补充 HTML 辅助字段并处理兼容格式。模板实际收到的 `event` 字段如下。
 
+`templates/help_card.html` 是独立的内置命令帮助模板，不读取、不替换也不占用 Webhook Template Registry 的 active 模板。帮助卡片的命令前缀由运行时解析当前会话 `wake_prefix` 后注入或安全格式化；静态文档统一写作 `<唤醒词>`。当配置异常时使用安全占位符与诊断提示，不把 Token、owner、UMO、Base URL 或其他敏感字段作为帮助模板变量。
+
 ---
 
 ## 字段列表

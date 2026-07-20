@@ -4,10 +4,10 @@
 
 - 适用插件：`astrbot_plugin_webhook_notifier`
 - 适用版本：v0.2.0 及后续兼容版本
-- 最后更新：2026-07-18
+- 最后更新：2026-07-20
 - 主题：Webhook 状态通知在 QQ 平台上的私聊安全默认值与架构边界
 
-工作区通用原则见 [`AstrBot 跨平台主动投递策略`](../../../.opencode/astrbot-platform-delivery-policy.md)；多 Bot 实例下 endpoint、Token、owner 与目标 UMO 的归属规则见 [`AstrBot 跨插件多 Bot 实例数据隔离`](../../../.opencode/astrbot-multi-bot-data-isolation.md)。本文仅保留 Webhook Notifier 的具体配置、响应与迁移契约，不表示尚未实现的 Registry v2 已完成。
+工作区通用原则见 [`AstrBot 跨平台主动投递策略`](../../../.opencode/astrbot-platform-delivery-policy.md)；多 Bot 实例下 endpoint、Token、owner 与目标 UMO 的归属规则见 [`AstrBot 跨插件多 Bot 实例数据隔离`](../../../.opencode/astrbot-multi-bot-data-isolation.md)。Registry v2 已实现，本文承载 Webhook Notifier 的具体配置、响应与迁移契约。
 
 ---
 
@@ -19,11 +19,11 @@
 | --- | --- | --- |
 | `aiocqhttp` | 已验证 | 既有命令、群聊通知、HTML 图片卡片 |
 | `qq_official` WebSocket 私聊 | 已验证 | AstrBot v4.26.6 私聊命令、Webhook 鉴权、private 主动消息、OMP 状态图片卡片 |
-| `qq_official` WebSocket 普通 QQ 群 | 待验证 | 尚未验证主动发送 |
+| `qq_official` WebSocket 普通 QQ 群 | 已验证 | 真实主动 Webhook、OMP `session_stop`、HTML/T2I 图片卡片已成功送达；仍受官方主动消息规则、额度与 Bot 授权范围约束 |
 | `qq_official` WebSocket Guild | 待验证 | 尚未验证 |
 | `qq_official_webhook` | 未验证、未声明支持 | 尚未验证，不在 `metadata.yaml` 的 `support_platforms` 中 |
 
-插件元数据仅声明 AstrBot 标准 adapter key `aiocqhttp` 与 `qq_official`。WebSocket 是 `qq_official` 的接入方式，不使用自定义的 `qq_official_websocket` key；在普通 QQ 群、Guild 或 `qq_official_webhook` 完成验证前，不应从现有私聊验证结果外推其兼容性。
+插件元数据仅声明 AstrBot 标准 adapter key `aiocqhttp` 与 `qq_official`。WebSocket 是 `qq_official` 的接入方式，不使用自定义的 `qq_official_websocket` key。普通 QQ 群的验证结果只覆盖上述真实 smoke 环境，不免除官方规则、额度与授权范围限制，也不得外推到仍待验证的 Guild 或未验证且未声明支持的 `qq_official_webhook`。
 
 ---
 
@@ -115,14 +115,14 @@ enable_private_notifications: false
 
 ### 升级兼容
 
-升级不会修改 Endpoint Registry：
+针对 `enable_private_notifications` 安全默认值的 v0.2.0 升级不会改变 Endpoint Registry 中既有凭据和目标语义：
 
 - 现有私聊 endpoint 继续存在。
 - 现有 Token 继续有效并可完成鉴权。
 - 目标白名单不删除 `FriendMessage`。
 - 无需重建 endpoint，也无需 rotate Token。
 
-默认关闭期间，Webhook 请求在投递阶段被安全跳过。管理员确认风险后开启配置并 reload，即可使用原 endpoint 与 Token 恢复发送。
+Registry v1 到 v2 的首次加载会另行执行透明、幂等迁移：可安全归属的记录进入 managed，无法唯一归属的 legacy 记录进入 quarantine；迁移使用私有备份与原子提交，失败时 fail-closed。默认关闭期间，Webhook 请求在投递阶段被安全跳过；管理员确认风险后开启配置并 reload，即可使用迁移后仍有效的原 endpoint 与 Token 恢复发送。
 
 ---
 

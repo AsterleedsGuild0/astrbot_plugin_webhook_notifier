@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-当前已完成 Milestone 2（HTML 卡片图片）与 WebUI 模板管理 Phase 1：
+当前正式版本仍为 v0.2.0；Unreleased / 下一版本能力已完成 Registry v2、多 Bot 隔离、双通道群验证与安全凭据管理，不再仅限于 Milestone 2 和 WebUI 模板管理 Phase 1：
 
 - ✅ Webhook HTTP Server（aiohttp）已就绪，支持多 endpoint 鉴权与路由。
 - ✅ OMP `session_stop` 事件已适配，可标准化为通用事件对象。
@@ -23,6 +23,9 @@
 - ✅ 私聊 token 和群聊 token（含群管理员验证）。
 - ✅ **WebUI 模板管理**：在插件详情页中创建、复制、编辑、预览、保存、应用和删除 HTML 模板。
 - ✅ **安全模板预览**：HTML Monaco 编辑器、JSON 预览数据和 sandbox `srcdoc` 预览。
+- ✅ **Registry v2**：managed key 为 `(owner_platform_id, owner_user_id, endpoint_name)`，pending key 为 `(owner_platform_id, request_id)`；支持 v1 透明迁移、私有备份、quarantine、原子/幂等/fail-closed 持久化。
+- ✅ **多 Bot 管理隔离**：endpoint、pending、owner 管理和管理员精确选择器均按 `platform_id` 隔离。
+- ✅ **QQ 官方普通群实测**：真实主动 Webhook / OMP HTML 图片卡片 smoke 已通过。
 
 ### 已验证平台与能力矩阵
 
@@ -32,7 +35,7 @@
 | --- | --- | --- |
 | `aiocqhttp` | 已验证 | 既有命令、群聊通知、HTML 图片卡片 |
 | `qq_official` WebSocket 私聊 | 已验证 | AstrBot v4.26.6 私聊命令、Webhook 鉴权、private 主动消息、OMP 状态图片卡片 |
-| `qq_official` WebSocket 普通 QQ 群 | 待验证 | 尚未验证主动发送 |
+| `qq_official` WebSocket 普通 QQ 群 | 已验证 | 双阶段群验证、真实主动 Webhook / OMP HTML 图片卡片 smoke 已通过；仍受 QQ 官方主动消息规则、额度和具体 Bot 授权范围约束 |
 | `qq_official` WebSocket Guild | 待验证 | 尚未验证 |
 | `qq_official_webhook` | 未验证、未声明支持 | 尚未验证，不在 `metadata.yaml` 的 `support_platforms` 中 |
 
@@ -40,7 +43,7 @@
 
 可用命令：
 
-静态文档使用 `<唤醒词>` 占位。AstrBot 默认 `wake_prefix=["/"]`，因此默认命令为 `/whn ...`；改为 `!` 时使用 `!whn ...`；配置空前缀时使用裸命令 `whn ...`。
+静态文档使用 `<唤醒词>` 占位。AstrBot 默认 `wake_prefix=["/"]`，因此默认命令为 `/whn ...`；改为 `!` 时使用 `!whn ...`；配置空前缀时使用裸命令 `whn ...`。运行时若 `wake_prefix` 缺失、类型错误、含控制字符或无法安全读取，则显示安全占位符 `<AstrBot唤醒词>` 与诊断提示，不回退为误导性的硬编码 `/`。
 
 ```text
 <唤醒词>webhook_notifier
@@ -73,6 +76,8 @@
 普通命令、异常和兼容文本若意外包含符合插件 `whn_` 明文格式的 Token，仍会替换为 `[Token 已隐藏]`。敏感 direct send 不经过该用户消息 sanitizer。插件只承诺调用 adapter 一次，不宣称网络 exactly-once；发送异常时不回滚、不重试，提示用户同平台私聊 rotate 恢复。
 
 Registry v2 提供独立的 `scripts/rebind_platform_id.py` 运维 helper，用于 adapter 实例 `platform_id` 变更后的 managed record 重绑定。该能力不是聊天命令或 Plugin Page UI；dry-run 为零写入只读操作，execute/rollback 必须在 AstrBot 与插件停止后离线运行，并显式提供 `--confirm-offline`。完整流程见 [`docs/platform-id-rebind-runbook.md`](docs/platform-id-rebind-runbook.md)。
+
+Registry v1 会在首次加载时透明迁移：可唯一推断平台的记录进入 managed 区，无法安全归属的 legacy 记录进入 quarantine；原文件先写入私有备份，再以原子事务发布 v2。quarantine 只为旧 Path/Token 保留兼容投递，普通用户的 list、rotate、revoke、delete 均不可管理；超级管理员只能通过精确 `revoke-path` 关闭其投递。
 
 ---
 
@@ -206,7 +211,7 @@ AstrBot html_render / 已配置的 T2I 服务
 
 ### 开发者说明
 
-Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用相对 endpoint，提供模板列表、详情、保存、应用、删除和预览操作。后端另提供只读 `GET base-url` bridge，响应仅为 `{base_url, configured}`：配置值非空时原样作为已经包含所需路径语义的 Base URL 并去除尾部斜杠；未配置时返回由监听 host、port 与 `base_path` 组成的本地 Base URL。前端下一阶段接入该字段，届时只需在 Base URL 后追加 `Endpoint Path`，不得再次自动拼接 `base_path`。页面不依赖 Dashboard 内部模块路径；模板 ID 由后端生成，并使用 `expected_revision` 防止并发覆盖。
+Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用相对 endpoint，提供模板列表、详情、保存、应用、删除和预览操作。认证 `GET /astrbot_plugin_webhook_notifier/base-url` 仅返回 `{base_url, configured}`，不返回 Token、Registry、endpoint、owner、UMO 或 server secret；页面提供 Base URL 复制入口，用户再与聊天中获得的 Endpoint Path 组合。配置值非空时作为已包含所需路径语义的 Base URL 并去除尾部斜杠；未配置时返回由监听 host、port 与 `base_path` 组成的本地 Base URL。页面不得再次自动拼接 `base_path`，也不依赖 Dashboard 内部模块路径；模板 ID 由后端生成，并使用 `expected_revision` 防止并发覆盖。
 
 ---
 

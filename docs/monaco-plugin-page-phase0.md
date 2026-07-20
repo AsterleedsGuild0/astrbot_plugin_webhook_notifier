@@ -46,4 +46,6 @@ Phase 1 已将验证页升级为可用的模板管理页面。管理员从 AstrB
 
 页面只通过 `window.AstrBotPluginPage` bridge 调用插件注册的相对 endpoint，不拼接 Dashboard 地址，也不要求管理员直接访问内部 API。bridge 覆盖模板列表、详情、保存、应用、删除和 preview；`expected_revision` 冲突会以 409 提示重新载入。preview 仅渲染当前会话提交的模板与 JSON 数据，不写入 registry。
 
-交付产物固定使用 `monaco-editor@0.52.2`、Vite 6.4.3 和 4 个 inline workers。`asset_token`、无同源 sandbox、worker 消息和无外部资源验证继续沿用 Phase 0 证据；插件发布包约 1.335 MB。
+页面还通过认证 bridge 调用 `GET /astrbot_plugin_webhook_notifier/base-url`。响应严格只包含 `base_url` 与 `configured`，不返回 Token、Registry、endpoint 列表、owner、UMO 或 server secret。Plugin Page 展示并复制 Base URL；用户在页面外将其与聊天中获得的 Endpoint Path 组合，页面不管理或缓存 Token。
+
+交付产物固定使用 `monaco-editor@0.52.2`、Vite 6.4.3 和 4 个 inline workers。`asset_token`、无同源 sandbox、worker 消息和无外部资源验证继续沿用 Phase 0 证据；具体产物大小以当前 production build 和 `tests/test_frontend_build.py` 的限制检查为准，不在文档中固化易过期的包大小。

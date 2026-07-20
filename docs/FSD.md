@@ -6,8 +6,8 @@
 - 文档版本：v0.2.0
 - 对应 PRD 版本：v0.2.0
 - 对应插件版本：v0.2.0
-- 状态：Final — MS2 与 WebUI 模板管理 Phase 1 已实现
-- 最后更新：2026-07-16
+- 状态：v0.2.0 Final；Unreleased / 下一版本 Registry v2 与多 Bot 管理能力已实现
+- 最后更新：2026-07-20
 - 项目名称：`astrbot_plugin_webhook_notifier`
 - 产品名称：Webhook Notifier
 - 目标仓库：`AsterleedsGuild0/astrbot_plugin_webhook_notifier`
@@ -59,11 +59,11 @@ Webhook Notifier 依赖：
 - AstrBot 消息发送能力和 UMO 目标格式。
 - AstrBot `html_render` / T2I 能力，用于 HTML 卡片图片模式。
 - AstrBot `aiocqhttp` 与 `qq_official` 消息平台，用于 QQ 群聊、私聊和图片消息投递。
-- OneBot 验证环境使用 NapCat；QQ 官方 WebSocket 私聊已验证，普通 QQ 群主动发送仍待 smoke test。
+- OneBot 验证环境使用 NapCat；QQ 官方 WebSocket 私聊与普通 QQ 群均已完成对应能力验证。
 
 MVP 支持范围：
 
-- 声明支持 `aiocqhttp` 与 `qq_official` 的已验证能力边界；QQ 官方普通群主动发送在 smoke test 前仍标记为待验证。
+- 声明支持 `aiocqhttp` 与 `qq_official` 的已验证能力边界；QQ 官方普通群真实主动 Webhook / OMP HTML 图片卡片 smoke 已通过，但仍受官方主动消息规则、额度与 Bot 授权范围约束。
 - `aiocqhttp` 验证环境使用 NapCat，群主/群管理员识别依赖 `await event.get_group()` 的权威群资料。
 - `qq_official` 群批准只读取当前群 raw `group_openid`、`author.member_openid` 与 `author.member_role`，不调用不存在的成员查询 API。
 - 其他 AstrBot 平台适配器未测试，不在当前支持承诺内。
@@ -369,6 +369,18 @@ Bot -> User(private): 仅返回名称、永久删除确认与不可恢复警告
 Endpoint Registry 是用户通过 Bot 命令创建出来的运行时安全状态存储。它必须持久化到插件数据目录，例如 `data/webhook_tokens.json`。AstrBot 重启后，已创建且未撤销的 endpoint/token 绑定关系必须继续有效。
 
 Endpoint Registry 的职责不是展示配置，而是作为 Webhook 鉴权和路由的唯一事实来源。用户创建私聊或群聊 token 后，插件必须把 owner、endpoint path、token hash、target whitelist 和状态写入 registry。
+
+Registry v2 的主键与隔离边界固定为：
+
+- managed key：`(owner_platform_id, owner_user_id, endpoint_name)`。
+- pending key：`(owner_platform_id, request_id)`。
+- 所有普通 owner 查询、轮换、撤销、永久删除和 QQ 官方 confirm 都不得跨 `owner_platform_id` 推断记录。
+
+v1 加载时执行透明、幂等、fail-closed 迁移：可唯一推断平台的 legacy record 进入 managed 区；无法安全推断归属的记录进入 quarantine；v1 pending 不延续为可验证凭据。发布迁移结果前必须先创建私有 v1 backup，再以 candidate transaction、临时文件、file `fsync`、原子 replace 与目录 `fsync` 提交。任何校验、备份或提交前失败都不得发布部分内存状态；重复加载 canonical v2 不重复迁移或覆盖备份。
+
+quarantine 仅兼容既有 Path/Token 的 Webhook 投递，不参与普通用户 list、rotate、revoke、delete，也不能按 owner/name 认领。超级管理员可使用精确 `revoke-path` 作为 kill switch；管理员列表不得展示 quarantine 或任何 Token。
+
+管理员 Registry 命令仅允许 AstrBot 全局超级管理员在私聊执行：`list` 返回最多 50 条 managed 最小元数据；`revoke-path` 按完整 Endpoint Path 精确匹配；`revoke-owner` 按 `owner_platform_id + owner_user_id + endpoint_name` 精确匹配。命令、返回与审计日志必须脱敏，不展示 Token、完整 hash、验证码或完整目标 UMO，且不得使用模糊选择器或跨平台推断。
 
 配置文件中的 `endpoints` 仅作为可读示例或管理视图，不作为 MVP 的运行时事实来源。MVP 不要求也不建议在用户通过命令创建、轮换、撤销 endpoint 后回写 AstrBot 插件配置。用户查看 endpoint 应使用 `<唤醒词>whn token list`，而不是读取配置文件。
 
@@ -1435,7 +1447,7 @@ MVP 阶段 `render_mode` 为插件全局配置，全局生效：
 
 MVP 推荐命令形态：
 
-本文用 `<唤醒词>` 表示 AstrBot 当前会话的 `wake_prefix`。默认 `wake_prefix=["/"]` 时命令为 `/whn ...`；改为 `!` 时使用 `!whn ...`；空前缀时使用裸命令 `whn ...`。
+本文用 `<唤醒词>` 表示 AstrBot 当前会话的 `wake_prefix`。默认 `wake_prefix=["/"]` 时命令为 `/whn ...`；改为 `!` 时使用 `!whn ...`；空前缀时使用裸命令 `whn ...`。运行时配置缺失、容器/元素类型错误、包含控制字符或读取异常时，帮助输出使用安全占位符 `<AstrBot唤醒词>` 并附诊断提示；静态示例不得用该异常占位符替代 `<唤醒词>`。
 
 ```text
 <唤醒词>whn token new private [name]
@@ -1468,7 +1480,7 @@ MVP 推荐命令形态：
 
 pending `expires_at` 缺失、无时区或无法解析时必须 fail-closed：关联 endpoint 标记为 `expired`、清理 pending 并持久化。QQ 官方 verify 与 confirm 均重查同一不可延长 expiry；waiting-owner 过期同样清理。aiocqhttp verified-but-unrotated endpoint 返回 `403 token_unclaimed`。
 
-当前 Registry `_save()` 会在内部记录 I/O 错误而不向调用方抛出，verify 保存失败时的完整内存 rollback 会扩散为 Registry 事务语义调整，本 Issue 不实施，列入 Registry v2 后续项。
+Registry v2 的 mutating API 使用锁内 candidate transaction：先复制并校验候选快照，持久化成功后才发布内存状态；写入失败时内存和磁盘保持旧快照。迁移、create、verify/confirm、rotate、revoke、delete 与管理员撤销遵循同一原子和 fail-closed 原则。
 
 ---
 
