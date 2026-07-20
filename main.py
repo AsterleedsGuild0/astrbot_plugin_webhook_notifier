@@ -146,7 +146,7 @@ def _command_positional_args_compat(handler: Any) -> Any:
     "astrbot_plugin_webhook_notifier",
     "AsterleedsGuild0",
     "接收外部 Webhook 事件并推送到指定 AstrBot 会话",
-    "v0.3.0",
+    "v1.0.0-rc.1",
 )
 class WebhookNotifierPlugin(Star):
     """接收 Webhook 事件并安全投递到 AstrBot 会话。"""

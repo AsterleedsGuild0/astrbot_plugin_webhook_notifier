@@ -2,6 +2,15 @@
 
 ---
 
+## v1.0.0-rc.1 - 2026-07-20
+
+- 冻结首个 1.0 Release Candidate 的公共契约范围，明确配置、命令、Registry v2、HTTP 响应、平台边界与可安装 ZIP 结构。
+- 收敛版本与发布流程：SemVer tag/插件版本使用 `v1.0.0-rc.1`，Python 项目版本使用 PEP 440 等价形式 `1.0.0rc1`。
+- 增加版本一致性、响应契约、打包与 Release workflow 的聚焦验证，为 RC 新装及从 v0.3.0 升级 smoke 做准备。
+- 更新 PRD、FSD、发布指南与公共契约文档；本 RC 不宣称新增业务功能，最终 v1.0.0 仅在 smoke 通过后归档 MVP。
+
+---
+
 ## v0.3.0 - 2026-07-20
 
 - 完成 Registry v2：managed key 使用 `(owner_platform_id, owner_user_id, endpoint_name)`，pending key 使用 `(owner_platform_id, request_id)`，实现多 Bot / 多 adapter 实例隔离。

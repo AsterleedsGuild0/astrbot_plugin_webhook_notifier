@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import re
+import tomllib
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 import yaml
+from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +62,93 @@ def test_dev_version_rejects_invalid_label() -> None:
         package_plugin.build_dev_version("v0.2.0", "模板 管理")
 
 
+def test_release_candidate_versions_are_pep440_equivalent() -> None:
+    package_plugin = load_package_module()
+
+    assert package_plugin.versions_equivalent("v1.0.0-rc.1", "1.0.0rc1")
+    assert package_plugin.project_version_for_package("v1.0.0-rc.1") == "1.0.0rc1"
+
+
+def test_default_release_archive_uses_semver_tag_name() -> None:
+    package_plugin = load_package_module()
+
+    assert (
+        package_plugin.parse_args([]).output.name
+        == "astrbot_plugin_webhook_notifier-v1.0.0-rc.1.zip"
+    )
+
+
+def test_dev_version_has_valid_pep440_project_version() -> None:
+    package_plugin = load_package_module()
+
+    project_version = package_plugin.project_version_for_package(
+        "v1.0.0-rc.1-test.20260720.0905.template-manager"
+    )
+
+    assert project_version == "1.0.0rc1.dev202607200905+template.manager"
+
+
+def test_historical_test_fixture_builds_with_valid_project_version(
+    tmp_path: Path,
+) -> None:
+    package_plugin = load_package_module()
+    output = tmp_path / "historical-test.zip"
+
+    package_plugin.build_archive(
+        output,
+        flat=False,
+        package_version="0.2.0-test.phase1-template-page",
+    )
+
+    with zipfile.ZipFile(output) as archive:
+        project_name = next(
+            name for name in archive.namelist() if name.endswith("/pyproject.toml")
+        )
+        project = tomllib.loads(archive.read(project_name).decode("utf-8"))
+
+    project_version = project["project"]["version"]
+    assert project_version == "0.2.0.dev0+test.phase1.template.page"
+    assert Version(project_version) == Version("0.2.0.dev0+test.phase1.template.page")
+
+
+def test_dev_version_with_label_builds_end_to_end(tmp_path: Path, monkeypatch) -> None:
+    package_plugin = load_package_module()
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 20, 9, 5, tzinfo=tz)
+
+    monkeypatch.setattr(package_plugin, "datetime", FixedDateTime)
+    output = tmp_path / "labeled-dev.zip"
+
+    assert (
+        package_plugin.main(
+            [
+                "--dev-version",
+                "--test-label",
+                "template-manager",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    with zipfile.ZipFile(output) as archive:
+        root = archive.namelist()[0].rstrip("/")
+        metadata = yaml.safe_load(archive.read(f"{root}/metadata.yaml"))
+        main_text = archive.read(f"{root}/main.py").decode("utf-8")
+        project = tomllib.loads(archive.read(f"{root}/pyproject.toml").decode("utf-8"))
+
+    plugin_version = "v1.0.0-rc.1-test.20260720.0905.template-manager"
+    assert metadata["version"] == plugin_version
+    assert re.search(rf'"{re.escape(plugin_version)}"', main_text)
+    project_version = project["project"]["version"]
+    assert project_version == "1.0.0rc1.dev202607200905+template.manager"
+    Version(project_version)
+
+
 def test_help_card_template_is_in_package_file_list() -> None:
     package_plugin = load_package_module()
 
@@ -101,9 +191,14 @@ def test_dev_version_metadata_patch_preserves_support_platforms(
             name for name in archive.namelist() if name.endswith("/metadata.yaml")
         )
         metadata = yaml.safe_load(archive.read(metadata_name))
+        project_name = next(
+            name for name in archive.namelist() if name.endswith("/pyproject.toml")
+        )
+        project_text = archive.read(project_name).decode("utf-8")
 
     assert metadata["version"] == "v0.2.0-test.20260718.1200"
     assert metadata["support_platforms"] == EXPECTED_SUPPORT_PLATFORMS
+    assert 'version = "0.2.0.dev202607181200"' in project_text
 
 
 def test_package_metadata_preserves_support_platforms(tmp_path: Path) -> None:

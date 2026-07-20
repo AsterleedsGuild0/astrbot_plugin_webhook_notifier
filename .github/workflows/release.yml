@@ -46,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyyaml pytest pytest-asyncio pillow
+          python -m pip install -r requirements.txt packaging pyyaml pytest pytest-asyncio pillow
 
       - name: Build plugin page
         run: |
@@ -54,6 +54,7 @@ jobs:
           npm run build --prefix frontend
 
       - name: Validate release version
+        id: release_contract
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
@@ -61,29 +62,47 @@ jobs:
           from __future__ import annotations
 
           import os
+          import re
           import tomllib
           from pathlib import Path
 
           import yaml
+          from packaging.version import Version
 
           tag = os.environ["RELEASE_TAG"]
           metadata = yaml.safe_load(Path("metadata.yaml").read_text(encoding="utf-8"))
           project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          main_text = Path("main.py").read_text(encoding="utf-8")
 
           metadata_version = metadata.get("version")
           project_version = project["project"]["version"]
-          expected_project_version = tag.removeprefix("v")
+          register_match = re.search(
+              r'@register\(\s*"astrbot_plugin_webhook_notifier",\s*'
+              r'"AsterleedsGuild0",\s*.*?,\s*"([^"]+)"\s*,?\s*\)',
+              main_text,
+              re.DOTALL,
+          )
+          main_version = register_match.group(1) if register_match else None
 
           errors = []
           if metadata_version != tag:
               errors.append(f"metadata.yaml version {metadata_version!r} != tag {tag!r}")
-          if project_version != expected_project_version:
+          if main_version != tag:
+              errors.append(f"main.py @register version {main_version!r} != tag {tag!r}")
+          if Version(project_version) != Version(tag.removeprefix("v")):
               errors.append(
-                  f"pyproject.toml version {project_version!r} != {expected_project_version!r}"
+                  "pyproject.toml PEP 440 version "
+                  f"{project_version!r} is not equivalent to tag {tag!r}"
               )
 
           if errors:
               raise SystemExit("\n".join(errors))
+
+          version = Version(tag.removeprefix("v"))
+          prerelease = version.is_prerelease or version.is_devrelease
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"prerelease={str(prerelease).lower()}\n")
+              output.write(f"make_latest={str(not prerelease).lower()}\n")
           PY
 
       - name: Run tests
@@ -132,4 +151,5 @@ jobs:
           body_path: release-notes.md
           files: dist/*.zip
           fail_on_unmatched_files: true
-          make_latest: true
+          prerelease: ${{ steps.release_contract.outputs.prerelease }}
+          make_latest: ${{ steps.release_contract.outputs.make_latest }}

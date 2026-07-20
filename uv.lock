@@ -163,7 +163,7 @@ wheels = [
 
 [[package]]
 name = "astrbot-plugin-webhook-notifier"
-version = "0.3.0"
+version = "1.0.0rc1"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -172,6 +172,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "packaging" },
     { name = "pillow" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -186,6 +187,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "packaging", specifier = ">=24.0" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },

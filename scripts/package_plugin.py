@@ -11,6 +11,11 @@ from datetime import datetime
 from pathlib import Path
 
 try:
+    from packaging.version import InvalidVersion, Version
+except ImportError as exc:  # pragma: no cover - declared in the dev/release env.
+    raise SystemExit("packaging is required for release version handling") from exc
+
+try:
     import yaml
 except ImportError as exc:  # pragma: no cover - PyYAML exists in AstrBot envs.
     raise SystemExit("PyYAML is required to read metadata.yaml") from exc
@@ -104,6 +109,65 @@ def read_plugin_version() -> str:
     return version.strip()
 
 
+def read_project_version() -> str:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+    if not match:
+        raise ValueError("pyproject.toml must define project.version")
+    return match.group(1)
+
+
+def normalized_version(value: str) -> Version:
+    """Normalize SemVer-style tags and PEP 440 project versions."""
+    return Version(value.strip().removeprefix("v"))
+
+
+def versions_equivalent(left: str, right: str) -> bool:
+    return normalized_version(left) == normalized_version(right)
+
+
+def release_flags(tag: str) -> tuple[bool, bool]:
+    """Return (prerelease, make_latest) for a release tag."""
+    version = normalized_version(tag)
+    prerelease = version.is_prerelease or version.is_devrelease
+    return prerelease, not prerelease
+
+
+def normalize_local_label(value: str) -> str:
+    """Normalize arbitrary test labels into a PEP 440 local segment."""
+    normalized = re.sub(r"[^0-9A-Za-z]+", ".", value)
+    normalized = re.sub(r"\.+", ".", normalized).strip(".").lower()
+    if not normalized:
+        raise ValueError("test label must contain at least one ASCII letter or digit")
+    return normalized
+
+
+def project_version_for_package(package_version: str) -> str:
+    """Return a valid PEP 440 version for a package metadata version."""
+    try:
+        return str(normalized_version(package_version))
+    except InvalidVersion:
+        match = re.fullmatch(
+            r"(?P<base>v?.+)-test\.(?P<suffix>.+)",
+            package_version,
+        )
+        if not match:
+            raise
+        base = normalized_version(match.group("base"))
+        suffix = match.group("suffix")
+        timestamp = re.fullmatch(
+            r"(?P<date>\d{8})\.(?P<time>\d{4})(?:\.(?P<label>.+))?",
+            suffix,
+        )
+        if timestamp:
+            candidate = f"{base}.dev{timestamp.group('date')}{timestamp.group('time')}"
+            if label := timestamp.group("label"):
+                candidate = f"{candidate}+{normalize_local_label(label)}"
+        else:
+            candidate = f"{base}.dev0+test.{normalize_local_label(suffix)}"
+        return str(Version(candidate))
+
+
 def build_archive(
     output: Path, *, flat: bool, package_version: str | None = None
 ) -> Path:
@@ -162,8 +226,8 @@ def _patched_file_content(relative: str, package_version: str) -> str | None:
 
     if relative == "pyproject.toml":
         text = source.read_text(encoding="utf-8")
-        source_version = read_plugin_version().removeprefix("v")
-        target_version = package_version.removeprefix("v")
+        source_version = read_project_version()
+        target_version = project_version_for_package(package_version)
         old = f'version = "{source_version}"'
         new = f'version = "{target_version}"'
         if old not in text:

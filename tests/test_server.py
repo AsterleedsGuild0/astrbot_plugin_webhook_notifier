@@ -399,6 +399,8 @@ class TestBuildRenderResponse:
         assert data["data"]["fallback_to_text"] is True
         assert data["data"]["fallback_reason"] is None
         assert data["data"]["delivered"] is True
+        assert data["data"]["targets"] == ["default"]
+        assert all(isinstance(name, str) for name in data["data"]["targets"])
 
     def test_partial_failure(self):
         resp = WebhookServer._build_render_response(
@@ -419,7 +421,10 @@ class TestBuildRenderResponse:
         assert data["data"]["delivered"] is False
         assert data["data"]["fallback_to_text"] is True
         assert data["data"]["fallback_reason"] == "image_validation_failed"
+        assert data["data"]["targets"] == ["default"]
+        assert data["data"]["retryable"] is True
         assert "send_results" in data["data"]
+        assert data["data"]["send_results"][0]["error"] == "session_not_found"
 
     def test_skipped_and_partial_delivery_responses(self):
         skipped = {
@@ -446,6 +451,9 @@ class TestBuildRenderResponse:
         assert data["data"]["skipped"] is True
         assert data["data"]["retryable"] is False
         assert data["data"]["rendered"] is False
+        assert data["data"]["targets"] == ["private"]
+        assert data["data"]["skip_reason"] == "private_notifications_disabled"
+        assert data["data"]["send_results"] == [skipped]
 
         resp = WebhookServer._build_render_response(
             "req-partial",
@@ -462,6 +470,8 @@ class TestBuildRenderResponse:
         assert data["data"]["delivered"] is True
         assert data["data"]["skipped"] is True
         assert data["data"]["retryable"] is False
+        assert data["data"]["targets"] == ["private", "group"]
+        assert data["data"]["skip_reason"] == "private_notifications_disabled"
 
 
 @pytest.mark.asyncio

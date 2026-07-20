@@ -6,6 +6,8 @@
 
 OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。当前插件兼容该 hook 使用的 OMP `session_stop` 格式，不提供 GitHub、GitLab 或 OpenCode 原生 provider。
 
+**版本状态：** [v0.3.0](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v0.3.0) 仍是稳定版下载入口；`v1.0.0-rc.1` 是用于新装与升级验证的候选版本，不应视为稳定版。RC 验证范围见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
 <!-- 脱敏截图待补充：![Plugin Page模板管理](docs/assets/plugin-page-preview.png)。需隐藏 Base URL、部署地址、账号信息与模板中的业务敏感数据。 -->
@@ -185,6 +187,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 
 ## 文档索引
 
+- [公共契约与 1.x 兼容政策](docs/public-contract.md)
 - [命令参考](docs/command-reference.md)
 - [端到端部署](docs/end-to-end-setup.md)
 - [客户端接入](docs/client-integration.md)
