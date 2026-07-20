@@ -38,7 +38,7 @@ uv run --frozen python scripts/package_plugin.py --dev-version
 ```
 
 测试包版本和文件名使用本地时间后缀 `-test.YYYYMMDD.HHMM`，例如
-`v0.2.0-test.20260715.0905`。同一天多次打包时可直接按小时和分钟区分。
+`v0.3.0-test.20260720.0905`。同一天多次打包时可直接按小时和分钟区分。
 
 建议再添加本次测试用途标签，便于同时区分功能和生成时间：
 
@@ -47,7 +47,7 @@ uv run --frozen python scripts/package_plugin.py --dev-version --test-label temp
 ```
 
 生成格式为 `-test.YYYYMMDD.HHMM.<label>`，例如
-`v0.2.0-test.20260715.0905.template-manager`。标签仅允许英文字母、数字和连字符。
+`v0.3.0-test.20260720.0905.template-manager`。标签仅允许英文字母、数字和连字符。
 
 1. 本地验证正式发布包：
 
@@ -72,8 +72,8 @@ uv run --frozen python scripts/package_plugin.py
 推送版本 tag 会触发 `.github/workflows/release.yml`：
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 当前 `.github/workflows/release.yml` 在创建 Release 前实际执行以下步骤：
@@ -93,7 +93,7 @@ git push origin v0.2.0
 
 ## 手动触发
 
-如果 tag 已存在，也可以在 GitHub Actions 页面手动运行 `Release` workflow，并填写要发布的 tag，例如 `v0.2.0`。
+如果 tag 已存在，也可以在 GitHub Actions 页面手动运行 `Release` workflow，并填写要发布的 tag，例如 `v0.3.0`。
 
 ---
 
@@ -107,9 +107,9 @@ uv run --frozen pytest
 npm ci --prefix frontend
 npm run build --prefix frontend
 uv run --frozen python scripts/package_plugin.py
-gh release create v0.2.0 \
-  dist/astrbot_plugin_webhook_notifier-v0.2.0.zip \
+gh release create v0.3.0 \
+  dist/astrbot_plugin_webhook_notifier-v0.3.0.zip \
   --target main \
-  --title "v0.2.0" \
-  --notes-file tmp/release-v0.2.0-notes.md
+  --title "v0.3.0" \
+  --notes-file tmp/release-v0.3.0-notes.md
 ```

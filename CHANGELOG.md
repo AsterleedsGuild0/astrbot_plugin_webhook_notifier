@@ -2,7 +2,7 @@
 
 ---
 
-## Unreleased
+## v0.3.0 - 2026-07-20
 
 - 完成 Registry v2：managed key 使用 `(owner_platform_id, owner_user_id, endpoint_name)`，pending key 使用 `(owner_platform_id, request_id)`，实现多 Bot / 多 adapter 实例隔离。
 - 增加 Registry v1 透明迁移、私有备份、quarantine、原子 candidate transaction、幂等重载与 fail-closed 校验；quarantine 仅保留 legacy Webhook 兼容投递，普通用户不可发现或管理。

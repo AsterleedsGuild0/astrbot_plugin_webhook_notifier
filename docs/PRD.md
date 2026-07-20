@@ -3,14 +3,14 @@
 ## 文档信息
 
 - 文档类型：PRD
-- 文档版本：v0.2.0
-- 对应插件版本：v0.2.0
-- 状态：v0.2.0 Final；Unreleased / 下一版本 Registry v2 与多 Bot 管理能力已实现
+- 文档版本：v0.3.0
+- 对应插件版本：v0.3.0
+- 状态：v0.3.0 Final
 - 最后更新：2026-07-20
 - 项目名称：`astrbot_plugin_webhook_notifier`
 - 产品名称：Webhook Notifier
 - 目标仓库：`AsterleedsGuild0/astrbot_plugin_webhook_notifier`
-- 当前阶段：HTML 卡片、WebUI 模板管理、Registry v2 与多 Bot 安全管理已交付到 Unreleased
+- 当前阶段：HTML 卡片、WebUI 模板管理、Registry v2 与多 Bot 安全管理已随 v0.3.0 交付
 - 首个目标集成：`oh-my-pi` / OMP `session_stop` 任务完成通知
 - 目标平台：AstrBot `aiocqhttp` 与 `qq_official`；OneBot 验证环境使用 NapCat，QQ 官方普通群真实主动 Webhook / OMP 图片卡片 smoke 已通过
 

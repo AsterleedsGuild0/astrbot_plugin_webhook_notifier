@@ -3,10 +3,10 @@
 ## 文档信息
 
 - 文档类型：FSD（Software Functional Specification Document）
-- 文档版本：v0.2.0
-- 对应 PRD 版本：v0.2.0
-- 对应插件版本：v0.2.0
-- 状态：v0.2.0 Final；Unreleased / 下一版本 Registry v2 与多 Bot 管理能力已实现
+- 文档版本：v0.3.0
+- 对应 PRD 版本：v0.3.0
+- 对应插件版本：v0.3.0
+- 状态：v0.3.0 Final
 - 最后更新：2026-07-20
 - 项目名称：`astrbot_plugin_webhook_notifier`
 - 产品名称：Webhook Notifier

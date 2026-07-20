@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-当前正式版本仍为 v0.2.0；Unreleased / 下一版本能力已完成 Registry v2、多 Bot 隔离、双通道群验证与安全凭据管理，不再仅限于 Milestone 2 和 WebUI 模板管理 Phase 1：
+当前正式版本为 v0.3.0；Registry v2、多 Bot 隔离、双通道群验证与安全凭据管理均已随 v0.3.0 交付，不再仅限于 Milestone 2 和 WebUI 模板管理 Phase 1：
 
 - ✅ Webhook HTTP Server（aiohttp）已就绪，支持多 endpoint 鉴权与路由。
 - ✅ OMP `session_stop` 事件已适配，可标准化为通用事件对象。
