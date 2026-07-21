@@ -10,7 +10,7 @@ from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_TAG = "v1.0.0-rc.1"
+EXPECTED_TAG = "v1.0.0"
 
 
 def load_package_module():
@@ -66,12 +66,12 @@ def test_release_workflow_uses_dynamic_release_flags() -> None:
     assert "make_latest: true" not in workflow
 
 
-def test_changelog_contains_release_candidate_section() -> None:
+def test_changelog_contains_stable_release_section() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## v1.0.0-rc.1 - 2026-07-20" in changelog
+    assert "## v1.0.0 - 2026-07-21" in changelog
 
 
-def test_release_notes_extract_only_release_candidate_section() -> None:
+def test_release_notes_extract_only_stable_release_section() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     pattern = re.compile(
         rf"^##\s+{re.escape(EXPECTED_TAG)}(?:\s+-\s+[^\n]+)?\n"
@@ -82,5 +82,6 @@ def test_release_notes_extract_only_release_candidate_section() -> None:
     match = pattern.search(changelog)
     assert match
     notes = match.group("body")
-    assert "公共契约范围" in notes
+    assert "首个稳定版公共契约" in notes
+    assert "市场安装与更新路径" in notes
     assert "完成 Registry v2" not in notes

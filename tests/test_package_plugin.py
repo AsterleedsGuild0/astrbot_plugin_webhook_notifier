@@ -62,11 +62,11 @@ def test_dev_version_rejects_invalid_label() -> None:
         package_plugin.build_dev_version("v0.2.0", "模板 管理")
 
 
-def test_release_candidate_versions_are_pep440_equivalent() -> None:
+def test_stable_versions_are_pep440_equivalent() -> None:
     package_plugin = load_package_module()
 
-    assert package_plugin.versions_equivalent("v1.0.0-rc.1", "1.0.0rc1")
-    assert package_plugin.project_version_for_package("v1.0.0-rc.1") == "1.0.0rc1"
+    assert package_plugin.versions_equivalent("v1.0.0", "1.0.0")
+    assert package_plugin.project_version_for_package("v1.0.0") == "1.0.0"
 
 
 def test_default_release_archive_uses_semver_tag_name() -> None:
@@ -74,7 +74,7 @@ def test_default_release_archive_uses_semver_tag_name() -> None:
 
     assert (
         package_plugin.parse_args([]).output.name
-        == "astrbot_plugin_webhook_notifier-v1.0.0-rc.1.zip"
+        == "astrbot_plugin_webhook_notifier-v1.0.0.zip"
     )
 
 
@@ -82,10 +82,10 @@ def test_dev_version_has_valid_pep440_project_version() -> None:
     package_plugin = load_package_module()
 
     project_version = package_plugin.project_version_for_package(
-        "v1.0.0-rc.1-test.20260720.0905.template-manager"
+        "v1.0.0-test.20260720.0905.template-manager"
     )
 
-    assert project_version == "1.0.0rc1.dev202607200905+template.manager"
+    assert project_version == "1.0.0.dev202607200905+template.manager"
 
 
 def test_historical_test_fixture_builds_with_valid_project_version(
@@ -141,11 +141,11 @@ def test_dev_version_with_label_builds_end_to_end(tmp_path: Path, monkeypatch) -
         main_text = archive.read(f"{root}/main.py").decode("utf-8")
         project = tomllib.loads(archive.read(f"{root}/pyproject.toml").decode("utf-8"))
 
-    plugin_version = "v1.0.0-rc.1-test.20260720.0905.template-manager"
+    plugin_version = "v1.0.0-test.20260720.0905.template-manager"
     assert metadata["version"] == plugin_version
     assert re.search(rf'"{re.escape(plugin_version)}"', main_text)
     project_version = project["project"]["version"]
-    assert project_version == "1.0.0rc1.dev202607200905+template.manager"
+    assert project_version == "1.0.0.dev202607200905+template.manager"
     Version(project_version)
 
 

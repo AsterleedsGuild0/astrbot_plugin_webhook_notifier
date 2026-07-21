@@ -3,11 +3,11 @@
 ## 文档信息
 
 - 文档类型：FSD（Software Functional Specification Document）
-- 文档版本：v1.0.0-rc.1
-- 对应 PRD 版本：v1.0.0-rc.1
-- 对应插件版本：v1.0.0-rc.1
-- 状态：1.0 公共契约冻结 / MVP 候选，尚未归档
-- 最后更新：2026-07-20
+- 文档版本：v1.0.0
+- 对应 PRD 版本：v1.0.0
+- 对应插件版本：v1.0.0
+- 状态：Final / MVP 已归档 / 1.x 稳定契约
+- 最后更新：2026-07-21
 - 项目名称：`astrbot_plugin_webhook_notifier`
 - 产品名称：Webhook Notifier
 - 目标仓库：`AsterleedsGuild0/astrbot_plugin_webhook_notifier`
@@ -16,7 +16,7 @@
 
 ## 目的与范围
 
-本文档定义 Webhook Notifier MVP 的功能规格，作为后续实现、测试和验收的功能契约。v1.0.0-rc.1 用于冻结候选契约；仅在最终 v1.0.0 新装与 v0.3.0 升级 smoke 通过后归档 MVP。
+本文档定义 Webhook Notifier `v1.0.0` 的 Final 功能规格，作为 1.x 后续实现、测试和验收的稳定功能契约。MVP 已归档；正式 Git tag、GitHub Release 与 ZIP 尚待创建。云端已验证保留数据目录/配置数据的卸载 v0.3.0 后重装 RC 数据兼容性，但未验证原位升级、在线更新或 AstrBot 插件市场一键更新路径，后者属于正式版发布/上架后的检查项。
 
 本文档描述：
 

@@ -6,7 +6,7 @@
 
 OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。当前插件兼容该 hook 使用的 OMP `session_stop` 格式，不提供 GitHub、GitLab 或 OpenCode 原生 provider。
 
-**版本状态：** [v0.3.0](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v0.3.0) 仍是稳定版下载入口；`v1.0.0-rc.1` 是用于新装与升级验证的候选版本，不应视为稳定版。RC 验证范围见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+**版本状态：** 当前文档已按 `v1.0.0` Final / 稳定版契约准备。`v1.0.0` Git tag、GitHub Release 与正式 ZIP 尚未创建；发布前仍可从 [v0.3.0](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v0.3.0) 获取现有稳定资产，或从 Releases 页面获取已发布的 `v1.0.0-rc.1` 候选资产。已完成的云端兼容验证是“卸载 v0.3.0 旧包后安装 v1.0.0-rc.1，并保留原数据目录/配置数据”，不代表 AstrBot 插件市场一键更新、原位升级或在线更新路径已经验证。正式状态与发布后检查见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -49,11 +49,12 @@ flowchart LR
 
 ### 1. 安装插件
 
-> 本插件尚未上架 AstrBot 官方插件市场，不能通过市场搜索安装。
+> 本插件尚未以 `v1.0.0` 正式版上架 AstrBot 官方插件市场，不能把市场搜索安装或市场更新视为已验证能力。该路径将在正式版发布/上架后检查。
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（推荐） | 从 [v0.3.0 Release](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v0.3.0) 下载 `astrbot_plugin_webhook_notifier-v0.3.0.zip`，在 WebUI 选择“从文件安装” |
+| Release ZIP（正式版发布后推荐） | 计划从 `v1.0.0` Release 下载 `astrbot_plugin_webhook_notifier-v1.0.0.zip`，在 WebUI 选择“从文件安装”；当前该 tag、Release 与资产尚未创建 |
+| 已发布资产核对 | 发布前可使用 [v0.3.0 Release](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v0.3.0) 或 Releases 页面中的 `v1.0.0-rc.1` 候选资产；RC 不等同于正式版 |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
 | 源码安装 | 将仓库克隆到 `AstrBot/data/plugins`，见下方命令 |
 
@@ -210,7 +211,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 
 ### 为什么在 AstrBot 插件市场搜不到？
 
-项目尚未上架官方插件市场。请使用 Release ZIP、WebUI 仓库 URL 或 `git clone` 安装。
+`v1.0.0` 尚未发布并上架官方插件市场。正式发布前请使用现有 Release 资产、WebUI 仓库 URL 或 `git clone` 安装；市场安装与市场更新需在正式版上架后另行验证。
 
 ### 私聊 endpoint 创建成功，为什么没有通知？
 

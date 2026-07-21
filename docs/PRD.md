@@ -3,14 +3,14 @@
 ## 文档信息
 
 - 文档类型：PRD
-- 文档版本：v1.0.0-rc.1
-- 对应插件版本：v1.0.0-rc.1
-- 状态：1.0 公共契约冻结 / MVP 候选，尚未归档
-- 最后更新：2026-07-20
+- 文档版本：v1.0.0
+- 对应插件版本：v1.0.0
+- 状态：Final / MVP 已归档 / 1.x 稳定契约
+- 最后更新：2026-07-21
 - 项目名称：`astrbot_plugin_webhook_notifier`
 - 产品名称：Webhook Notifier
 - 目标仓库：`AsterleedsGuild0/astrbot_plugin_webhook_notifier`
-- 当前阶段：HTML 卡片、WebUI 模板管理、Registry v2 与多 Bot 安全管理已进入 v1.0.0-rc.1 契约冻结；仅在最终 v1.0.0 新装与 v0.3.0 升级 smoke 通过后归档 MVP
+- 当前阶段：HTML 卡片、WebUI 模板管理、Registry v2 与多 Bot 安全管理已纳入 `v1.0.0` Final，MVP 已归档；正式 Git tag、GitHub Release 与 ZIP 尚待创建，AstrBot 插件市场更新路径待发布/上架后验证
 - 首个目标集成：兼容 `ParticleG/omp-config` 社区 post Hook 发送的 OMP `session_stop` version 1 通知
 - 目标平台：AstrBot `aiocqhttp` 与 `qq_official`；OneBot 验证环境使用 NapCat，QQ 官方普通群真实主动 Webhook / OMP 图片卡片 smoke 已通过
 
