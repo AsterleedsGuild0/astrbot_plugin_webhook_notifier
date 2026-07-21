@@ -420,7 +420,9 @@ def test_status_shows_private_notification_state():
 async def test_private_endpoint_creation_warns_when_notifications_disabled():
     class RegistryStub:
         def create_private_endpoint(self, **kwargs):
-            return SimpleNamespace(path="u/generated/private"), "secret-token"
+            return SimpleNamespace(
+                path="u/generated/private", provider="omp"
+            ), "secret-token"
 
     class EventStub:
         unified_msg_origin = "aiocqhttp:FriendMessage:10001"

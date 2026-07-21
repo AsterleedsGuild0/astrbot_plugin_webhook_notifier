@@ -9,7 +9,7 @@ from aiohttp import web
 from astrbot.api import logger
 
 from .models import EndpointRecord, NormalizedEvent, ServerConfig
-from .omp import is_omp_session_stop, normalize_omp_payload
+from .providers import ProviderError, ProviderRegistry, ProviderRegistryError
 from .registry import EndpointRegistry
 from .renderer import (
     DEFAULT_HTML_TEMPLATE,
@@ -52,6 +52,7 @@ class WebhookServer:
         html_render: Callable | None = None,
         plugin_config: dict[str, Any] | None = None,
         template_registry: TemplateRegistry | None = None,
+        provider_registry: ProviderRegistry | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -59,6 +60,7 @@ class WebhookServer:
         self._html_render: Callable | None = html_render
         self._plugin_config: dict[str, Any] = plugin_config or {}
         self._template_registry = template_registry
+        self._provider_registry = provider_registry or ProviderRegistry()
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -121,7 +123,9 @@ class WebhookServer:
             logger.error(
                 f"[WebhookNotifier] request_id={request_id} 未预期的处理错误: {e}"
             )
-            return self._error_response(500, "internal_error", str(e), request_id)
+            return self._error_response(
+                500, "internal_error", str(e), request_id, retryable=True
+            )
 
     # ─── 内部辅助方法 ────────────────────────────────────────
 
@@ -247,29 +251,69 @@ class WebhookServer:
                 500, "internal_error", "Registry 鉴权结果无效", request_id
             )
 
-        # 7. 识别 OMP 事件
-        headers_dict = dict(request.headers)
-        is_valid, err_msg = is_omp_session_stop(headers_dict, body)
-        if not is_valid:
+        # 7. 通过 ProviderRegistry 精确选择 adapter
+        adapter = self._provider_registry.get(endpoint.provider)
+        if adapter is None:
             logger.warning(
                 f"[WebhookNotifier] request_id={request_id} "
-                f"endpoint={endpoint.name} OMP 事件识别失败: {err_msg}"
+                f"endpoint={endpoint.name} provider={endpoint.provider} "
+                "adapter 未注册"
             )
-            if "不支持" in err_msg:
-                return self._error_response(
-                    400, "unsupported_event", err_msg, request_id
-                )
-            return self._error_response(400, "invalid_payload", err_msg, request_id)
+            return self._error_response(
+                500,
+                "provider_unavailable",
+                f"Provider adapter 未注册: {endpoint.provider}",
+                request_id,
+                retryable=True,
+            )
 
-        # 10. 标准化事件
+        # 8. 通过 adapter 解析并标准化事件
         request_time = datetime.now(timezone.utc).isoformat()
-        event = normalize_omp_payload(body, request_time)
+        try:
+            headers_dict = dict(request.headers)
+            event = adapter.parse(
+                headers=headers_dict, payload=body, received_at=request_time
+            )
+        except ProviderError as e:
+            # 不泄露底层异常原文或 payload 片段；如需根因查看 debug 级别日志
+            logger.info(
+                f"[WebhookNotifier] request_id={request_id} "
+                f"endpoint={endpoint.name} provider={endpoint.provider} "
+                f"parse 拒绝: code={e.code}"
+            )
+            return self._error_response(
+                400, e.code, str(e), request_id, retryable=e.retryable
+            )
+        except ProviderRegistryError as e:
+            logger.warning(
+                f"[WebhookNotifier] request_id={request_id} "
+                f"endpoint={endpoint.name} provider={endpoint.provider} "
+                f"registry 错误: {e}"
+            )
+            return self._error_response(
+                500, "provider_unavailable", str(e), request_id, retryable=True
+            )
+        except Exception as e:
+            logger.error(
+                f"[WebhookNotifier] request_id={request_id} "
+                f"endpoint={endpoint.name} provider={endpoint.provider} "
+                f"adapter 内部异常: {type(e).__name__}"
+            )
+            return self._error_response(
+                500,
+                "internal_error",
+                "Provider adapter 内部错误",
+                request_id,
+                retryable=True,
+            )
+
         logger.info(
             f"[WebhookNotifier] request_id={request_id} "
-            f"endpoint={endpoint.name} event={event.event}"
+            f"endpoint={endpoint.name} provider={endpoint.provider} "
+            f"event={event.event}"
         )
 
-        # 11. 解析 payload 中的 target alias
+        # 9. 解析 payload 中的 target alias
         payload_target_alias = body.get("target_alias") or body.get("target")
 
         return await self._dispatch_event(
@@ -284,6 +328,12 @@ class WebhookServer:
         request_id: str,
     ) -> web.Response:
         """应用发送策略后按全局渲染模式处理已标准化事件。"""
+        logger.info(
+            f"[WebhookNotifier] request_id={request_id} "
+            f"endpoint={endpoint.name} "
+            f"event.provider={event.provider} endpoint.provider={endpoint.provider} "
+            f"event={event.event}"
+        )
         render_mode = self._get_render_mode()
         fallback_to_text = self._get_fallback_to_text()
 
@@ -599,6 +649,8 @@ class WebhookServer:
         error_code: str,
         message: str,
         request_id: str,
+        *,
+        retryable: bool = False,
     ) -> web.Response:
         return web.json_response(
             {
@@ -607,6 +659,7 @@ class WebhookServer:
                 "data": {
                     "request_id": request_id,
                     "error": error_code,
+                    "retryable": retryable,
                 },
             },
             status=http_status,

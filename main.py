@@ -29,6 +29,8 @@ from .core.help_card import (
     render_help_card_html,
 )
 from .core.models import EndpointStatus, ServerConfig
+from .core.omp import OmpProviderAdapter
+from .core.providers import ProviderRegistry
 from .core.registry import (
     BIND_CURRENT_GROUP,
     PREBOUND_GROUP,
@@ -162,6 +164,9 @@ class WebhookNotifierPlugin(Star):
         self._sender: Sender | None = None
         self._server: WebhookServer | None = None
         self._server_config: ServerConfig | None = None
+        # 默认 ProviderRegistry 包含 OMP adapter，确保构造后即可用（测试无需 initialize）
+        self._provider_registry: ProviderRegistry | None = None
+        self._init_default_provider_registry()
         self._register_template_web_apis()
 
     async def initialize(self) -> None:
@@ -184,7 +189,11 @@ class WebhookNotifierPlugin(Star):
         os.makedirs(data_dir, exist_ok=True)
         logger.info(f"[WebhookNotifier] 插件数据目录: {data_dir}")
 
-        # 初始化 Registry
+        # 验证 ProviderRegistry 已初始化（构造器已创建默认 OMP Registry 并冻结）
+        if self._provider_registry is None:
+            logger.error("[WebhookNotifier] ProviderRegistry 未初始化，重新初始化")
+            self._init_default_provider_registry()
+
         self._registry = EndpointRegistry(data_dir)
         self._registry.expire_stale_pending()
         if data_dir_available:
@@ -833,7 +842,8 @@ class WebhookNotifierPlugin(Star):
             target_names = ",".join(target.name for target in rec.targets) or "无"
             lines.append(
                 f"{index}. owner={rec.owner_user_id} | name={rec.name} | "
-                f"Endpoint Path={rec.path} | status={rec.status} | "
+                f"provider={rec.provider} | Endpoint Path={rec.path} | "
+                f"status={rec.status} | "
                 f"targets={target_names} ({len(rec.targets)}) | "
                 f"created={rec.created_at[:19]}"
             )
@@ -1011,22 +1021,115 @@ class WebhookNotifierPlugin(Star):
                 f"  {commands.short} token new group current [名称]  (qq_official)"
             )
 
-        mode = args[0].lower()
-        name_param = " ".join(args[1:]).strip() if len(args) > 1 else ""
+        # 解析可选的 --provider 参数，未指定时默认 omp
+        provider, filtered_args = self._extract_provider_flag(args)
+        if not provider:
+            provider = "omp"
+
+        mode = filtered_args[0].lower() if filtered_args else ""
+        name_param = (
+            " ".join(filtered_args[1:]).strip() if len(filtered_args) > 1 else ""
+        )
+
+        # 验证 provider 值
+        provider_ok, provider_msg = self._validate_create_provider(provider)
+        if not provider_ok:
+            return provider_msg
 
         if mode == "private":
-            return await self._create_private_endpoint(event, name_param)
+            return await self._create_private_endpoint(
+                event, name_param, provider=provider
+            )
         elif mode == "group":
-            return await self._create_group_pending(event, args[1:], commands)
+            return await self._create_group_pending(
+                event, filtered_args[1:], commands, provider=provider
+            )
         else:
             return (
                 f"未知类型: {mode}\n"
-                f"用法: {commands.short} token new private [名称]；"
+                f"用法: {commands.short} token new private [名称] [--provider <omp|opencode>]；"
                 "群聊请按当前平台使用数字群号或 current"
             )
 
+    @staticmethod
+    def _extract_provider_flag(
+        args: list[str],
+    ) -> tuple[str, list[str]]:
+        """从命令参数中提取 ``--provider <value>``。
+
+        重复 ``--provider`` 视为参数错误，返回空 provider 让调用方处理拒绝。
+        末尾缺值（如 ``--provider`` 后无参数）也视为空 provider。
+
+        Returns:
+            (provider_value, remaining_args)
+            未提供时 provider_value 为空字符串。
+        """
+        result_args: list[str] = []
+        provider = ""
+        found_provider = False
+        skip_next = False
+        for i, arg in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--provider":
+                if i + 1 >= len(args):
+                    # 末尾缺值：标记找到但无值，跳过该 flag
+                    found_provider = True
+                    continue
+                if found_provider:
+                    # 重复 --provider，返回空 provider 让调用方拒绝
+                    return "", result_args + args[i:]
+                found_provider = True
+                provider = args[i + 1].strip()
+                skip_next = True
+            else:
+                result_args.append(arg)
+        return provider, result_args
+
+    def _validate_create_provider(self, provider: str) -> tuple[bool, str]:
+        """验证创建时指定的 provider 值是否可用。
+
+        Returns:
+            (is_valid, error_or_empty_message)
+        """
+        if provider not in ("omp", "opencode"):
+            return (
+                False,
+                f"❌ 不支持的 provider: {provider}。当前支持的 provider: omp, opencode",
+            )
+        # 查询 Registry 确认 adapter 是否已注册（#18 阶段只有 omp）
+        reg = self._ensure_provider_registry()
+        if reg is None:
+            return False, "❌ ProviderRegistry 未初始化，请检查日志。"
+        if reg.get(provider) is None:
+            msg = (
+                f"❌ Provider adapter 尚未注册: {provider}。"
+                "该 provider 可能在后续版本中可用。"
+            )
+            if provider == "opencode":
+                msg = (
+                    "❌ opencode provider 尚未启用（adapter 未注册）。"
+                    "当前仅支持 omp；opencode 将在后续版本中可用。"
+                )
+            return False, msg
+        return True, ""
+
+    def _ensure_provider_registry(self) -> ProviderRegistry | None:
+        return self._provider_registry
+
+    def _init_default_provider_registry(self) -> None:
+        """构造时初始化默认 ProviderRegistry 并冻结（含 OMP adapter）。"""
+        reg = ProviderRegistry()
+        reg.register(OmpProviderAdapter())
+        reg.freeze()
+        self._provider_registry = reg
+
     async def _create_private_endpoint(
-        self, event: AstrMessageEvent, name_param: str
+        self,
+        event: AstrMessageEvent,
+        name_param: str,
+        provider: str = "omp",
     ) -> list[str] | str:
         """创建私聊 endpoint。"""
         registry = self._ensure_registry()
@@ -1046,6 +1149,7 @@ class WebhookNotifierPlugin(Star):
                 owner_user_id=owner_id,
                 target_umo=target_umo,
                 description=f"私聊 endpoint for {owner_id}",
+                provider=provider,
             )
         except Exception as e:
             logger.error(f"[WebhookNotifier] 创建私聊 endpoint 失败: {e}")
@@ -1066,6 +1170,7 @@ class WebhookNotifierPlugin(Star):
         summary = (
             "✅ 私聊 endpoint 创建成功\n"
             f"名称: {endpoint_name}\n"
+            f"Provider: {record.provider}\n"
             f"Endpoint Path: {endpoint_path}\n"
             "Base URL：请在 Plugin Page 中复制"
             f"{private_notification_notice}"
@@ -1077,6 +1182,7 @@ class WebhookNotifierPlugin(Star):
         event: AstrMessageEvent,
         args: list[str],
         commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+        provider: str = "omp",
     ) -> str:
         """创建群聊待验证 endpoint。"""
         registry = self._ensure_registry()
@@ -1120,6 +1226,7 @@ class WebhookNotifierPlugin(Star):
                 group_binding_mode=binding_mode,
                 target_group_id=target_group_id,
                 description=f"群聊 endpoint for {owner_id}",
+                provider=provider,
             )
         except Exception as e:
             logger.error(f"[WebhookNotifier] 创建群聊待验证 endpoint 失败: {e}")
@@ -1144,6 +1251,7 @@ class WebhookNotifierPlugin(Star):
         return (
             f"✅ 待验证申请已创建\n\n"
             f"名称: {endpoint_name}\n"
+            f"Provider: {record.provider}\n"
             f"{target_line}"
             f"Endpoint Path: {endpoint_path}\n"
             f"请求 ID: {request_id}\n"
@@ -1308,6 +1416,7 @@ class WebhookNotifierPlugin(Star):
 
             lines.append(
                 f"{status_emoji} {rec.name}\n"
+                f"   Provider: {rec.provider}\n"
                 f"   Endpoint Path: {rec.path}\n"
                 f"   状态: {rec.status}\n"
                 f"   目标: {targets_str}\n"
@@ -1462,6 +1571,7 @@ class WebhookNotifierPlugin(Star):
                 html_render=self.html_render,
                 plugin_config=dict(self.config),
                 template_registry=self._template_registry,
+                provider_registry=self._provider_registry,
             )
             await self._server.start()
         except Exception as e:

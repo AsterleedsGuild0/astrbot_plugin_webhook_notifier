@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .models import NormalizedEvent
+from .providers import ProviderAdapter, ProviderError
 
 OMP_SOURCE_NAME = "oh-my-pi"
+_OMP_ADAPTER_ERROR_MSG = "OMP payload 处理失败"
 
 
 def is_omp_session_stop(
@@ -288,6 +290,49 @@ def _format_utc_offset(dt: datetime) -> str:
     total_minutes = abs(total_minutes)
     hours, minutes = divmod(total_minutes, 60)
     return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+class OmpProviderAdapter(ProviderAdapter):
+    """OMP provider 薄适配层。
+
+    复用现有 ``is_omp_session_stop`` 和 ``normalize_omp_payload``，
+    失败时转换为标准 ``ProviderError``。不复制/重写 OMP parser。
+    """
+
+    @property
+    def provider(self) -> str:
+        return "omp"
+
+    def parse(
+        self,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        received_at: str,
+    ) -> NormalizedEvent:
+        is_valid, err_msg = is_omp_session_stop(headers, payload)
+        if not is_valid:
+            if "不一致" in err_msg:
+                raise ProviderError(
+                    "event_mismatch",
+                    "请求的 Header 与 Body 事件字段不匹配",
+                    retryable=False,
+                )
+            if "不支持" in err_msg:
+                raise ProviderError(
+                    "unsupported_event", "不支持的 OMP 事件类型", retryable=False
+                )
+            raise ProviderError(
+                "unrecognized_event", "无法识别 OMP 请求事件", retryable=False
+            )
+        try:
+            return normalize_omp_payload(payload, received_at)
+        except Exception:
+            raise ProviderError(
+                "invalid_payload",
+                _OMP_ADAPTER_ERROR_MSG,
+                retryable=False,
+            )
 
 
 def _format_duration(duration_ms: int | None | float) -> str:

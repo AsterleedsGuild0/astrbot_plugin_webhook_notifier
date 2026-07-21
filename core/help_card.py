@@ -44,15 +44,15 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
         "description": "创建操作从私聊发起；群聊 Endpoint 需要在目标群完成验证。",
         "commands": (
             {
-                "syntax": "token new private [名称]",
-                "description": "创建私聊 Endpoint；名称可选",
+                "syntax": "token new private [名称] [--provider omp]",
+                "description": "创建私聊 Endpoint；默认 omp，opencode 需后续版本",
             },
             {
-                "syntax": "token new group <数字群号> [名称]",
+                "syntax": "token new group <数字群号> [名称] [--provider omp]",
                 "description": "aiocqhttp：私聊申请并预绑定数字群号",
             },
             {
-                "syntax": "token new group current [名称]",
+                "syntax": "token new group current [名称] [--provider omp]",
                 "description": "qq_official：私聊申请，验证时绑定当前群",
             },
             {

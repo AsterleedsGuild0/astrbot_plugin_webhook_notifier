@@ -8,10 +8,20 @@ import pytest
 from astrbot.api.star import Context
 
 from core.models import EndpointRecord, NormalizedEvent, ServerConfig, TargetAlias
+from core.omp import OmpProviderAdapter
+from core.providers import ProviderRegistry
 from core.registry import EndpointRegistry
 from core.sender import Sender
 from core.server import DEFAULT_RENDER_OPTIONS, WebhookServer
 from core.template_registry import TemplateRegistry
+
+
+def _make_provider_registry() -> ProviderRegistry:
+    """创建一个含 OMP adapter 的 ProviderRegistry（测试用工厂）。"""
+    reg = ProviderRegistry()
+    reg.register(OmpProviderAdapter())
+    reg.freeze()
+    return reg
 
 
 def _make_event() -> NormalizedEvent:
@@ -103,7 +113,7 @@ class RequestStub:
         self.headers = {"Authorization": f"Bearer {token}"}
 
     async def read(self) -> bytes:
-        return b"{}"
+        return b'{"event": "omp.session_stop"}'
 
 
 class HeaderRequestStub(RequestStub):
@@ -128,14 +138,24 @@ async def test_server_uses_single_registry_authentication_api():
             raise AssertionError(f"Server 不得调用二次 Registry 查询: {name}")
 
     registry = AtomicAuthRegistry()
+    # 注入含 OMP adapter 的 ProviderRegistry，断言正常 200 响应
     srv = WebhookServer(
-        ServerConfig(), registry, FakeSender(), plugin_config={"render_mode": "text"}
+        ServerConfig(),
+        registry,
+        FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=_make_provider_registry(),
     )  # type: ignore[arg-type]
-    await srv._process_request(
+    resp = await srv._process_request(
         RequestStub("/webhook/u/hash/test_ep", "token"),  # type: ignore[arg-type]
         "atomic-auth",
     )
+    import json
+
+    body = json.loads(resp.body)
     assert registry.calls == [("u/hash/test_ep", "Bearer token")]
+    assert resp.status == 200
+    assert body.get("code") == 0
 
 
 @pytest.fixture
@@ -143,6 +163,7 @@ def server() -> WebhookServer:
     config = ServerConfig()
     registry = FakeRegistry()
     sender = FakeSender()
+    provider_registry = _make_provider_registry()
 
     async def fake_html_render(
         tmpl: str, data: dict, return_url: bool = True, options: dict | None = None
@@ -171,6 +192,7 @@ def server() -> WebhookServer:
             "fallback_to_text": True,
             "render_options": '{"full_page": true, "type": "png"}',
         },
+        provider_registry=provider_registry,
     )
 
 
@@ -533,8 +555,12 @@ class TestPrivatePolicyPreflight:
         assert html_calls == 0
         assert ctx.get_last_sent() is None
 
-        assert len(info_logs) == 1
-        log = info_logs[0]
+        # _dispatch_event 新增 event.provider/endpoint.provider 日志，取最后一条验证跳过消息
+        assert len(info_logs) >= 1
+        log = next(
+            (l for l in reversed(info_logs) if "result=skipped" in l),
+            info_logs[-1],
+        )
         assert log.startswith("[WebhookNotifier] ")
         assert f"request_id={request_id}" in log
         assert "provider=omp" in log
@@ -543,6 +569,10 @@ class TestPrivatePolicyPreflight:
         assert "reason=private_notifications_disabled" in log
         assert "skipped_target_count=2" in log
         assert "rendered=false" in log
+        # _dispatch_event 日志包含 event.provider 但不包含敏感标记
+        dispatch_log = info_logs[0]
+        assert "event.provider=omp" in dispatch_log
+        assert "endpoint.provider=omp" in dispatch_log
         for sensitive_marker in (
             endpoint.name,
             endpoint.path,
@@ -893,3 +923,149 @@ class TestFallbackToText:
         assert data["data"]["requested_render_mode"] == "html_image"
         assert data["data"]["fallback_to_text"] is True
         assert data["data"]["fallback_reason"] == "template_render_failed"
+
+
+# ─── 全链路集成测试 ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_integration_real_registry_full_omp_flow(tmp_path):
+    """真实 EndpointRegistry+Bearer auth+真实 OMP payload+ProviderRegistry，验证 200。
+
+    同时验证 error response 中包含 retryable 字段。
+    """
+    import json
+
+    from core.registry import EndpointRegistry
+
+    # 1. 创建真实 EndpointRegistry 并创建 omp endpoint
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
+        owner_user_id="integration-test",
+        name="integration-omp",
+        target_umo="aiocqhttp:GroupMessage:10001",
+        provider="omp",
+    )
+
+    # 2. 创建 ProviderRegistry + OMP adapter
+    provider_reg = ProviderRegistry()
+    provider_reg.register(OmpProviderAdapter())
+    provider_reg.freeze()
+
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=provider_reg,
+    )
+
+    # 3. 发送合法 OMP payload
+    request_id = "integration-test-001"
+    response = await srv._process_request(
+        _make_auth_request(record.path, token),  # type: ignore[arg-type]
+        request_id,
+    )
+    body = json.loads(response.body)
+    assert response.status == 200, f"预期 200，得到 {response.status}: {body}"
+    assert body["code"] == 0
+    assert body["data"]["delivered"] is True
+    assert body["data"]["request_id"] == request_id
+    assert body["data"]["provider"] == "omp"
+    # retryable 字段在成功响应中也应有（由 _build_render_response 设置）
+    assert "retryable" in body["data"]
+
+
+@pytest.mark.asyncio
+async def test_integration_provider_unavailable_returns_500_retryable(tmp_path):
+    """真实 EndpointRegistry + 未注册 provider 应返回 500 retryable=true。"""
+    import json
+
+    from core.registry import EndpointRegistry
+
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
+        owner_user_id="int-unreg",
+        name="unreg",
+        target_umo="aiocqhttp:GroupMessage:10001",
+        provider="unregistered_provider",
+    )
+
+    # 使用空 ProviderRegistry（无任何 adapter）
+    empty_reg = ProviderRegistry()
+    empty_reg.freeze()
+
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=empty_reg,
+    )
+
+    response = await srv._process_request(
+        _make_auth_request(record.path, token),  # type: ignore[arg-type]
+        "int-unreg",
+    )
+    body = json.loads(response.body)
+    assert response.status == 500
+    assert body["code"] == 1
+    assert body["data"]["error"] == "provider_unavailable"
+    assert body["data"]["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_integration_error_response_includes_retryable(tmp_path):
+    """验证各种错误响应中均包含 retryable 字段且默认为 false。"""
+    import json
+
+    from core.registry import EndpointRegistry
+
+    registry = EndpointRegistry(tmp_path)
+    record, token1 = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
+        owner_user_id="int-err",
+        name="err-test",
+        target_umo="aiocqhttp:GroupMessage:10001",
+        provider="omp",
+    )
+
+    provider_reg = ProviderRegistry()
+    provider_reg.register(OmpProviderAdapter())
+    provider_reg.freeze()
+
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=provider_reg,
+    )
+
+    # 错误的 Content-Type 应返回 415，retryable=false
+    req = _make_auth_request(record.path, token1)
+    req.content_type = "text/plain"
+    response = await srv._process_request(req, "err-415")  # type: ignore[arg-type]
+    body = json.loads(response.body)
+    assert response.status == 415
+    assert body["data"]["retryable"] is False
+
+
+class _AuthRequest:
+    """携带合法 Authorization 和合法 OMP body 的请求 stub。"""
+
+    def __init__(self, path: str, token: str, body_bytes: bytes | None = None) -> None:
+        self.content_type = "application/json"
+        self.content_length = len(body_bytes) if body_bytes else 2
+        self.path = path
+        self.headers = {"Authorization": f"Bearer {token}"}
+        self._body = body_bytes or b'{"event": "omp.session_stop"}'
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+def _make_auth_request(path: str, token: str) -> _AuthRequest:
+    return _AuthRequest(path, token)

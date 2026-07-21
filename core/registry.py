@@ -659,6 +659,7 @@ class EndpointRegistry:
         name: str,
         target_umo: str,
         description: str | None = None,
+        provider: str = "omp",
     ) -> tuple[EndpointRecord, str]:
         token_plain = generate_token()
         token_hash_value = hash_token(self._server_secret, token_plain)
@@ -678,7 +679,7 @@ class EndpointRegistry:
             record = EndpointRecord(
                 name=name,
                 path=path,
-                provider="omp",
+                provider=provider,
                 token_hash=token_hash_value,
                 token_hash_algorithm=TOKEN_HASH_ALGORITHM,
                 owner_user_id=owner_user_id,
@@ -702,6 +703,7 @@ class EndpointRegistry:
         group_binding_mode: str,
         target_group_id: str | None,
         description: str | None = None,
+        provider: str = "omp",
     ) -> tuple[EndpointRecord, str, str]:
         request_id = generate_request_id()
         code = generate_verification_code()
@@ -724,7 +726,7 @@ class EndpointRegistry:
             record = EndpointRecord(
                 name=name,
                 path=path,
-                provider="omp",
+                provider=provider,
                 token_hash="",
                 token_hash_algorithm=TOKEN_HASH_ALGORITHM,
                 owner_user_id=owner_user_id,

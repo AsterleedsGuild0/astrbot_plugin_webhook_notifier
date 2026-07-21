@@ -20,6 +20,8 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context
 from astrbot_plugin_webhook_notifier.core.models import ServerConfig
+from astrbot_plugin_webhook_notifier.core.omp import OmpProviderAdapter
+from astrbot_plugin_webhook_notifier.core.providers import ProviderRegistry
 from astrbot_plugin_webhook_notifier.core.registry import EndpointRegistry
 from astrbot_plugin_webhook_notifier.core.server import WebhookServer
 from astrbot_plugin_webhook_notifier.main import WebhookNotifierPlugin
@@ -339,10 +341,14 @@ async def test_group_verify_then_private_rotate_enables_server_auth(plugin):
         is False
     )
 
+    server_provider_registry = ProviderRegistry()
+    server_provider_registry.register(OmpProviderAdapter())
+    server_provider_registry.freeze()
     server = WebhookServer(
         config=ServerConfig(),
         registry=registry,
         sender=SenderStub(),  # type: ignore[arg-type]
+        provider_registry=server_provider_registry,
     )
     pending_response = await server._process_request(
         WebhookRequest(record.path, code), "pending-credential"
