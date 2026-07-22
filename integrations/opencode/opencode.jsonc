@@ -1,0 +1,45 @@
+{
+  // OpenCode Client Plugin 示例配置
+  //
+  // 将此文件放置在 opencode.jsonc 配置目录下，或在已有配置中合并
+  // `plugin` 顶层键。Plugin 路径相对于声明此配置的 opencode.jsonc
+  // 所在目录解析。
+  //
+  // URL 与 Token 使用 {env:...} / {file:...} 插值，不在配置中
+  // 硬编码敏感信息。
+  //
+  // 插件加载后会自动读取配置，缺省 events 时启用所有三类事件。
+  //
+  // 参考文档：docs/opencode-integration.md
+
+  "plugin": [
+    [
+      "./integrations/opencode/webhook-notifier.ts",
+      {
+        // 必填：Webhook 服务端地址（支持环境变量插值）
+        "url": "{env:OPENCODE_WEBHOOK_URL}",
+
+        // 必填：Bearer Token。支持 {env:...} 环境变量和 {file:...} 文件读取。
+        // 推荐：{env:OPENCODE_WEBHOOK_TOKEN}
+        // 备选：{file:/etc/secrets/opencode-webhook-token}
+        "token": "{env:OPENCODE_WEBHOOK_TOKEN}",
+
+        // 可选：每次 HTTP 请求超时时间（毫秒），默认 10000
+        "timeoutMs": 5000,
+
+        // 可选：设为 false 可完全禁用此插件
+        "enabled": true,
+
+        // 可选：要监听的事件子集，缺省为全部三类
+        "events": [
+          "session_idle",
+          "session_error",
+          "permission_asked"
+        ],
+
+        // 可选：项目显示名称（当前不发送到服务端，预留）
+        "projectDisplayName": "示例项目"
+      }
+    ]
+  ]
+}

@@ -1,0 +1,1543 @@
+/**
+ * Bun native tests for the OpenCode Webhook Notifier Plugin.
+ *
+ * Black-box: mocks `@opencode-ai/plugin`, `fetch`, and timers.
+ * No heavy JS toolchain.
+ */
+
+import { beforeEach, afterEach, describe, expect, it, mock } from "bun:test";
+
+// ─── Import ──────────────────────────────────────────────────
+const mod = await import("./webhook-notifier.ts");
+const defaultModule = mod.default;
+
+import type {
+  Envelope,
+  OpenCodeEvent,
+  RawPluginOptions,
+  ResolvedConfig,
+  Hooks,
+} from "./webhook-notifier.ts";
+
+const {
+  _hashSessionRef,
+  _sanitiseName,
+  _deriveErrorCategory,
+  _derivePermissionCategory,
+  _resolveConfig,
+  _resolveInterpolation,
+  _buildEnvelope,
+  _processEvent,
+  _sendSingle,
+  _sendWithRetry,
+  _shouldRetry,
+  _backoffDelay,
+  _mapEventType,
+  _idleProcessing,
+  _normalizeWrappedEvent,
+  _enrichEvent,
+} = mod;
+
+// ─── Helpers ─────────────────────────────────────────────────
+
+function noopLog() {
+  return { warn: () => {}, error: () => {} };
+}
+
+function makeEvent(overrides: Partial<OpenCodeEvent> & { type: string }): OpenCodeEvent {
+  return {
+    sessionId: "test-session-001",
+    ...overrides,
+  };
+}
+
+function makeConfig(overrides?: Partial<RawPluginOptions>): RawPluginOptions {
+  return {
+    url: "https://example.com/webhook",
+    token: "test-token-123",
+    timeoutMs: 5000,
+    enabled: true,
+    events: ["session_idle", "session_error", "permission_asked"],
+    ...overrides,
+  };
+}
+
+/** Global fetch mock helper — reassigns globalThis.fetch for a test body. */
+let _originalFetch: typeof globalThis.fetch;
+
+beforeEach(() => {
+  _originalFetch = globalThis.fetch;
+  _idleProcessing.clear();
+});
+
+afterEach(() => {
+  globalThis.fetch = _originalFetch;
+});
+
+// ─── Tests ────────────────────────────────────────────────────
+
+describe("_resolveInterpolation", () => {
+  it("returns value as-is when not an interpolation pattern", () => {
+    expect(_resolveInterpolation("https://example.com/hook")).toBe("https://example.com/hook");
+  });
+
+  it("resolves {env:...} from process.env", () => {
+    process.env.TEST_WEBHOOK_URL = "https://env-resolved/hook";
+    expect(_resolveInterpolation("{env:TEST_WEBHOOK_URL}")).toBe("https://env-resolved/hook");
+    delete process.env.TEST_WEBHOOK_URL;
+  });
+
+  it("returns null for unresolvable {env:...}", () => {
+    expect(_resolveInterpolation("{env:MISSING_VAR_XXXX}")).toBeNull();
+  });
+});
+
+describe("_shouldRetry", () => {
+  it("retries network/timeout (no status)", () => {
+    expect(_shouldRetry({ ok: false })).toBeTrue();
+  });
+
+  it("retries 429", () => {
+    expect(_shouldRetry({ ok: false, status: 429 })).toBeTrue();
+  });
+
+  it("retries 5xx", () => {
+    expect(_shouldRetry({ ok: false, status: 500 })).toBeTrue();
+    expect(_shouldRetry({ ok: false, status: 502 })).toBeTrue();
+    expect(_shouldRetry({ ok: false, status: 503 })).toBeTrue();
+  });
+
+  it("does NOT retry 401 / 403 / 413", () => {
+    expect(_shouldRetry({ ok: false, status: 401 })).toBeFalse();
+    expect(_shouldRetry({ ok: false, status: 403 })).toBeFalse();
+    expect(_shouldRetry({ ok: false, status: 413 })).toBeFalse();
+  });
+
+  it("does NOT retry other 4xx", () => {
+    expect(_shouldRetry({ ok: false, status: 404 })).toBeFalse();
+    expect(_shouldRetry({ ok: false, status: 422 })).toBeFalse();
+  });
+
+  it("does NOT retry on success", () => {
+    expect(_shouldRetry({ ok: true, status: 200 })).toBeFalse();
+  });
+});
+
+describe("_backoffDelay", () => {
+  it("increases with attempt number", () => {
+    const d0 = _backoffDelay(0);
+    const d1 = _backoffDelay(1);
+    expect(d1).toBeGreaterThan(d0);
+  });
+
+  it("caps at MAX_BACKOFF_MS with jitter", () => {
+    const d = _backoffDelay(4);
+    // base: 400*16=6400, capped at 5000, +20% jitter → max 6000
+    expect(d).toBeLessThanOrEqual(6000);
+  });
+
+  it("respects bounded Retry-After", () => {
+    const d = _backoffDelay(0, "3");
+    expect(d).toBeCloseTo(3000, -2);
+  });
+
+  it("ignores over-large Retry-After (capped at MAX_BACKOFF_MS)", () => {
+    const d = _backoffDelay(0, "10");
+    expect(d).toBeLessThanOrEqual(5000);
+  });
+
+  it("parses Retry-After HTTP-date format", () => {
+    const future = new Date(Date.now() + 2000);
+    const httpDate = future.toUTCString();
+    const d = _backoffDelay(0, httpDate);
+    expect(d).toBeGreaterThan(0);
+    expect(d).toBeLessThanOrEqual(5000);
+  });
+
+  it("falls through to exponential backoff for invalid Retry-After", () => {
+    const d = _backoffDelay(0, "not-a-number");
+    expect(d).toBeGreaterThan(0);
+    expect(d).toBeLessThanOrEqual(6000);
+  });
+
+  it("fall through for Retry-After with unparseable value", () => {
+    const d = _backoffDelay(0, "abc");
+    expect(d).toBeGreaterThan(0);
+    expect(d).toBeLessThanOrEqual(6000);
+  });
+
+  it("fall through for Retry-After with negative numeric string", () => {
+    // "-5" may be parsed as year -5 in some engines, yielding 0
+    const d = _backoffDelay(0, "-5");
+    // Must not throw; result can be 0 or a positive delay
+    expect(typeof d).toBe("number");
+    expect(Number.isFinite(d)).toBeTrue();
+  });
+});
+
+describe("_mapEventType", () => {
+  it("maps session.status idle → opencode.session_idle", () => {
+    expect(_mapEventType(makeEvent({ type: "session.status", status: "idle" }))).toBe("opencode.session_idle");
+  });
+
+  it("maps session.idle → opencode.session_idle", () => {
+    expect(_mapEventType(makeEvent({ type: "session.idle" }))).toBe("opencode.session_idle");
+  });
+
+  it("maps session.error → opencode.session_error", () => {
+    expect(_mapEventType(makeEvent({ type: "session.error" }))).toBe("opencode.session_error");
+  });
+
+  it("maps permission.updated → opencode.permission_asked", () => {
+    expect(_mapEventType(makeEvent({ type: "permission.updated" }))).toBe("opencode.permission_asked");
+  });
+
+  it("returns null for session.status busy (state only)", () => {
+    expect(_mapEventType(makeEvent({ type: "session.status", status: "busy" }))).toBeNull();
+  });
+
+  it("returns null for non-target events", () => {
+    expect(_mapEventType(makeEvent({ type: "command" }))).toBeNull();
+    expect(_mapEventType(makeEvent({ type: "tool" }))).toBeNull();
+    expect(_mapEventType(makeEvent({ type: "message" }))).toBeNull();
+    expect(_mapEventType(makeEvent({ type: "diff" }))).toBeNull();
+    expect(_mapEventType(makeEvent({ type: "todo" }))).toBeNull();
+  });
+});
+
+describe("_hashSessionRef", () => {
+  it("produces a deterministic 32-char hex string", async () => {
+    const ref = await _hashSessionRef("session-abc");
+    expect(ref).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("same input produces same hash", async () => {
+    const [a, b] = await Promise.all([_hashSessionRef("same-id"), _hashSessionRef("same-id")]);
+    expect(a).toBe(b);
+  });
+
+  it("different inputs produce different hashes", async () => {
+    const [a, b] = await Promise.all([_hashSessionRef("id-1"), _hashSessionRef("id-2")]);
+    expect(a).not.toBe(b);
+  });
+
+  it("is not trivially reversible", async () => {
+    const ref = await _hashSessionRef("secret-session");
+    expect(ref).not.toContain("secret");
+    expect(ref).not.toContain("session");
+  });
+});
+
+describe("_sanitiseName", () => {
+  it("returns undefined for null/undefined/empty", () => {
+    expect(_sanitiseName(null)).toBeUndefined();
+    expect(_sanitiseName(undefined)).toBeUndefined();
+    expect(_sanitiseName("")).toBeUndefined();
+    expect(_sanitiseName("  ")).toBeUndefined();
+  });
+
+  it("trims whitespace", () => {
+    expect(_sanitiseName("  hello  ")).toBe("hello");
+  });
+
+  it("removes dangerous Unicode (bidi, zero-width)", () => {
+    expect(_sanitiseName("a\u202eb\u200bc")).toBe("abc");
+  });
+
+  it("normalises control characters to space", () => {
+    expect(_sanitiseName("a\nb\tc")).toBe("a b c");
+  });
+
+  it("collapses multiple spaces", () => {
+    expect(_sanitiseName("a    b")).toBe("a b");
+  });
+
+  it("truncates at 200 chars", () => {
+    const long = "a".repeat(300);
+    const r = _sanitiseName(long);
+    expect(r).toBeDefined();
+    expect(r!.length).toBeLessThanOrEqual(200);
+  });
+
+  it("preserves normal Unicode and HTML chars (server escapes)", () => {
+    expect(_sanitiseName("<b>Hello</b>")).toBe("<b>Hello</b>");
+    expect(_sanitiseName("你好🚀")).toBe("你好🚀");
+  });
+
+  it("returns undefined if only dangerous chars", () => {
+    expect(_sanitiseName("\u202e\u200b")).toBeUndefined();
+  });
+});
+
+describe("_deriveErrorCategory", () => {
+  it("derives from error.name", () => {
+    const r = _deriveErrorCategory({ name: "TimeoutError" });
+    expect(r.category).toBe("timeouterror");
+    expect(r.code).toBeUndefined();
+  });
+
+  it("includes status as code", () => {
+    const r = _deriveErrorCategory({ name: "APIError", status: 500 });
+    expect(r.category).toBe("apierror");
+    expect(r.code).toBe("500");
+  });
+
+  it("falls back to 'unknown' for missing name", () => {
+    const r = _deriveErrorCategory({});
+    expect(r.category).toBe("unknown");
+  });
+
+  it("never reads message or responseBody", () => {
+    const r = _deriveErrorCategory({
+      name: "Error",
+      message: "secret-token=abc123",
+      responseBody: "very sensitive",
+    } as any);
+    expect(r.category).toBe("error");
+    expect(r.code).toBeUndefined();
+    expect(JSON.stringify(r)).not.toContain("secret");
+    expect(JSON.stringify(r)).not.toContain("sensitive");
+  });
+});
+
+describe("_derivePermissionCategory", () => {
+  it("derives from permission.type", () => {
+    expect(_derivePermissionCategory({ type: "file_access" })).toBe("file_access");
+  });
+
+  it("falls back to 'unknown'", () => {
+    expect(_derivePermissionCategory({})).toBe("unknown");
+  });
+
+  it("never reads title or description", () => {
+    const r = _derivePermissionCategory({
+      type: "command",
+      title: "rm -rf /",
+      description: "delete everything",
+    } as any);
+    expect(r).toBe("command");
+  });
+});
+
+describe("_resolveConfig", () => {
+  it("returns null for null/undefined", () => {
+    expect(_resolveConfig(undefined as any, noopLog())).toBeNull();
+    expect(_resolveConfig(null as any, noopLog())).toBeNull();
+  });
+
+  it("returns null when enabled is false", () => {
+    expect(_resolveConfig(makeConfig({ enabled: false }), noopLog())).toBeNull();
+  });
+
+  it("returns null for missing url", () => {
+    expect(_resolveConfig(makeConfig({ url: "" }), noopLog())).toBeNull();
+  });
+
+  it("returns null for missing token", () => {
+    expect(_resolveConfig(makeConfig({ token: "" }), noopLog())).toBeNull();
+  });
+
+  it("returns valid config with defaults", () => {
+    const c = _resolveConfig(makeConfig(), noopLog());
+    expect(c).not.toBeNull();
+    expect(c!.url).toBe("https://example.com/webhook");
+    expect(c!.token).toBe("test-token-123");
+    expect(c!.timeoutMs).toBe(5000);
+    expect(c!.enabled).toBeTrue();
+    expect(c!.events.has("session_idle")).toBeTrue();
+  });
+
+  it("defaults events to all three when unspecified", () => {
+    const c = _resolveConfig(makeConfig({ events: undefined }), noopLog());
+    expect(c).not.toBeNull();
+    expect(c!.events.has("session_idle")).toBeTrue();
+    expect(c!.events.has("session_error")).toBeTrue();
+    expect(c!.events.has("permission_asked")).toBeTrue();
+  });
+
+  it("resolves {env:...} token from environment (example config pattern)", () => {
+    process.env.OPENCODE_WEBHOOK_TOKEN = "env-resolved-secret";
+    const c = _resolveConfig(
+      makeConfig({ token: "{env:OPENCODE_WEBHOOK_TOKEN}" }),
+      noopLog(),
+    );
+    expect(c).not.toBeNull();
+    expect(c!.token).toBe("env-resolved-secret");
+    delete process.env.OPENCODE_WEBHOOK_TOKEN;
+  });
+
+  it("does not silently enable on missing env var token", () => {
+    delete process.env.OPENCODE_WEBHOOK_TOKEN;
+    const c = _resolveConfig(
+      makeConfig({ token: "{env:OPENCODE_WEBHOOK_TOKEN}" }),
+      noopLog(),
+    );
+    expect(c).toBeNull();
+  });
+});
+
+describe("_buildEnvelope", () => {
+  it("builds valid envelope with required fields", async () => {
+    const e = await _buildEnvelope(
+      makeEvent({ type: "session.idle" }),
+      "evt-001",
+    );
+    expect(e).not.toBeNull();
+    expect(e!.id).toBe("evt-001");
+    expect(e!.event).toBe("opencode.session_idle");
+    expect(e!.version).toBe(1);
+    expect(e!.emittedAt).toBeTruthy();
+    expect(e!.session.ref).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("includes optional agent/model/durationMs", async () => {
+    const e = await _buildEnvelope(
+      makeEvent({ type: "session.idle", agent: "my-agent", model: "gpt-5", durationMs: 15000 }),
+      "evt-002",
+    );
+    expect(e!.agent).toBe("my-agent");
+    expect(e!.model).toBe("gpt-5");
+    expect(e!.durationMs).toBe(15000);
+  });
+
+  it("includes sanitised session.name", async () => {
+    const e = await _buildEnvelope(
+      makeEvent({ type: "session.idle", session: { name: "  My Task  " } }),
+      "evt-003",
+    );
+    expect(e!.session.name).toBe("My Task");
+  });
+
+  it("omits session.name when empty", async () => {
+    const e = await _buildEnvelope(
+      makeEvent({ type: "session.idle", session: { name: undefined } }),
+      "evt-004",
+    );
+    expect(e!.session.name).toBeUndefined();
+  });
+
+  it("includes permission.category for permission_asked", async () => {
+    const e = await _buildEnvelope(
+      makeEvent({ type: "permission.updated", permission: { type: "file_write" } }),
+      "evt-005",
+    );
+    expect(e!.permission).toBeDefined();
+    expect(e!.permission!.category).toBe("file_write");
+  });
+
+  it("includes error.category for session_error", async () => {
+    const e = await _buildEnvelope(
+      makeEvent({ type: "session.error", error: { name: "TimeoutError", status: 408 } }),
+      "evt-006",
+    );
+    expect(e!.error).toBeDefined();
+    expect(e!.error!.category).toBe("timeouterror");
+    expect(e!.error!.code).toBe("408");
+  });
+});
+
+describe("_processEvent — state machine", () => {
+  const config = _resolveConfig(makeConfig(), noopLog())!;
+
+  it("busy → idle sends session_idle once", async () => {
+    const busy = makeEvent({ type: "session.status", status: "busy", sessionId: "s1" });
+    const idle = makeEvent({ type: "session.status", status: "idle", sessionId: "s1" });
+
+    expect(await _processEvent(busy, config)).toBeNull();
+    const env = await _processEvent(idle, config);
+    expect(env).not.toBeNull();
+    expect(env!.event).toBe("opencode.session_idle");
+
+    // second idle → dedup
+    expect(await _processEvent(idle, config)).toBeNull();
+  });
+
+  it("initial idle (no prior busy) is ignored", async () => {
+    expect(await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: "s2" }),
+      config,
+    )).toBeNull();
+  });
+
+  it("deprecated session.idle after busy sends and dedup", async () => {
+    const busy = makeEvent({ type: "session.status", status: "busy", sessionId: "s3" });
+    const legacyIdle = makeEvent({ type: "session.idle", sessionId: "s3" });
+
+    await _processEvent(busy, config);
+    expect(await _processEvent(legacyIdle, config)).not.toBeNull();
+    expect(await _processEvent(legacyIdle, config)).toBeNull();
+  });
+
+  it("status idle + legacy idle dedup within same cycle", async () => {
+    const busy = makeEvent({ type: "session.status", status: "busy", sessionId: "s4" });
+    const statusIdle = makeEvent({ type: "session.status", status: "idle", sessionId: "s4" });
+    const legacyIdle = makeEvent({ type: "session.idle", sessionId: "s4" });
+
+    await _processEvent(busy, config);
+    expect(await _processEvent(statusIdle, config)).not.toBeNull();
+    expect(await _processEvent(legacyIdle, config)).toBeNull();
+  });
+
+  it("error sends immediately and suppresses subsequent idle", async () => {
+    const busy = makeEvent({ type: "session.status", status: "busy", sessionId: "s5" });
+    const err = makeEvent({ type: "session.error", sessionId: "s5", error: { name: "ExecError" } });
+    const idle = makeEvent({ type: "session.status", status: "idle", sessionId: "s5" });
+
+    await _processEvent(busy, config);
+    const errEnv = await _processEvent(err, config);
+    expect(errEnv).not.toBeNull();
+    expect(errEnv!.event).toBe("opencode.session_error");
+
+    // Idle after error → suppressed
+    expect(await _processEvent(idle, config)).toBeNull();
+  });
+
+  it("new busy starts new cycle, clearing suppression", async () => {
+    const busy1 = makeEvent({ type: "session.status", status: "busy", sessionId: "s6" });
+    const err = makeEvent({ type: "session.error", sessionId: "s6", error: { name: "Err" } });
+    const idle1 = makeEvent({ type: "session.status", status: "idle", sessionId: "s6" });
+    const busy2 = makeEvent({ type: "session.status", status: "busy", sessionId: "s6" });
+    const idle2 = makeEvent({ type: "session.status", status: "idle", sessionId: "s6" });
+
+    await _processEvent(busy1, config);
+    await _processEvent(err, config);
+    expect(await _processEvent(idle1, config)).toBeNull();
+
+    await _processEvent(busy2, config);
+    const env = await _processEvent(idle2, config);
+    expect(env).not.toBeNull();
+    expect(env!.event).toBe("opencode.session_idle");
+  });
+
+  it("permission.updated sends regardless of state", async () => {
+    const env = await _processEvent(
+      makeEvent({ type: "permission.updated", sessionId: "s7", permission: { type: "command" } }),
+      config,
+    );
+    expect(env).not.toBeNull();
+    expect(env!.event).toBe("opencode.permission_asked");
+  });
+
+  it("different sessions are isolated", async () => {
+    const aBusy = makeEvent({ type: "session.status", status: "busy", sessionId: "A" });
+    const aIdle = makeEvent({ type: "session.status", status: "idle", sessionId: "A" });
+    const bIdle = makeEvent({ type: "session.status", status: "idle", sessionId: "B" });
+
+    await _processEvent(aBusy, config);
+    expect(await _processEvent(bIdle, config)).toBeNull();
+    expect(await _processEvent(aIdle, config)).not.toBeNull();
+  });
+
+  it("non-target events are ignored", async () => {
+    for (const t of ["command", "tool", "message", "diff", "todo"]) {
+      expect(await _processEvent(makeEvent({ type: t }), config)).toBeNull();
+    }
+  });
+
+  it("event filter suppresses filtered event types", async () => {
+    const cfg = _resolveConfig(makeConfig({ events: ["session_idle"] }), noopLog())!;
+    const busy = makeEvent({ type: "session.status", status: "busy", sessionId: "s8" });
+    const errEvt = makeEvent({ type: "session.error", sessionId: "s8", error: { name: "Err" } });
+    const permEvt = makeEvent({ type: "permission.updated", sessionId: "s8", permission: { type: "cmd" } });
+
+    await _processEvent(busy, cfg);
+    expect(await _processEvent(errEvt, cfg)).toBeNull();
+    expect(await _processEvent(permEvt, cfg)).toBeNull();
+  });
+
+  it("errors without prior busy still send", async () => {
+    const env = await _processEvent(
+      makeEvent({ type: "session.error", sessionId: "s9", error: { name: "StartupError" } }),
+      config,
+    );
+    expect(env).not.toBeNull();
+    expect(env!.event).toBe("opencode.session_error");
+  });
+
+  it("concurrent status idle + legacy idle only send one envelope (race)", async () => {
+    const sid = "race-s1";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid }),
+      config,
+    );
+
+    const statusIdle = makeEvent({ type: "session.status", status: "idle", sessionId: sid });
+    const legacyIdle = makeEvent({ type: "session.idle", sessionId: sid });
+
+    // Both dispatched before either completes — _hashSessionRef is async
+    // so both calls will be in-flight simultaneously.
+    const [r1, r2] = await Promise.all([
+      _processEvent(statusIdle, config),
+      _processEvent(legacyIdle, config),
+    ]);
+
+    const sent = [r1, r2].filter((r) => r !== null);
+    expect(sent.length).toBe(1);
+    if (sent[0]) {
+      expect(sent[0].event).toBe("opencode.session_idle");
+    }
+  });
+
+  it("concurrent same-type idle events only send one envelope (race)", async () => {
+    const sid = "race-s2";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid }),
+      config,
+    );
+
+    const idle = makeEvent({ type: "session.status", status: "idle", sessionId: sid });
+
+    const [r1, r2] = await Promise.all([
+      _processEvent(idle, config),
+      _processEvent(idle, config),
+    ]);
+
+    const sent = [r1, r2].filter((r) => r !== null);
+    expect(sent.length).toBe(1);
+  });
+
+  it("concurrent idle for different sessions both send", async () => {
+    const sidA = "race-sA";
+    const sidB = "race-sB";
+    await Promise.all([
+      _processEvent(
+        makeEvent({ type: "session.status", status: "busy", sessionId: sidA }),
+        config,
+      ),
+      _processEvent(
+        makeEvent({ type: "session.status", status: "busy", sessionId: sidB }),
+        config,
+      ),
+    ]);
+
+    const idleA = makeEvent({ type: "session.status", status: "idle", sessionId: sidA });
+    const idleB = makeEvent({ type: "session.status", status: "idle", sessionId: sidB });
+
+    const [rA, rB] = await Promise.all([
+      _processEvent(idleA, config),
+      _processEvent(idleB, config),
+    ]);
+
+    expect(rA).not.toBeNull();
+    expect(rB).not.toBeNull();
+  });
+
+  it("error suppression not broken by concurrent idle guard", async () => {
+    const sid = "race-s3";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid }),
+      config,
+    );
+
+    // Error should still send and suppress subsequent idle
+    const errEnv = await _processEvent(
+      makeEvent({ type: "session.error", sessionId: sid, error: { name: "Err" } }),
+      config,
+    );
+    expect(errEnv).not.toBeNull();
+    expect(errEnv!.event).toBe("opencode.session_error");
+
+    // Idle suppressed by error, even concurrently
+    const [idleR] = await Promise.all([
+      _processEvent(
+        makeEvent({ type: "session.status", status: "idle", sessionId: sid }),
+        config,
+      ),
+    ]);
+    expect(idleR).toBeNull();
+  });
+
+  it("new busy cycle works after concurrent idle guard claimed", async () => {
+    const sid = "race-s4";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid }),
+      config,
+    );
+
+    // Claim and release from idleProcessing via processing one idle
+    const [r1] = await Promise.all([
+      _processEvent(
+        makeEvent({ type: "session.status", status: "idle", sessionId: sid }),
+        config,
+      ),
+    ]);
+    expect(r1).not.toBeNull();
+
+    // New busy starts new cycle
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid }),
+      config,
+    );
+
+    // Next idle should send again
+    const r2 = await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid }),
+      config,
+    );
+    expect(r2).not.toBeNull();
+  });
+});
+
+describe("HTTP send — _sendSingle", () => {
+  it("sends correct payload and headers", async () => {
+    let captured: any = null;
+    globalThis.fetch = mock(async (url: string, opts: any) => {
+      captured = { url, headers: opts.headers, body: opts.body, method: opts.method };
+      return new Response("ok", { status: 200 });
+    });
+
+    const envelope: Envelope = {
+      id: "test-id",
+      event: "opencode.session_idle",
+      version: 1,
+      emittedAt: "2026-07-22T12:00:00.000Z",
+      session: { ref: "abcdef1234567890abcdef1234567890" },
+    };
+
+    const result = await _sendSingle(
+      "https://hook.example.com/wh",
+      "tok_abc",
+      envelope,
+      5000,
+      1,
+      noopLog(),
+    );
+
+    expect(result.ok).toBeTrue();
+    expect(captured).not.toBeNull();
+    expect(captured!.url).toBe("https://hook.example.com/wh");
+    expect(captured!.method).toBe("POST");
+    expect(captured!.headers["Content-Type"]).toBe("application/json");
+    expect(captured!.headers["X-OpenCode-Event"]).toBe("opencode.session_idle");
+    expect(captured!.headers["Authorization"]).toBe("Bearer tok_abc");
+
+    const body = JSON.parse(captured!.body);
+    expect(body.id).toBe("test-id");
+    expect(body.event).toBe("opencode.session_idle");
+    expect(body.version).toBe(1);
+    expect(body.session.ref).toBe("abcdef1234567890abcdef1234567890");
+  });
+
+  it("extracts Retry-After header from 429 response", async () => {
+    globalThis.fetch = mock(async () => {
+      return new Response("rate limited", {
+        status: 429,
+        headers: { "Retry-After": "5" },
+      });
+    });
+
+    const envelope: Envelope = {
+      id: "ra-test-1",
+      event: "opencode.session_idle",
+      version: 1,
+      emittedAt: "2026-07-22T12:00:00.000Z",
+      session: { ref: "a".repeat(32) },
+    };
+
+    const result = await _sendSingle(
+      "https://hook.example.com/wh",
+      "tok",
+      envelope,
+      5000,
+      1,
+      noopLog(),
+    );
+    expect(result.ok).toBeFalse();
+    expect(result.status).toBe(429);
+    expect(result.retryAfter).toBe("5");
+  });
+
+  it("extracts Retry-After HTTP-date from 503 response", async () => {
+    const future = new Date(Date.now() + 3000);
+    const httpDate = future.toUTCString();
+    globalThis.fetch = mock(async () => {
+      return new Response("retry later", {
+        status: 503,
+        headers: { "Retry-After": httpDate },
+      });
+    });
+
+    const envelope: Envelope = {
+      id: "ra-test-2",
+      event: "opencode.session_idle",
+      version: 1,
+      emittedAt: "2026-07-22T12:00:00.000Z",
+      session: { ref: "a".repeat(32) },
+    };
+
+    const result = await _sendSingle(
+      "https://hook.example.com/wh",
+      "tok",
+      envelope,
+      5000,
+      1,
+      noopLog(),
+    );
+    expect(result.ok).toBeFalse();
+    expect(result.status).toBe(503);
+    expect(result.retryAfter).toBe(httpDate);
+  });
+
+  it("does not include retryAfter for 200 responses", async () => {
+    globalThis.fetch = mock(async () => {
+      return new Response("ok", { status: 200 });
+    });
+
+    const envelope: Envelope = {
+      id: "ra-test-3",
+      event: "opencode.session_idle",
+      version: 1,
+      emittedAt: "2026-07-22T12:00:00.000Z",
+      session: { ref: "a".repeat(32) },
+    };
+
+    const result = await _sendSingle(
+      "https://hook.example.com/wh",
+      "tok",
+      envelope,
+      5000,
+      1,
+      noopLog(),
+    );
+    expect(result.ok).toBeTrue();
+    expect(result.retryAfter).toBeUndefined();
+  });
+});
+
+describe("_sendWithRetry — retry behaviour", () => {
+  let config: ResolvedConfig;
+
+  beforeEach(() => {
+    config = _resolveConfig(makeConfig(), noopLog())!;
+  });
+
+  function makeEnv(overrides?: Partial<Envelope>): Envelope {
+    return {
+      id: "evt-retry",
+      event: "opencode.session_idle",
+      version: 1,
+      emittedAt: "2026-07-22T12:00:00.000Z",
+      session: { ref: "a".repeat(32) },
+      ...overrides,
+    };
+  }
+
+  it("succeeds on first attempt", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      return new Response("ok", { status: 200 });
+    });
+
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(1);
+  });
+
+  it("retries on 500 up to 3 total attempts", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      return new Response("error", { status: 500 });
+    });
+
+    await _sendWithRetry(makeEnv({ event: "opencode.session_error" }), config, noopLog());
+    expect(callCount).toBe(3);
+  });
+
+  it("retries on network error up to 3 total attempts", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      throw new TypeError("fetch failed");
+    });
+
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(3);
+  });
+
+  it("does NOT retry on 401", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      return new Response("unauthorized", { status: 401 });
+    });
+
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(1);
+  });
+
+  it("does NOT retry on 403", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      return new Response("forbidden", { status: 403 });
+    });
+
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(1);
+  });
+
+  it("does NOT retry on 413", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      return new Response("too large", { status: 413 });
+    });
+
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(1);
+  });
+
+  it("retries on 429 with backoff", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      return new Response("rate limited", { status: 429 });
+    });
+
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(3);
+  });
+
+  it("429 with Retry-After header passes through to backoff", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      // Use Retry-After: 0 which is valid but minimal for fast test
+      if (callCount < 3) {
+        return new Response("rate limited", {
+          status: 429,
+          headers: { "Retry-After": "1" },
+        });
+      }
+      return new Response("ok", { status: 200 });
+    });
+
+    // This should retry with Retry-After-affected backoff and eventually succeed
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(3);
+  });
+
+  it("503 with Retry-After HTTP-date header passes through to backoff", async () => {
+    const future = new Date(Date.now() + 1000);
+    const httpDate = future.toUTCString();
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      if (callCount < 3) {
+        return new Response("retry later", {
+          status: 503,
+          headers: { "Retry-After": httpDate },
+        });
+      }
+      return new Response("ok", { status: 200 });
+    });
+
+    await _sendWithRetry(makeEnv(), config, noopLog());
+    expect(callCount).toBe(3);
+  });
+});
+
+// ─── Privacy: no sensitive data in logs ─────────────────────
+
+describe("_idleProcessing — concurrent idle guard", () => {
+  it("is a Set instance", () => {
+    expect(_idleProcessing).toBeInstanceOf(Set);
+  });
+
+  it("is initially empty before tests", () => {
+    expect(_idleProcessing.size).toBe(0);
+  });
+});
+
+describe("privacy — no sensitive data in payloads or derivation", () => {
+  it("_buildEnvelope does not include raw sessionId", async () => {
+    const envelope = await _buildEnvelope(
+      makeEvent({ type: "session.idle", sessionId: "super-secret-raw-id" }),
+      "evt-p1",
+    );
+    const json = JSON.stringify(envelope);
+    expect(json).not.toContain("super-secret-raw-id");
+    expect(envelope!.session.ref).not.toBe("super-secret-raw-id");
+  });
+
+  it("_hashSessionRef does not leak raw ID", async () => {
+    const ref = await _hashSessionRef("secret-raw-session");
+    expect(ref).not.toContain("secret");
+    expect(ref).not.toContain("raw");
+    expect(ref).not.toContain("session");
+  });
+
+  it("error category derivation does not include raw message", () => {
+    const r = _deriveErrorCategory({
+      name: "Error",
+      message: "Connection to db://prod-db:5432 failed",
+    } as any);
+    expect(JSON.stringify(r)).not.toContain("prod-db");
+    expect(JSON.stringify(r)).not.toContain("5432");
+  });
+
+  it("permission category does not include title/description", () => {
+    const r = _derivePermissionCategory({
+      type: "file_access",
+      title: "/etc/shadow",
+    } as any);
+    expect(r).not.toContain("shadow");
+    expect(r).toBe("file_access");
+  });
+});
+
+// ─── Cross-boundary payload structure check ─────────────────
+
+describe("envelope structure — compatible with Python OpenCodeProviderAdapter", () => {
+  it("produces correct top-level fields for session_idle", async () => {
+    const envelope = await _buildEnvelope(
+      makeEvent({
+        type: "session.idle",
+        session: { name: "My Session" },
+        agent: "test-agent",
+        model: "test-model",
+        durationMs: 1234,
+      }),
+      "evt-xb-1",
+    );
+
+    expect(envelope).toMatchObject({
+      id: "evt-xb-1",
+      event: "opencode.session_idle",
+      version: 1,
+      session: { name: "My Session", ref: expect.stringMatching(/^[0-9a-f]{32}$/) },
+      agent: "test-agent",
+      model: "test-model",
+      durationMs: 1234,
+    });
+  });
+
+  it("permission envelope matches Python schema", async () => {
+    const envelope = await _buildEnvelope(
+      makeEvent({ type: "permission.updated", permission: { type: "file_access" } }),
+      "evt-xb-2",
+    );
+
+    expect(envelope).toMatchObject({
+      id: "evt-xb-2",
+      event: "opencode.permission_asked",
+      version: 1,
+      permission: { category: "file_access" },
+      session: { ref: expect.any(String) },
+    });
+  });
+
+  it("error envelope matches Python schema", async () => {
+    const envelope = await _buildEnvelope(
+      makeEvent({ type: "session.error", error: { name: "APIError", status: 500 } }),
+      "evt-xb-3",
+    );
+
+    expect(envelope).toMatchObject({
+      id: "evt-xb-3",
+      event: "opencode.session_error",
+      version: 1,
+      error: { category: "apierror", code: "500" },
+      session: { ref: expect.any(String) },
+    });
+  });
+
+  it("does not include forbidden top-level fields", async () => {
+    const envelope = await _buildEnvelope(
+      makeEvent({ type: "session.idle" }),
+      "evt-xb-4",
+    );
+
+    const keys = Object.keys(envelope!);
+    expect(keys).not.toContain("cwd");
+    expect(keys).not.toContain("project");
+    expect(keys).not.toContain("raw");
+    expect(keys).not.toContain("messages");
+    expect(keys).not.toContain("tool");
+    expect(keys).not.toContain("diff");
+  });
+});
+
+// ─── Black-box: V1 Plugin loader path ───────────────────────
+
+describe("PluginModule — default export shape", () => {
+  it("has id and server properties", () => {
+    expect(defaultModule).toHaveProperty("id");
+    expect(defaultModule).toHaveProperty("server");
+  });
+
+  it("server is a function (Plugin signature)", () => {
+    expect(typeof defaultModule.server).toBe("function");
+  });
+
+  it("has no tui property (file plugin)", () => {
+    expect(defaultModule).not.toHaveProperty("tui");
+  });
+
+  it("id is 'webhook-notifier'", () => {
+    expect(defaultModule.id).toBe("webhook-notifier");
+  });
+});
+
+describe("Server — V1 loader integration path", () => {
+  const mockInput = {
+    client: {
+      session: {
+        get: async () => ({ data: { title: "My Session" } }),
+      },
+    },
+  };
+
+  beforeEach(() => {
+    globalThis.fetch = mock((url: string, opts: any) => {
+      return new Response("ok", { status: 200 });
+    });
+  });
+
+  // afterEach from the outer scope restores globalThis.fetch
+
+  it("invalid config (empty) returns empty hooks, sends nothing", async () => {
+    const hooks = await defaultModule.server(mockInput as any, {});
+    expect(hooks).toEqual({});
+  });
+
+  it("invalid config (missing url) returns empty hooks", async () => {
+    const hooks = await defaultModule.server(
+      mockInput as any,
+      makeConfig({ url: "" }),
+    );
+    expect(hooks).toEqual({});
+  });
+
+  it("invalid config (missing token) returns empty hooks", async () => {
+    const hooks = await defaultModule.server(
+      mockInput as any,
+      makeConfig({ token: "" }),
+    );
+    expect(hooks).toEqual({});
+  });
+
+  it("valid config returns hooks with event function", async () => {
+    const hooks = await defaultModule.server(
+      mockInput as any,
+      makeConfig(),
+    );
+    expect(hooks).toHaveProperty("event");
+    expect(typeof hooks.event).toBe("function");
+  });
+
+  it("session.status busy→idle sends session_idle via official wrapper", async () => {
+    const hooks = await defaultModule.server(
+      mockInput as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "bb-s1", status: { type: "busy" } } },
+    });
+    await hooks.event!({
+      event: { id: "e2", type: "session.status", properties: { sessionID: "bb-s1", status: { type: "idle" } } },
+    });
+
+    // fetch should have been called once (busy→idle transition)
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.event).toBe("opencode.session_idle");
+    expect(body.session.ref).toMatch(/^[0-9a-f]{32}$/);
+    // Session name enriched from client.session.get
+    expect(body.session.name).toBe("My Session");
+  });
+
+  it("session.status busy→idle with legacy string status via wrapper", async () => {
+    // Also clears any prior state from "bb-s2" test
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "bb-s2", status: "busy" } },
+    });
+    await hooks.event!({
+      event: { id: "e2", type: "session.status", properties: { sessionID: "bb-s2", status: "idle" } },
+    });
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.event).toBe("opencode.session_idle");
+  });
+
+  it("session.idle (legacy) sends session_idle via official wrapper", async () => {
+    const hooks = await defaultModule.server(
+      mockInput as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "bb-s3", status: { type: "busy" } } },
+    });
+    await hooks.event!({
+      event: { id: "e2", type: "session.idle", properties: { sessionID: "bb-s3" } },
+    });
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.event).toBe("opencode.session_idle");
+    // Enriched session name from client.session.get
+    expect(body.session.name).toBe("My Session");
+  });
+
+  it("session.error sends session_error via official wrapper", async () => {
+    const hooks = await defaultModule.server(
+      mockInput as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: {
+        id: "e1",
+        type: "session.error",
+        properties: {
+          sessionID: "bb-s4",
+          error: { name: "TestError", status: 500 },
+        },
+      },
+    });
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.event).toBe("opencode.session_error");
+    expect(body.error.category).toBe("testerror");
+    expect(body.error.code).toBe("500");
+  });
+
+  it("permission.updated sends permission_asked via official wrapper", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: {
+        id: "e1",
+        type: "permission.updated",
+        properties: { sessionID: "bb-s5", type: "file_access" },
+      },
+    });
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.event).toBe("opencode.permission_asked");
+    expect(body.permission.category).toBe("file_access");
+  });
+
+  it("unrecognized event types are silently ignored", async () => {
+    const hooks = await defaultModule.server(
+      mockInput as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: { id: "e1", type: "command", properties: {} },
+    });
+    await hooks.event!({
+      event: { id: "e2", type: "tool", properties: {} },
+    });
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(0);
+  });
+
+  it("enrichment failure does not block event sending", async () => {
+    const brokenInput = {
+      client: {
+        session: {
+          get: async () => { throw new Error("API unavailable"); },
+        },
+      },
+    };
+
+    const hooks = await defaultModule.server(brokenInput as any, makeConfig());
+
+    await hooks.event!({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "bb-s6", status: { type: "busy" } } },
+    });
+    await hooks.event!({
+      event: { id: "e2", type: "session.status", properties: { sessionID: "bb-s6", status: { type: "idle" } } },
+    });
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.event).toBe("opencode.session_idle");
+    // No session name since enrichment failed
+    expect(body.session.name).toBeUndefined();
+  });
+
+  it("empty properties object is handled safely", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+
+    // session.status without status field should be ignored
+    await hooks.event!({
+      event: { id: "e1", type: "session.status", properties: {} },
+    });
+    expect((globalThis.fetch as any).mock.calls.length).toBe(0);
+  });
+
+  it("server-level concurrent idle guard works through wrapper", async () => {
+    // Create a new server instance with a fresh fetch counter
+    let callCount = 0;
+    const freshFetch = mock((url: string, opts: any) => {
+      callCount++;
+      return new Response("ok", { status: 200 });
+    });
+    globalThis.fetch = freshFetch;
+
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "bb-s7", status: { type: "busy" } } },
+    });
+
+    // Reset counter
+    callCount = 0;
+
+    const [r1, r2] = await Promise.all([
+      hooks.event!({ event: { id: "e2", type: "session.status", properties: { sessionID: "bb-s7", status: { type: "idle" } } } }),
+      hooks.event!({ event: { id: "e3", type: "session.idle", properties: { sessionID: "bb-s7" } } }),
+    ]);
+
+    // Only one webhook call for concurrent idle
+    expect(callCount).toBe(1);
+  });
+
+  it("different sessions are isolated through the server wrapper", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+
+    // Busy session A only
+    await hooks.event!({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "bb-A", status: { type: "busy" } } },
+    });
+    // Idle for B (no prior busy) should be ignored
+    await hooks.event!({
+      event: { id: "e2", type: "session.status", properties: { sessionID: "bb-B", status: { type: "idle" } } },
+    });
+    // Idle for A should send
+    await hooks.event!({
+      event: { id: "e3", type: "session.status", properties: { sessionID: "bb-A", status: { type: "idle" } } },
+    });
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+  });
+});
+
+describe("_normalizeWrappedEvent — wrapper event mapping", () => {
+  it("session.status with object status maps correctly", () => {
+    const result = _normalizeWrappedEvent({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "s1", status: { type: "busy" } } },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.type).toBe("session.status");
+    expect(result!.sessionId).toBe("s1");
+    expect(result!.status).toBe("busy");
+  });
+
+  it("session.status with legacy string status maps correctly", () => {
+    const result = _normalizeWrappedEvent({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "s1", status: "idle" } },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.type).toBe("session.status");
+    expect(result!.status).toBe("idle");
+  });
+
+  it("session.status without status field returns null", () => {
+    const result = _normalizeWrappedEvent({
+      event: { id: "e1", type: "session.status", properties: { sessionID: "s1" } },
+    });
+    expect(result).toBeNull();
+  });
+
+  it("session.idle maps correctly", () => {
+    const result = _normalizeWrappedEvent({
+      event: { id: "e1", type: "session.idle", properties: { sessionID: "s1" } },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.type).toBe("session.idle");
+    expect(result!.sessionId).toBe("s1");
+  });
+
+  it("session.error maps correctly", () => {
+    const result = _normalizeWrappedEvent({
+      event: {
+        id: "e1",
+        type: "session.error",
+        properties: { sessionID: "s1", error: { name: "Err", status: 500 } },
+      },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.type).toBe("session.error");
+    expect(result!.sessionId).toBe("s1");
+    expect(result!.error?.name).toBe("Err");
+    expect(result!.error?.status).toBe(500);
+  });
+
+  it("permission.updated maps correctly", () => {
+    const result = _normalizeWrappedEvent({
+      event: {
+        id: "e1",
+        type: "permission.updated",
+        properties: { sessionID: "s1", type: "file_access" },
+      },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.type).toBe("permission.updated");
+    expect(result!.sessionId).toBe("s1");
+    expect(result!.permission?.type).toBe("file_access");
+  });
+
+  it("permission.asked compatibility event maps to permission.updated", () => {
+    const result = _normalizeWrappedEvent({
+      event: {
+        id: "e1",
+        type: "permission.asked",
+        properties: { sessionID: "s1", type: "bash" },
+      },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.type).toBe("permission.updated");
+    expect(result!.sessionId).toBe("s1");
+    expect(result!.permission?.type).toBe("bash");
+  });
+
+  it("unrecognized event types return null", () => {
+    const result = _normalizeWrappedEvent({
+      event: { id: "e1", type: "command", properties: {} },
+    });
+    expect(result).toBeNull();
+  });
+
+  it("null/undefined properties handled safely", () => {
+    const result = _normalizeWrappedEvent({
+      event: { id: "e1", type: "session.idle", properties: null as any },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sessionId).toBeUndefined();
+  });
+
+  it("missing type returns null", () => {
+    const result = _normalizeWrappedEvent({
+      event: { id: "e1", type: "", properties: {} },
+    });
+    expect(result).toBeNull();
+  });
+
+  it("properties.sessionID is mapped to sessionId (key rename, no direct leak)", () => {
+    const result = _normalizeWrappedEvent({
+      event: {
+        id: "e1",
+        type: "session.idle",
+        properties: { sessionID: "raw-session-xyz" },
+      },
+    });
+    // The properties key "sessionID" (capital D) is NOT in the output
+    expect(JSON.stringify(result)).not.toContain('"sessionID"');
+    // The raw value is mapped to "sessionId" (lowercase d) for internal use
+    expect(result!.sessionId).toBe("raw-session-xyz");
+    // The value is hashed later by _buildEnvelope / _processEvent
+    // and only the hash (session.ref) appears in the webhook payload
+  });
+});
+
+describe("_enrichEvent — session metadata enrichment", () => {
+  it("fills session name from title when available", async () => {
+    const event = { type: "session.idle", sessionId: "s1" } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => ({ data: { title: "My Task" } }) } },
+    };
+
+    await _enrichEvent(event, input as any);
+    expect(event.session?.name).toBe("My Task");
+  });
+
+  it("fills session name from name field when title absent", async () => {
+    const event = { type: "session.idle", sessionId: "s1" } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => ({ data: { name: "Task Name" } }) } },
+    };
+
+    await _enrichEvent(event, input as any);
+    expect(event.session?.name).toBe("Task Name");
+  });
+
+  it("does not override existing event session name", async () => {
+    const event = { type: "session.idle", sessionId: "s1", session: { name: "Existing" } } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => ({ data: { title: "New Title" } }) } },
+    };
+
+    await _enrichEvent(event, input as any);
+    expect(event.session?.name).toBe("Existing");
+  });
+
+  it("fills agent/model from session data", async () => {
+    const event = { type: "session.idle", sessionId: "s1" } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => ({ data: { agent: "my-agent", model: "gpt-5" } }) } },
+    };
+
+    await _enrichEvent(event, input as any);
+    expect(event.agent).toBe("my-agent");
+    expect(event.model).toBe("gpt-5");
+  });
+
+  it("does not override existing agent/model", async () => {
+    const event = { type: "session.idle", sessionId: "s1", agent: "existing", model: "existing" } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => ({ data: { agent: "new", model: "new" } }) } },
+    };
+
+    await _enrichEvent(event, input as any);
+    expect(event.agent).toBe("existing");
+    expect(event.model).toBe("existing");
+  });
+
+  it("handles direct response (no data wrapper)", async () => {
+    const event = { type: "session.idle", sessionId: "s1" } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => ({ title: "Direct Title" }) } },
+    };
+
+    await _enrichEvent(event, input as any);
+    expect(event.session?.name).toBe("Direct Title");
+  });
+
+  it("handles API failure gracefully", async () => {
+    const event = { type: "session.idle", sessionId: "s1" } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => { throw new Error("fail"); } } },
+    };
+
+    // Must not throw
+    await _enrichEvent(event, input as any);
+    expect(event.session).toBeUndefined();
+  });
+
+  it("no-op when sessionId is missing", async () => {
+    const event = { type: "session.idle" } as OpenCodeEvent;
+    const input = {
+      client: { session: { get: async () => ({ data: { title: "X" } }) } },
+    };
+
+    await _enrichEvent(event, input as any);
+    expect(event.session).toBeUndefined();
+  });
+});
