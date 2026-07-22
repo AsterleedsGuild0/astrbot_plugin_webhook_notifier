@@ -322,11 +322,11 @@ DEFAULT_HTML_TEMPLATE = """\
   {% set status = event.status|default('info', true)|string %}
   {% set status_text = status|lower %}
   {% set status_tone = 'default' %}
-  {% if status_text in ['success', 'ok', 'succeeded', '成功', '完成', '已完成'] %}
+  {% if status_text in ['success', 'ok', 'succeeded', 'completed', '成功', '完成', '已完成'] %}
     {% set status_tone = 'success' %}
   {% elif status_text in ['error', 'failed', 'fail', '错误', '失败', '异常'] %}
     {% set status_tone = 'error' %}
-  {% elif status_text in ['warning', 'warn', '警告', '告警'] %}
+  {% elif status_text in ['warning', 'warn', 'action_required', '警告', '告警'] %}
     {% set status_tone = 'warning' %}
   {% endif %}
   {% set summary = event.summary|default('', true) %}

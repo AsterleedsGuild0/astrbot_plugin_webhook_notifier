@@ -30,6 +30,7 @@ from .core.help_card import (
 )
 from .core.models import EndpointStatus, ServerConfig
 from .core.omp import OmpProviderAdapter
+from .core.opencode import OpenCodeProviderAdapter
 from .core.providers import ProviderRegistry
 from .core.registry import (
     BIND_CURRENT_GROUP,
@@ -1098,7 +1099,7 @@ class WebhookNotifierPlugin(Star):
                 False,
                 f"❌ 不支持的 provider: {provider}。当前支持的 provider: omp, opencode",
             )
-        # 查询 Registry 确认 adapter 是否已注册（#18 阶段只有 omp）
+        # 查询 Registry 确认 adapter 是否已注册
         reg = self._ensure_provider_registry()
         if reg is None:
             return False, "❌ ProviderRegistry 未初始化，请检查日志。"
@@ -1107,11 +1108,6 @@ class WebhookNotifierPlugin(Star):
                 f"❌ Provider adapter 尚未注册: {provider}。"
                 "该 provider 可能在后续版本中可用。"
             )
-            if provider == "opencode":
-                msg = (
-                    "❌ opencode provider 尚未启用（adapter 未注册）。"
-                    "当前仅支持 omp；opencode 将在后续版本中可用。"
-                )
             return False, msg
         return True, ""
 
@@ -1119,9 +1115,10 @@ class WebhookNotifierPlugin(Star):
         return self._provider_registry
 
     def _init_default_provider_registry(self) -> None:
-        """构造时初始化默认 ProviderRegistry 并冻结（含 OMP adapter）。"""
+        """构造时初始化默认 ProviderRegistry 并冻结（含 OMP + OpenCode adapter）。"""
         reg = ProviderRegistry()
         reg.register(OmpProviderAdapter())
+        reg.register(OpenCodeProviderAdapter())
         reg.freeze()
         self._provider_registry = reg
 

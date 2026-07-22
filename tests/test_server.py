@@ -9,6 +9,7 @@ from astrbot.api.star import Context
 
 from core.models import EndpointRecord, NormalizedEvent, ServerConfig, TargetAlias
 from core.omp import OmpProviderAdapter
+from core.opencode import OpenCodeProviderAdapter
 from core.providers import ProviderRegistry
 from core.registry import EndpointRegistry
 from core.sender import Sender
@@ -1056,11 +1057,19 @@ async def test_integration_error_response_includes_retryable(tmp_path):
 class _AuthRequest:
     """携带合法 Authorization 和合法 OMP body 的请求 stub。"""
 
-    def __init__(self, path: str, token: str, body_bytes: bytes | None = None) -> None:
+    def __init__(
+        self,
+        path: str,
+        token: str,
+        body_bytes: bytes | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         self.content_type = "application/json"
         self.content_length = len(body_bytes) if body_bytes else 2
         self.path = path
         self.headers = {"Authorization": f"Bearer {token}"}
+        if extra_headers:
+            self.headers.update(extra_headers)
         self._body = body_bytes or b'{"event": "omp.session_stop"}'
 
     async def read(self) -> bytes:
@@ -1069,3 +1078,201 @@ class _AuthRequest:
 
 def _make_auth_request(path: str, token: str) -> _AuthRequest:
     return _AuthRequest(path, token)
+
+
+# ─── OpenCode 全链路集成测试 ──────────────────────────────
+
+
+_VALID_OPENCODE_BODY = {
+    "id": "evt_openc_test",
+    "event": "opencode.session_idle",
+    "version": 1,
+    "emittedAt": "2026-07-22T12:00:00.000Z",
+    "session": {"ref": "sess_secure_ref_abc"},
+}
+
+
+def _make_opencode_auth_request(
+    path: str, token: str, event: str = "opencode.session_idle"
+) -> _AuthRequest:
+    body = dict(_VALID_OPENCODE_BODY)
+    body["event"] = event
+    return _AuthRequest(
+        path,
+        token,
+        body_bytes=json.dumps(body).encode(),
+        extra_headers={"X-OpenCode-Event": event},
+    )
+
+
+@pytest.mark.asyncio
+async def test_integration_opencode_real_registry_full_flow(tmp_path):
+    """真实 EndpointRegistry+Bearer auth+真实 V1 payload+ProviderRegistry(OMP+OC)，验证 200。"""
+    from core.registry import EndpointRegistry
+
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
+        owner_user_id="oc-integration",
+        name="oc-test",
+        target_umo="aiocqhttp:GroupMessage:10001",
+        provider="opencode",
+    )
+
+    provider_reg = ProviderRegistry()
+    provider_reg.register(OmpProviderAdapter())
+    provider_reg.register(OpenCodeProviderAdapter())
+    provider_reg.freeze()
+
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=provider_reg,
+    )
+
+    response = await srv._process_request(
+        _make_opencode_auth_request(record.path, token),  # type: ignore[arg-type]
+        "oc-integration-001",
+    )
+    body = json.loads(response.body)
+    assert response.status == 200, f"预期 200，得到 {response.status}: {body}"
+    assert body["code"] == 0
+    assert body["data"]["delivered"] is True
+    assert body["data"]["provider"] == "opencode"
+    assert body["data"]["request_id"] == "oc-integration-001"
+    assert "retryable" in body["data"]
+
+
+@pytest.mark.asyncio
+async def test_integration_opencode_header_mismatch_400_retryable_false(tmp_path):
+    """Header/Body event 不一致应返回 400 retryable=false。"""
+    from core.registry import EndpointRegistry
+
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
+        owner_user_id="oc-mismatch",
+        name="oc-mismatch",
+        target_umo="aiocqhttp:GroupMessage:10001",
+        provider="opencode",
+    )
+
+    provider_reg = ProviderRegistry()
+    provider_reg.register(OmpProviderAdapter())
+    provider_reg.register(OpenCodeProviderAdapter())
+    provider_reg.freeze()
+
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=provider_reg,
+    )
+
+    bad_body = dict(_VALID_OPENCODE_BODY)
+    bad_body["event"] = "opencode.session_error"
+    req = _AuthRequest(
+        record.path,
+        token,
+        body_bytes=json.dumps(bad_body).encode(),
+        extra_headers={"X-OpenCode-Event": "opencode.session_idle"},  # 故意不一致
+    )
+    response = await srv._process_request(req, "oc-mismatch")  # type: ignore[arg-type]
+    body = json.loads(response.body)
+    assert response.status == 400
+    assert body["data"]["error"] == "event_mismatch"
+    assert body["data"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_integration_opencode_payload_on_omp_endpoint_returns_incompatible(
+    tmp_path,
+):
+    """opencode payload 发送到 omp endpoint 应返回 provider_incompatible。"""
+    from core.registry import EndpointRegistry
+
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
+        owner_user_id="oc-wrong-ep",
+        name="oc-wrong-ep",
+        target_umo="aiocqhttp:GroupMessage:10001",
+        provider="omp",
+    )
+
+    provider_reg = ProviderRegistry()
+    provider_reg.register(OmpProviderAdapter())
+    provider_reg.register(OpenCodeProviderAdapter())
+    provider_reg.freeze()
+
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=provider_reg,
+    )
+
+    # OMP endpoint 收到 OpenCode payload
+    oc_body = dict(_VALID_OPENCODE_BODY)
+    req = _AuthRequest(
+        record.path,
+        token,
+        body_bytes=json.dumps(oc_body).encode(),
+    )
+    response = await srv._process_request(req, "oc-wrong-ep")  # type: ignore[arg-type]
+    body = json.loads(response.body)
+    # OMP adapter 检测到 opencode. 前缀事件 → provider_incompatible
+    assert response.status == 400
+    assert body["data"]["error"] == "provider_incompatible"
+    assert body["data"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_integration_omp_payload_on_opencode_endpoint_returns_incompatible(
+    tmp_path,
+):
+    """OMP payload 发送到 opencode endpoint 应返回 provider_incompatible。"""
+    from core.registry import EndpointRegistry
+
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        owner_platform_id="aiocqhttp",
+        owner_user_id="oc-rev-test",
+        name="oc-rev-test",
+        target_umo="aiocqhttp:GroupMessage:10001",
+        provider="opencode",
+    )
+
+    provider_reg = ProviderRegistry()
+    provider_reg.register(OmpProviderAdapter())
+    provider_reg.register(OpenCodeProviderAdapter())
+    provider_reg.freeze()
+
+    srv = WebhookServer(
+        config=ServerConfig(),
+        registry=registry,
+        sender=FakeSender(),
+        plugin_config={"render_mode": "text"},
+        provider_registry=provider_reg,
+    )
+
+    # OpenCode endpoint 收到 OMP payload
+    omp_body = {"event": "omp.session_stop"}
+    req = _AuthRequest(
+        record.path,
+        token,
+        body_bytes=json.dumps(omp_body).encode(),
+        extra_headers={
+            "X-OpenCode-Event": "opencode.session_idle"
+        },  # 会被 OpenCode adapter 先校验 header
+    )
+    response = await srv._process_request(req, "oc-rev-test")  # type: ignore[arg-type]
+    body = json.loads(response.body)
+    # OpenCode adapter 检查到 event=omp.session_stop → provider_incompatible
+    assert response.status == 400
+    assert body["data"]["error"] == "provider_incompatible"
+    assert body["data"]["retryable"] is False

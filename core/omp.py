@@ -310,6 +310,20 @@ class OmpProviderAdapter(ProviderAdapter):
         payload: dict[str, Any],
         received_at: str,
     ) -> NormalizedEvent:
+        # 拒绝异源 provider payload（OpenCode）
+        headers_lower = {k.lower(): v for k, v in headers.items()}
+        if "x-opencode-event" in headers_lower:
+            raise ProviderError(
+                "provider_incompatible", "不兼容的 provider 请求", retryable=False
+            )
+        body_event_raw = payload.get("event")
+        if isinstance(body_event_raw, str):
+            body_event_lower = body_event_raw.strip().lower()
+            if body_event_lower.startswith("opencode."):
+                raise ProviderError(
+                    "provider_incompatible", "不兼容的 provider 请求", retryable=False
+                )
+
         is_valid, err_msg = is_omp_session_stop(headers, payload)
         if not is_valid:
             if "不一致" in err_msg:

@@ -152,11 +152,11 @@ class TestValidateCreateProvider:
         assert msg == ""
 
     def test_opencode_not_registered(self):
-        """opencode 未注册时应返回明确未启用消息。"""
+        """opencode 未注册时应返回明确未注册消息。"""
         plugin = self._plugin_with_registry(["omp"])
         ok, msg = plugin._validate_create_provider("opencode")
         assert ok is False
-        assert "尚未启用" in msg
+        assert "未注册" in msg
         assert "opencode" in msg
 
     def test_unknown_provider(self):
