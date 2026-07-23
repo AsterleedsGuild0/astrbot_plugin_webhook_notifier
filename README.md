@@ -4,9 +4,9 @@
 
 [![Release](https://img.shields.io/github/v/release/AsterleedsGuild0/astrbot_plugin_webhook_notifier?display_name=tag&sort=semver)](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) [![License](https://img.shields.io/github/license/AsterleedsGuild0/astrbot_plugin_webhook_notifier)](LICENSE) [![Python](https://img.shields.io/badge/Python-%3E%3D3.10-3776AB?logo=python&logoColor=white)](pyproject.toml) [![AstrBot Plugin](https://img.shields.io/badge/AstrBot-Plugin-6C5CE7)](https://docs.astrbot.app/)
 
-OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。当前插件兼容该 hook 使用的 OMP `session_stop` 格式，不提供 GitHub、GitLab 或 OpenCode 原生 provider。
+OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP 与 OpenCode 两种 provider；OpenCode 使用 V1 file Plugin 产生安全的三事件 envelope。
 
-**版本状态：** 当前文档已按 `v1.0.0` Final / 稳定版契约准备。`v1.0.0` Git tag、GitHub Release 与正式 ZIP 尚未创建；发布前仍可从 [v0.3.0](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v0.3.0) 获取现有稳定资产，或从 Releases 页面获取已发布的 `v1.0.0-rc.1` 候选资产。已完成的云端兼容验证是“卸载 v0.3.0 旧包后安装 v1.0.0-rc.1，并保留原数据目录/配置数据”，不代表 AstrBot 插件市场一键更新、原位升级或在线更新路径已经验证。正式状态与发布后检查见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+**版本状态：** `v1.0.0` 已发布，当前文档对应 1.x 稳定公共契约。正式 Release 资产与发布说明以 Releases 页面为准；AstrBot 插件市场的一键更新、原位升级或在线更新路径仍应按[发布流程](docs/release.md)中的发布后检查执行。公共边界见[公共契约](docs/public-contract.md)。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -17,6 +17,7 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 ## 功能亮点
 
 - 兼容社区 onebot post hook 产生的 `omp.session_stop` payload，展示会话、工作目录、模型、耗时与输入规模等常用信息。
+- 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error` 与 `permission_asked` 转换为匿名、白名单 envelope。
 - 支持纯文本与 HTML 图片卡片两种全局渲染模式。
 - HTML 渲染或图片发送异常时，可自动降级为纯文本通知。
 - 通过聊天命令为个人私聊或普通 QQ 群创建、轮换、撤销和删除 endpoint。
@@ -49,12 +50,12 @@ flowchart LR
 
 ### 1. 安装插件
 
-> 本插件尚未以 `v1.0.0` 正式版上架 AstrBot 官方插件市场，不能把市场搜索安装或市场更新视为已验证能力。该路径将在正式版发布/上架后检查。
+> `v1.0.0` 已发布。市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境；市场更新路径请按发布后检查单独验证。
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（正式版发布后推荐） | 计划从 `v1.0.0` Release 下载 `astrbot_plugin_webhook_notifier-v1.0.0.zip`，在 WebUI 选择“从文件安装”；当前该 tag、Release 与资产尚未创建 |
-| 已发布资产核对 | 发布前可使用 [v0.3.0 Release](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v0.3.0) 或 Releases 页面中的 `v1.0.0-rc.1` 候选资产；RC 不等同于正式版 |
+| Release ZIP（推荐） | 从 `v1.0.0` Release 下载 `astrbot_plugin_webhook_notifier-v1.0.0.zip`，在 WebUI 选择“从文件安装” |
+| 已发布资产核对 | 在 Releases 页面核对 `v1.0.0` 正式资产；`v1.0.0-rc.1` 仅用于历史候选版回溯 |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
 | 源码安装 | 将仓库克隆到 `AstrBot/data/plugins`，见下方命令 |
 
@@ -119,6 +120,16 @@ JSON
 端到端部署见[专题教程](docs/end-to-end-setup.md)，[客户端接入文档](docs/client-integration.md)包含 `onebot.ts` 的 OMP 用户级/项目级目录、进程环境变量、加载验证和 `session_stop` 触发方法。从上游部署 onebot post hook 后，为其配置完整 URL 变量 `OMP_SESSION_WEBHOOK_URL` 和 Token 变量 `OMP_SESSION_WEBHOOK_TOKEN`。
 
 `ParticleG/omp-config` 是独立维护的社区仓库，当前未明确 LICENSE；本项目仅链接上游源文件，不复制或分发其代码，也不代表该 hook 由本项目或 OMP 官方维护。
+
+### OpenCode 快速接入
+
+1. 先构建并安装包含 OpenCode provider 的 Webhook Notifier 测试包，然后在 AstrBot 中重载插件；未部署新服务端版本时，旧插件无法创建或处理 OpenCode Endpoint。
+2. 在 AstrBot 私聊创建 OpenCode Endpoint：`<唤醒词>whn token new private <名称> --provider opencode`。
+3. 分别保存 Plugin Page 的 Base URL、聊天返回的 Endpoint Path 和单独交付的 Bearer Token，并在受控环境中组成客户端所需的完整 Endpoint URL。
+4. 将 `integrations/opencode/webhook-notifier.ts` 放到运行 OpenCode 的机器，复制 `integrations/opencode/opencode.jsonc` 的 V1 `plugin` tuple，并用 `{env:...}` 或 `{file:...}` 提供 URL/Token。
+5. 完全重启 OpenCode Desktop 或 CLI 进程，再触发完成、失败和权限请求事件并核对 Bot 通知。
+
+`python scripts/smoke_opencode_plugin.py --cli` 只验证 OpenCode CLI 会实际调用 V1 Plugin server，不能替代 AstrBot 测试包部署、Endpoint 创建和 Bot 端到端通知验收。完整流程见[OpenCode 集成指南](docs/opencode-integration.md)。
 
 ---
 
@@ -192,6 +203,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 - [命令参考](docs/command-reference.md)
 - [端到端部署](docs/end-to-end-setup.md)
 - [客户端接入](docs/client-integration.md)
+- [OpenCode 集成](docs/opencode-integration.md)
 - [安全与运维](docs/security-and-operations.md)
 - [平台投递策略](docs/platform-delivery-policy.md)
 - [HTML 模板变量](docs/template-variables.md)
@@ -209,9 +221,9 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 
 不是。OMP 提供 hook 机制和 `session_stop` 事件，HTTP 请求与 version 1 payload 来自独立维护的社区 onebot post hook；本插件兼容其请求格式。
 
-### 为什么在 AstrBot 插件市场搜不到？
+### OpenCode provider 如何启用？
 
-`v1.0.0` 尚未发布并上架官方插件市场。正式发布前请使用现有 Release 资产、WebUI 仓库 URL 或 `git clone` 安装；市场安装与市场更新需在正式版上架后另行验证。
+创建 Endpoint 时追加 `--provider opencode`；不追加时默认 `omp`。provider 在创建后不可变，OpenCode Plugin 配置和排障见[OpenCode 集成指南](docs/opencode-integration.md)。
 
 ### 私聊 endpoint 创建成功，为什么没有通知？
 

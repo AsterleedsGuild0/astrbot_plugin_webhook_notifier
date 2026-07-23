@@ -5,9 +5,9 @@
 - 稳定版本：`v1.0.0`
 - 状态：Final / 1.x 稳定公共契约
 - 定稿日期：2026-07-21
-- 远端发布状态：Git tag、GitHub Release 与正式 ZIP 尚未创建
+- 远端发布状态：`v1.0.0` Git tag、GitHub Release 与正式 ZIP 已发布
 
-`v1.0.0-rc.1` 已用于候选版安装、真实平台和 Webhook 链路验证。云端数据兼容验证的实际操作是卸载 v0.3.0 旧包后安装 RC，并保留原数据目录与配置数据；该证据支持卸载重装后的数据兼容性，不证明 AstrBot 插件市场一键更新、原位升级或在线更新路径。本文档已按 `v1.0.0` Final 定稿并进入 1.x 兼容承诺；市场更新路径须在正式版发布/上架后另行验证。
+`v1.0.0-rc.1` 已用于候选版安装、真实平台和 Webhook 链路验证，`v1.0.0` 现已作为稳定版发布。云端数据兼容验证的实际操作是卸载 v0.3.0 旧包后安装 RC，并保留原数据目录与配置数据；该证据支持卸载重装后的数据兼容性，不证明 AstrBot 插件市场一键更新、原位升级或在线更新路径。市场更新路径仍须按发布后检查单独留证。
 
 ---
 
@@ -17,8 +17,10 @@
 
 - `_conf_schema.json` 暴露的配置字段、类型、默认值及默认安全语义，特别是 `render_mode=text`、`enable_private_notifications=false`、Endpoint 级 Bearer 鉴权与本地监听默认值。
 - `<唤醒词>whn` 命令族的行为、owner scope、私聊限制、群验证流程及全局超级管理员权限边界。
+- 创建 Endpoint 时的 `--provider <omp|opencode>` 选择、未指定时默认 `omp`，以及 provider 在 Endpoint 生命周期内不可变。
 - Registry v2 的持久化格式版本、managed/pending scope、v1 透明迁移、quarantine、原子提交、fail-closed 和离线 rebind 语义。
 - Webhook HTTP JSON 请求、Bearer Token、OMP version 1 兼容解析，以及 `ok`、`skipped`、`partial_delivery`、`partial_failure`、`targets`、可选 `send_results`、`delivered`、`rendered`、`retryable` 与 `skip_reason` 响应语义。
+- OpenCode V1 Plugin 生成的三类 envelope：`opencode.session_idle`、`opencode.session_error` 与 `opencode.permission_asked`，以及匿名 session ref、name fallback、白名单字段和 retry 边界。
 - `aiocqhttp`、`qq_official` WebSocket 私聊与普通 QQ 群的支持边界，以及 QQ 频道和 `qq_official_webhook` 不受支持的声明。
 - GitHub Release ZIP 的可安装结构：顶层插件目录包含运行所需源码、配置、静态资源、模板和随包文档，可由 AstrBot WebUI 上传安装。
 
@@ -52,5 +54,6 @@
 - [FSD](FSD.md)
 - [命令参考](command-reference.md)
 - [OMP 客户端接入](client-integration.md)
+- [OpenCode 集成](opencode-integration.md)
 - [安全与运维](security-and-operations.md)
 - [发布流程](release.md)
