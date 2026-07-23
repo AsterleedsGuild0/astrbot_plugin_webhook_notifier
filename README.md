@@ -6,7 +6,7 @@
 
 OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP 与 OpenCode 两种 provider；OpenCode 使用 V1 file Plugin 产生安全的三事件 envelope。
 
-**版本状态：** `v1.0.0` 已发布，当前文档对应 1.x 稳定公共契约。正式 Release 资产与发布说明以 Releases 页面为准；AstrBot 插件市场的一键更新、原位升级或在线更新路径仍应按[发布流程](docs/release.md)中的发布后检查执行。公共边界见[公共契约](docs/public-contract.md)。
+**版本状态：** `v1.0.0` 是现有稳定版；当前源码与本地测试包是尚未发布的 `v1.1.0-rc.1` 候选。Provider Registry、OpenCode Server Adapter、OpenCode V1 Client Plugin 及其 smoke 仅应使用该候选或后续版本，不应归入 `v1.0.0` 资产。发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -17,7 +17,7 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 ## 功能亮点
 
 - 兼容社区 onebot post hook 产生的 `omp.session_stop` payload，展示会话、工作目录、模型、耗时与输入规模等常用信息。
-- 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error` 与 `permission_asked` 转换为匿名、白名单 envelope。
+- `v1.1.0-rc.1` 候选支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error` 与 `permission_asked` 转换为匿名、白名单 envelope。
 - 支持纯文本与 HTML 图片卡片两种全局渲染模式。
 - HTML 渲染或图片发送异常时，可自动降级为纯文本通知。
 - 通过聊天命令为个人私聊或普通 QQ 群创建、轮换、撤销和删除 endpoint。
@@ -50,11 +50,12 @@ flowchart LR
 
 ### 1. 安装插件
 
-> `v1.0.0` 已发布。市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境；市场更新路径请按发布后检查单独验证。
+> `v1.0.0` 已发布；当前 OpenCode 功能请使用尚未发布的 `v1.1.0-rc.1` 候选或后续版本。市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境。
 
 | 方式 | 操作 |
 | --- | --- |
 | Release ZIP（推荐） | 从 `v1.0.0` Release 下载 `astrbot_plugin_webhook_notifier-v1.0.0.zip`，在 WebUI 选择“从文件安装” |
+| `v1.1.0-rc.1` 本地测试 ZIP | 使用 `dist/astrbot_plugin_webhook_notifier-v1.1.0-rc.1.zip` 在 AstrBot WebUI 手动安装；安装、Bot Endpoint 与 Desktop 端到端 smoke 尚待本 RC 包验证 |
 | 已发布资产核对 | 在 Releases 页面核对 `v1.0.0` 正式资产；`v1.0.0-rc.1` 仅用于历史候选版回溯 |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
 | 源码安装 | 将仓库克隆到 `AstrBot/data/plugins`，见下方命令 |

@@ -2,12 +2,23 @@
 
 ---
 
+## v1.1.0-rc.1 - 2026-07-23
+
+- #18：引入 Provider Adapter / Registry 与依赖注入边界，支持 `omp` 与 `opencode` provider，并保持 Endpoint provider 在创建后不可变。
+- #19：增加 OpenCode Server Adapter，接收 V1 envelope，覆盖 `session_idle`、`session_error` 与 `permission_asked` 三类事件。
+- #20：增加 OpenCode V1 Client Plugin，使用正确的 `default { id, server }` 与 `plugin` tuple，支持 env/file URL/Token 配置、状态机、timeout 和有限 retry。
+- #21：收紧 OpenCode 字段白名单与隐私边界，匿名化 session ref、清洗 name fallback，并补齐 Bun/Python 契约测试、隔离 CLI Plugin Service smoke、Desktop 安全 SKIP 与中文集成文档。
+- 本 RC 的源码验证覆盖 Bun/Python 测试和 CLI smoke；这不等同于已通过 RC ZIP 的 AstrBot WebUI 安装、Bot Endpoint 实际验证或 Desktop 端到端 smoke。
+- 使用本 RC ZIP 的 AstrBot WebUI 手动安装、Bot Endpoint 验证和 Desktop 端到端 smoke 尚待本 RC 包验证，不能据此宣称已通过或已发布 `v1.1.0`。
+
+---
+
 ## v1.0.0 - 2026-07-21
 
 - 将首个稳定版公共契约定稿为 `v1.0.0`，覆盖配置与安全默认值、命令、Registry v2、Webhook HTTP 响应、平台支持边界、模板管理和可安装 ZIP 结构；不在 RC 基础上新增业务功能。
 - 保留并确认 `v1.0.0-rc.1` 已完成的自动化测试、构建、打包、Release Workflow、真实平台与 Webhook 链路验证证据。
 - 云端兼容验证采用卸载 v0.3.0 旧包后安装 `v1.0.0-rc.1`、同时保留原数据目录和配置数据的方式；该结果支持“卸载重装后的数据兼容性”，不等同于原位升级、在线更新或 AstrBot 插件市场一键更新验证。
-- `v1.0.0` Git tag、GitHub Release 和正式 ZIP 尚待创建；正式 Release 应设置 `prerelease=false`、`make_latest=true`。
+- `v1.0.0` Git tag、GitHub Release 和正式 ZIP 已发布；正式 Release 使用 `prerelease=false`、`make_latest=true`。
 - AstrBot 插件市场安装与更新路径列为正式版发布/上架后的检查项，当前不宣称已经通过。
 
 ---

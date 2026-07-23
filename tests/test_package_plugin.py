@@ -67,6 +67,8 @@ def test_stable_versions_are_pep440_equivalent() -> None:
 
     assert package_plugin.versions_equivalent("v1.0.0", "1.0.0")
     assert package_plugin.project_version_for_package("v1.0.0") == "1.0.0"
+    assert package_plugin.versions_equivalent("v1.1.0-rc.1", "1.1.0rc1")
+    assert package_plugin.project_version_for_package("v1.1.0-rc.1") == "1.1.0rc1"
 
 
 def test_default_release_archive_uses_semver_tag_name() -> None:
@@ -74,7 +76,7 @@ def test_default_release_archive_uses_semver_tag_name() -> None:
 
     assert (
         package_plugin.parse_args([]).output.name
-        == "astrbot_plugin_webhook_notifier-v1.0.0.zip"
+        == "astrbot_plugin_webhook_notifier-v1.1.0-rc.1.zip"
     )
 
 
@@ -141,11 +143,11 @@ def test_dev_version_with_label_builds_end_to_end(tmp_path: Path, monkeypatch) -
         main_text = archive.read(f"{root}/main.py").decode("utf-8")
         project = tomllib.loads(archive.read(f"{root}/pyproject.toml").decode("utf-8"))
 
-    plugin_version = "v1.0.0-test.20260720.0905.template-manager"
+    plugin_version = "v1.1.0-rc.1-test.20260720.0905.template-manager"
     assert metadata["version"] == plugin_version
     assert re.search(rf'"{re.escape(plugin_version)}"', main_text)
     project_version = project["project"]["version"]
-    assert project_version == "1.0.0.dev202607200905+template.manager"
+    assert project_version == "1.1.0rc1.dev202607200905+template.manager"
     Version(project_version)
 
 
@@ -164,6 +166,15 @@ def test_rebind_cli_is_explicitly_in_package_file_list() -> None:
         path.startswith("scripts/") and path != "scripts/rebind_platform_id.py"
         for path in package_files
     )
+
+
+def test_opencode_runtime_and_config_are_in_package_file_list() -> None:
+    package_plugin = load_package_module()
+    package_files = package_plugin.iter_package_files()
+
+    assert "integrations/opencode/webhook-notifier.ts" in package_files
+    assert "integrations/opencode/opencode.jsonc" in package_files
+    assert "integrations/opencode/webhook-notifier.test.ts" not in package_files
 
 
 def test_metadata_declares_exact_verified_platforms() -> None:
