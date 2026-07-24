@@ -23,6 +23,7 @@ _MAX_ACTION_TEXT = 512
 _MAX_ACTION_SUMMARY = 256
 _MAX_ACTION_ITEMS = 8
 _MAX_ACTION_OPTIONS = 12
+_MAX_PERMISSION_ITEMS = 16
 _MAX_PERMISSION_PATTERNS = 16
 _MAX_ACTION_COUNT = 1_000_000
 _MAX_PAYLOAD_BYTES = 64 * 1024
@@ -33,9 +34,11 @@ _MIN_DURATION_MS = 0
 
 _SESSION_ALLOW = frozenset({"ref", "name", "scope"})
 _COUNTS_ALLOW = frozenset({"messages", "tools", "changes"})
-_PERMISSION_ALLOW = frozenset(
+_PERMISSION_ALLOW = frozenset({"count", "items"})
+_PERMISSION_LEGACY_ALLOW = frozenset(
     {"category", "title", "summary", "description", "action", "target", "patterns"}
 )
+_PERMISSION_ITEM_ALLOW = _PERMISSION_LEGACY_ALLOW
 _QUESTION_ALLOW = frozenset({"count", "optionCount", "summary", "items"})
 _QUESTION_ITEM_ALLOW = frozenset({"text", "header", "recommended", "options"})
 _QUESTION_OPTION_ALLOW = frozenset({"label", "description", "recommended"})
@@ -71,6 +74,8 @@ _MSG_SECURE: dict[str, str] = {
     "question.optionCount": "无效的 question.optionCount 字段",
     "question.summary": "无效的 question.summary 字段",
     "question.items": "无效的 question.items 字段",
+    "permission.count": "无效的 permission.count 字段",
+    "permission.items": "无效的 permission.items 字段",
     "permission.title": "无效的 permission.title 字段",
     "permission.summary": "无效的 permission.summary 字段",
     "permission.description": "无效的 permission.description 字段",
@@ -424,7 +429,34 @@ def _validate_counts(raw: Any) -> dict[str, int] | None:
 def _validate_permission(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ProviderError("invalid_payload", _safe_msg("permission"), retryable=False)
+
+    # Low-cost rolling-upgrade compatibility: accept the previous single-item
+    # shape and normalize it to the aggregate contract before validation.
+    if "count" not in raw and "items" not in raw and "category" in raw:
+        _check_unknown_fields(raw, _PERMISSION_LEGACY_ALLOW, "permission")
+        return {"count": 1, "items": [_validate_permission_item(raw)]}
+
     _check_unknown_fields(raw, _PERMISSION_ALLOW, "permission")
+    count = _check_action_count(raw.get("count"), "permission.count")
+    items = raw.get("items")
+    if count is None or not isinstance(items, list) or not items or count < len(items):
+        raise ProviderError("invalid_payload", _safe_msg("permission"), retryable=False)
+    if len(items) > _MAX_PERMISSION_ITEMS:
+        raise ProviderError(
+            "invalid_payload", _safe_msg("permission.items"), retryable=False
+        )
+    return {
+        "count": count,
+        "items": [_validate_permission_item(item) for item in items],
+    }
+
+
+def _validate_permission_item(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ProviderError(
+            "invalid_payload", _safe_msg("permission.items"), retryable=False
+        )
+    _check_unknown_fields(raw, _PERMISSION_ITEM_ALLOW, "permission.items")
     result: dict[str, Any] = {
         "category": _check_category(raw.get("category"), "permission.category")
     }
@@ -881,27 +913,44 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         if ref12:
             fields.append({"label": "sessionRef", "value": ref12, "short": True})
         if permission_raw:
-            cat = str(permission_raw.get("category", ""))
-            fields.append({"label": "permission.category", "value": cat, "short": True})
-            for key in ("summary", "title", "description", "action", "target"):
-                value = permission_raw.get(key)
-                if value:
-                    fields.append(
-                        {
-                            "label": f"permission.{key}",
-                            "value": value,
-                            "short": key in {"summary", "title", "action"},
-                        }
-                    )
-            patterns = permission_raw.get("patterns")
-            if patterns:
+            permission_count = permission_raw.get("count")
+            if permission_count is not None:
                 fields.append(
                     {
-                        "label": "permission.patterns",
-                        "value": ", ".join(patterns),
-                        "short": False,
+                        "label": "permissionCount",
+                        "value": str(permission_count),
+                        "short": True,
                     }
                 )
+            permission_items = permission_raw.get("items", [])
+            for index, item in enumerate(permission_items, start=1):
+                cat = str(item.get("category", ""))
+                fields.append(
+                    {
+                        "label": f"permission[{index}].category",
+                        "value": cat,
+                        "short": True,
+                    }
+                )
+                for key in ("summary", "title", "description", "action", "target"):
+                    value = item.get(key)
+                    if value:
+                        fields.append(
+                            {
+                                "label": f"permission[{index}].{key}",
+                                "value": value,
+                                "short": key in {"summary", "title", "action"},
+                            }
+                        )
+                patterns = item.get("patterns")
+                if patterns:
+                    fields.append(
+                        {
+                            "label": f"permission[{index}].patterns",
+                            "value": ", ".join(patterns),
+                            "short": False,
+                        }
+                    )
         if question_raw:
             question_count = question_raw.get("count")
             if question_count is not None:

@@ -398,27 +398,24 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert "sessionRef" in labels
 
     @pytest.mark.parametrize(
-        ("variant", "display_value"),
-        [
-            ("default", "默认"),
-            ("low", "低"),
-            ("medium", "中"),
-            ("high", "高"),
-            ("max", "最高"),
-            ("experimental", "experimental"),
-        ],
+        "variant", ["default", "low", "medium", "high", "max", "experimental"]
     )
-    def test_model_variant_is_normalized_and_display_localized(
-        self, variant, display_value
-    ):
-        event = self._make(payload={**_VALID_PAYLOAD, "modelVariant": variant})
+    def test_model_variant_is_normalized_and_appended_to_display_model(self, variant):
+        event = self._make(
+            payload={
+                **_VALID_PAYLOAD,
+                "model": "cpa/gpt-5.6-sol",
+                "modelVariant": variant,
+            }
+        )
         assert event.model_variant == variant
         raw_fields = {f["label"]: f["value"] for f in event.fields}
         assert raw_fields["modelVariant"] == variant
         display_fields = {
             f["label"]: f["value"] for f in render_html_data(event)["event"]["fields"]
         }
-        assert display_fields["思考深度"] == display_value
+        assert display_fields["模型"] == f"cpa/gpt-5.6-sol({variant})"
+        assert "思考深度" not in display_fields
 
     def test_session_error(self):
         e = self._make(
@@ -456,7 +453,31 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert e.status == "action_required"
         assert e.summary == "等待权限批准"
         labels = {f["label"] for f in e.fields}
-        assert "permission.category" in labels
+        assert "permissionCount" in labels
+        assert "permission[1].category" in labels
+
+    def test_aggregated_permission_contract(self):
+        e = self._make(
+            payload={
+                "id": "evt_perm_aggregate",
+                "event": "opencode.permission_asked",
+                "version": 1,
+                "emittedAt": "2026-07-22T12:00:00.000Z",
+                "session": {"ref": "s_ref"},
+                "permission": {
+                    "count": 2,
+                    "items": [
+                        {"category": "read"},
+                        {"category": "write", "summary": "Write summary"},
+                    ],
+                },
+            },
+            headers={"x-opencode-event": "opencode.permission_asked"},
+        )
+        fields = {f["label"]: f["value"] for f in e.fields}
+        assert fields["permissionCount"] == "2"
+        assert fields["permission[1].category"] == "read"
+        assert fields["permission[2].summary"] == "Write summary"
 
     def test_question_asked(self):
         e = self._make(
@@ -580,12 +601,12 @@ class TestOpenCodeProviderAdapterParseSuccess:
             headers={"x-opencode-event": "opencode.permission_asked"},
         )
         fields = {f["label"]: f["value"] for f in e.fields}
-        assert fields["permission.category"] == "file_access"
-        assert fields["permission.title"] == "Read file"
-        assert fields["permission.description"] == "Allow the requested file read"
-        assert fields["permission.action"] == "read"
-        assert fields["permission.target"] == "/private/project/file.txt"
-        assert fields["permission.patterns"] == "/private/project/**"
+        assert fields["permission[1].category"] == "file_access"
+        assert fields["permission[1].title"] == "Read file"
+        assert fields["permission[1].description"] == "Allow the requested file read"
+        assert fields["permission[1].action"] == "read"
+        assert fields["permission[1].target"] == "/private/project/file.txt"
+        assert fields["permission[1].patterns"] == "/private/project/**"
         assert e.raw == {}
 
     def test_card_display_localizes_fields_without_changing_envelope_keys(self):
@@ -900,6 +921,25 @@ class TestOpenCodeProviderAdapterParseErrors:
         with pytest.raises(ProviderError):
             self._parse(
                 payload=payload,
+                headers={"x-opencode-event": "opencode.permission_asked"},
+            )
+
+    @pytest.mark.parametrize(
+        "permission",
+        [
+            {"count": 2, "items": []},
+            {"count": 1, "items": [{"category": "x", "unknown": "bad"}]},
+            {"count": 1, "items": [{"category": "x"}] * 17},
+        ],
+    )
+    def test_invalid_aggregated_permission_rejected(self, permission):
+        with pytest.raises(ProviderError):
+            self._parse(
+                payload={
+                    **_VALID_PAYLOAD,
+                    "event": "opencode.permission_asked",
+                    "permission": permission,
+                },
                 headers={"x-opencode-event": "opencode.permission_asked"},
             )
 

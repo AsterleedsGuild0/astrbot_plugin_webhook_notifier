@@ -74,6 +74,22 @@ class TestRenderTextDefault:
         assert "模型：" in result
         assert "耗时：" in result
 
+    def test_permission_aggregate_labels_match_in_text_and_html(self):
+        event = _make_event(
+            fields=[
+                {"label": "permissionCount", "value": "2"},
+                {"label": "permission[1].category", "value": "read"},
+                {"label": "permission[2].summary", "value": "Write <file>"},
+            ],
+        )
+        text = render_text_default(event)
+        html = render_html_default(event)
+        assert "权限请求数：2" not in text
+        assert "权限 1 类型：read" in text
+        assert "权限 2 摘要：Write <file>" in text
+        assert "权限 1 类型" in html
+        assert "Write &lt;file&gt;" in html
+
     def test_empty_fields(self):
         """空 fields 不应渲染出多余内容。"""
         event = _make_event(fields=[])
@@ -293,6 +309,91 @@ class TestDisplayLocalization:
         )
         assert no_title[0]["label"] == "会话名称"
 
+    @pytest.mark.parametrize(
+        ("fields", "model_variant", "expected"),
+        [
+            (
+                [
+                    {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                    {"label": "modelVariant", "value": "max"},
+                ],
+                "max",
+                [("模型", "cpa/gpt-5.6-sol(max)")],
+            ),
+            (
+                [{"label": "model", "value": "cpa/gpt-5.6-sol"}],
+                None,
+                [("模型", "cpa/gpt-5.6-sol")],
+            ),
+            (
+                [{"label": "modelVariant", "value": "medium"}],
+                "medium",
+                [],
+            ),
+            (
+                [
+                    {"label": "model", "value": "cpa"},
+                    {"label": "modelVariant", "value": "default"},
+                ],
+                "default",
+                [("模型提供方", "cpa(default)")],
+            ),
+            (
+                [
+                    {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                    {"label": "modelVariant", "value": "experimental-v2"},
+                ],
+                "experimental-v2",
+                [("模型", "cpa/gpt-5.6-sol(experimental-v2)")],
+            ),
+        ],
+    )
+    def test_model_variant_display_contract(self, fields, model_variant, expected):
+        event = _make_event(fields=fields)
+        event.model_variant = model_variant
+
+        display_fields = render_html_data(event)["event"]["fields"]
+        actual = [(field["label"], field["value"]) for field in display_fields]
+        text = render_text_default(event)
+        html = render_html_default(event)
+
+        assert actual == expected
+        assert "思考深度" not in text
+        assert "思考深度" not in html
+        for label, value in expected:
+            assert f"{label}：{value}" in text
+            assert label in html
+            assert value in html
+
+    def test_model_variant_uses_normalized_event_fallback_without_raw_field(self):
+        event = _make_event(fields=[{"label": "model", "value": "cpa/gpt-5.6-sol"}])
+        event.model_variant = "medium"
+
+        fields = render_html_data(event)["event"]["fields"]
+        assert [(field["label"], field["value"]) for field in fields] == [
+            ("模型", "cpa/gpt-5.6-sol(medium)")
+        ]
+
+    def test_model_variant_text_and_html_share_value_and_escape_html(self):
+        event = _make_event(
+            fields=[
+                {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                {"label": "modelVariant", "value": "max<&>"},
+            ]
+        )
+        event.model_variant = "max<&>"
+
+        display_value = render_html_data(event)["event"]["fields"][0]["value"]
+        text = render_text_default(event)
+        html = render_html_default(event)
+
+        assert display_value == "cpa/gpt-5.6-sol(max<&>)"
+        assert f"模型：{display_value}" in text
+        assert "cpa/gpt-5.6-sol(max&lt;&amp;&gt;)" in html
+        assert display_value not in html
+        assert "思考深度" not in text
+        assert "思考深度" not in html
+
     def test_question_counts_and_summary_are_context_aware(self):
         strict = prepare_display_fields(
             [
@@ -325,6 +426,19 @@ class TestDisplayLocalization:
             ]
         )
         assert "问题摘要" in [field["label"] for field in multiple]
+
+    def test_permission_aggregate_labels_are_localized_and_count_deduplicated(self):
+        fields = prepare_display_fields(
+            [
+                {"label": "permissionCount", "value": "2"},
+                {"label": "permission[1].category", "value": "read"},
+                {"label": "permission[2].summary", "value": "Write summary"},
+            ]
+        )
+        assert [(field["label"], field["value"]) for field in fields] == [
+            ("权限 1 类型", "read"),
+            ("权限 2 摘要", "Write summary"),
+        ]
 
     def test_duration_ms_alone_is_readable_chinese(self):
         fields = prepare_display_fields([{"label": "durationMs", "value": 65000}])

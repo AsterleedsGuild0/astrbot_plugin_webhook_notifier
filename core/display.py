@@ -53,7 +53,6 @@ _FIELD_LABELS = {
     "agent": "执行代理",
     "model": "模型",
     "modelProvider": "模型提供方",
-    "modelVariant": "思考深度",
     "duration": "当前任务耗时",
     "durationMs": "当前任务耗时",
     "startedAt": "会话开始时间",
@@ -63,6 +62,7 @@ _FIELD_LABELS = {
     "questionCount": "问题数量",
     "optionCount": "选项数量",
     "question.summary": "问题摘要",
+    "permissionCount": "权限请求数",
     "messageCount": "消息数量",
     "toolCount": "工具数量",
     "changeCount": "变更数量",
@@ -79,6 +79,9 @@ _FIELD_LABELS = {
 
 _QUESTION_LABEL_RE = re.compile(
     r"^question\[(\d+)\](?:\.(header|options|recommended))?$"
+)
+_PERMISSION_LABEL_RE = re.compile(
+    r"^permission\[(\d+)\]\.(category|summary|title|description|action|target|patterns)$"
 )
 _ENGLISH_DURATION_RE = re.compile(
     r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>ms|[smhd])", re.IGNORECASE
@@ -115,20 +118,11 @@ _OPENCODE_FIELD_ORDER = {
     "执行代理": 20,
     "模型提供方": 29,
     "模型": 30,
-    "思考深度": 35,
     "当前任务耗时": 40,
     "会话已持续": 50,
     "会话开始时间": 60,
     "当前任务开始时间": 70,
     "当前任务结束时间": 80,
-}
-
-_MODEL_VARIANT_LABELS = {
-    "default": "默认",
-    "low": "低",
-    "medium": "中",
-    "high": "高",
-    "max": "最高",
 }
 
 
@@ -155,6 +149,19 @@ def localize_field_label(label: Any) -> str:
         if suffix == "recommended":
             return f"问题 {index} 推荐选项"
         return f"问题 {index}"
+    permission_match = _PERMISSION_LABEL_RE.match(raw)
+    if permission_match:
+        index, suffix = permission_match.groups()
+        labels = {
+            "category": "类型",
+            "summary": "摘要",
+            "title": "标题",
+            "description": "说明",
+            "action": "操作",
+            "target": "目标",
+            "patterns": "范围",
+        }
+        return f"权限 {index} {labels[suffix]}"
     return raw
 
 
@@ -379,10 +386,19 @@ def _is_provider_only_model(value: Any) -> bool:
     return "/" not in normalized and normalized in _MODEL_PROVIDERS
 
 
-def _localize_model_variant(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    return _MODEL_VARIANT_LABELS.get(value.strip().lower(), value)
+def _display_model_variant(fields: list[Any], fallback: Any) -> str | None:
+    """从展示字段优先取得安全 variant，缺失时使用 NormalizedEvent 副本值。"""
+
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        raw_label = str(field.get("label", field.get("name", field.get("key", ""))))
+        value = field.get("value")
+        if raw_label == "modelVariant" and isinstance(value, str) and value:
+            return value
+    if isinstance(fallback, str) and fallback:
+        return fallback
+    return None
 
 
 def prepare_display_fields(
@@ -390,11 +406,13 @@ def prepare_display_fields(
     *,
     title: str = "",
     display_context: DisplayContext | None = None,
+    model_variant: str | None = None,
 ) -> list[dict[str, Any]]:
     """复制并本地化 fields，消除普通卡片中的重复信息。"""
 
     if not isinstance(fields, list):
         return []
+    display_model_variant = _display_model_variant(fields, model_variant)
     has_duration = any(
         isinstance(field, dict)
         and str(field.get("label", "")) in {"duration", "耗时", "当前任务耗时"}
@@ -405,6 +423,12 @@ def prepare_display_fields(
         for field in fields
         if isinstance(field, dict)
         and _QUESTION_LABEL_RE.match(str(field.get("label", "")))
+    ]
+    permission_details = [
+        field
+        for field in fields
+        if isinstance(field, dict)
+        and _PERMISSION_LABEL_RE.match(str(field.get("label", "")))
     ]
     question_texts: list[Any] = []
     for field in question_details:
@@ -428,9 +452,13 @@ def prepare_display_fields(
             continue
         raw_label = str(field.get("label", field.get("name", field.get("key", "字段"))))
         value = field.get("value", "")
+        if raw_label == "modelVariant":
+            continue
         if raw_label in {"sessionRef", "匿名会话标识"}:
             continue
         if raw_label in {"questionCount", "optionCount"} and question_details:
+            continue
+        if raw_label == "permissionCount" and permission_details:
             continue
         if raw_label == "question.summary" and duplicate_summary:
             continue
@@ -444,8 +472,13 @@ def prepare_display_fields(
         )
         if raw_label in {"duration", "durationMs", "耗时", "当前任务耗时"}:
             value = format_duration_value(value)
-        elif raw_label == "modelVariant":
-            value = _localize_model_variant(value)
+        elif (
+            raw_label == "model"
+            and display_model_variant is not None
+            and isinstance(value, str)
+            and value.strip()
+        ):
+            value = f"{value}({display_model_variant})"
         elif raw_label in {
             "startedAt",
             "taskStartedAt",
@@ -529,17 +562,8 @@ def build_display_event_data(
         result.get("fields"),
         title=str(result.get("title", "")),
         display_context=context,
+        model_variant=result.get("model_variant"),
     )
-    if result.get("model_variant") is not None and not any(
-        str(field.get("label", "")) == "思考深度" for field in display_fields
-    ):
-        display_fields.append(
-            {
-                "label": "思考深度",
-                "value": _localize_model_variant(result["model_variant"]),
-                "short": True,
-            }
-        )
     if result.get("provider") == "opencode":
         session_elapsed = _derive_opencode_session_elapsed(result)
         if session_elapsed is not None:
