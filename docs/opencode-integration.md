@@ -11,6 +11,8 @@
 
 `v1.17.9` 是本插件 TypeScript 类型和调用约定的 API 基线，`v1.18.4` 是本机 smoke 使用的实际运行时版本。升级 OpenCode 后应重新执行 CLI smoke，并观察事件、配置插值和 Plugin Service 加载行为。
 
+OpenCode 的模型档位使用可选的安全字段 `modelVariant`：优先读取 Assistant `message.updated.properties.info.variant`，缺失时读取 `session.model.variant`。该字段只表示 OpenCode runtime 暴露的 `variant`/`modelVariant`，不保证等同于 provider 原始 API 的 `reasoning_effort` 或 `reasoningEffort`；插件不会根据 provider 或 model 名称推断档位。
+
 ---
 
 ## 完整端到端验收顺序
@@ -68,11 +70,11 @@ OpenCode 配置顶层的 `plugin` 必须是 tuple 数组。每一项是：
 
 示例（值均为占位符）：
 
-客户端可在 options 中设置 `projectDisplayName`、`actionContentMode` 和 `metadataDiagnostics`；安全默认如下：
+客户端可在 options 中设置可选的 `instanceDisplayName`、`actionContentMode` 和 `metadataDiagnostics`。`instanceDisplayName` 用于标识 OpenCode 实例；`projectName` 由客户端自动推导 worktree basename，不需要用户配置：
 
 ```jsonc
 {
-  "projectDisplayName": "示例项目",
+  "instanceDisplayName": "OpenCode Desktop",
   "actionContentMode": "strict",
   "metadataDiagnostics": "off"
 }
@@ -82,7 +84,7 @@ OpenCode 配置顶层的 `plugin` 必须是 tuple 数组。每一项是：
 
 `metadataDiagnostics` 可选 `off`（默认）、`once` 或 `sample`；非法值按 `off` 处理。启用 `once` 后，Plugin 进程生命周期内每个诊断阶段最多输出一条带统一前缀的单行安全 JSON；`sample` 每个阶段最多输出 8 条，对完全相同的安全 payload 去重，超过上限后静默停止。阶段包括 `message_updated`、`session_get`、实际调用的 `session_messages` 和最终 `outgoing_envelope`。`sample` 还会为有 session ID 的诊断分配仅存于内存的递增 `sampleSession`，同一匿名 session 在各阶段复用该数字，不输出 raw ID、匿名 ref/hash 或 message/parent ID。诊断只记录 bounded key 名、短字符串、存在性/长度、枚举状态和布尔值，不记录标题/名称正文、parent ID 值、消息正文、parts、路径、Token、URL、headers、response body 或异常 message。默认关闭时不增加诊断日志。
 
-`actionContentMode` 与服务端全局 `notification_mode` 正交：前者只控制 Question/Permission 内容隐私，后者控制是否进入通知渲染/发送链路。服务端 `notification_mode=focused` 只抑制标准状态为 `completed` 的 `subagent`，`failed`、`action_required`、root、unknown 和未来未知状态均放行；`all` 保持全部通知。
+`actionContentMode` 与服务端全局 `notification_mode` 正交：前者只控制 Question/Permission 内容隐私，后者控制是否进入通知渲染/发送链路。服务端 `notification_mode=focused` 只抑制标准状态为 `completed` 的 `subagent` 与 `auxiliary`，`failed`、`action_required`、root、unknown 和未来未知状态均放行；`all` 保持全部通知。
 
 ```jsonc
 {
@@ -164,7 +166,7 @@ Token 也可以使用受控文件：
 | `session.error` | `opencode.session_error` | 立即发送，并抑制当前周期后续 idle |
 | `permission.updated`，兼容 `permission.asked` | `opencode.permission_asked` | 独立发送，不改变 busy/idle 周期 |
 | `question.asked` | `opencode.question_asked` | 仅发送 asked；内容模式由 `actionContentMode` 控制 |
-| `message.updated` | 不发送 | 仅消费 `info.role=assistant` 的清洗后 agent/model 与 `time.created/completed` 元数据；user 或 malformed 更新忽略 |
+| `message.updated` | 不发送 | 仅消费 `info.role=assistant` 的清洗后 agent/model、`variant` 与 `time.created/completed` 元数据；user 或 malformed 更新忽略 |
 
 状态规则：
 
@@ -184,7 +186,7 @@ OpenCode 原始 session ID 不离开 Plugin。Plugin 计算：
 session.ref = first_32_hex(SHA-256("opencode:" + raw_session_id))
 ```
 
-服务端的 `NormalizedEvent` 只保留安全的短 ref 展示值，不保留原始 session ID。会话名称经过以下处理：
+服务端的 `NormalizedEvent` 只保留安全的短 ref 展示值，不保留原始 session ID。插件从 `input.worktree`、`input.project.worktree`、`input.directory` 按优先级取项目路径，只清洗并发送最后一级 `projectName`，根目录、`.`、空值或不可用时省略。会话名称经过以下处理：
 
 - 删除 bidi、zero-width、format 和行/段分隔控制字符；
 - 将控制字符、换行和连续空白归一化；
@@ -197,13 +199,13 @@ session.ref = first_32_hex(SHA-256("opencode:" + raw_session_id))
 OpenCode Session <ref12>
 ```
 
-其中 `<ref12>` 只从匿名 ref 的 ASCII 字母、数字、`.`、`_`、`-` 构建，最多 12 个字符。该 fallback 是可读的匿名关联标识，不是原始 session ID。`source.name` 使用 `projectDisplayName`，缺失时固定为 `OpenCode`；卡片详细字段始终包含 `sessionName`，但不重复包含 `projectDisplayName`，也不传原始 session ref。
+其中 `<ref12>` 只从匿名 ref 的 ASCII 字母、数字、`.`、`_`、`-` 构建，最多 12 个字符。该 fallback 是可读的匿名关联标识，不是原始 session ID。`source.name` 使用 `instanceDisplayName`，缺失时回退为 `OpenCode`；卡片详细字段增加可选的“项目”行，但不重复展示实例来源。
 
 ---
 
 ## 白名单与隐私边界
 
-Envelope 只允许显式 V1 字段：`id`、`event`、`version`、`emittedAt`、`session`、`projectDisplayName`、`agent`、`model`、`durationMs`、`startedAt`、`taskStartedAt`、`endedAt`、`counts`、`permission`、`question`、`error`。`session` 只允许 `ref`、`scope` 与清洗后的 `name`；`scope` 可为 `root`、`subagent` 或 `unknown`，缺失时服务端按 `unknown` 兼容。`parentID` 始终禁止进入 envelope；事件专属对象只允许声明过的标量、有限数组和计数，未知键 fail-closed。服务端会把项目名作为 `source.name`，把会话名（缺失时使用匿名 fallback）作为 title 和 `sessionName` 字段，并把 agent、优先为 `provider/model` 的模型、可读耗时、可靠时间和已有数据中的低敏计数放入卡片字段；`projectDisplayName` 不再作为重复详细字段。
+Envelope 只允许显式 V1 字段：`id`、`event`、`version`、`emittedAt`、`session`、可选 `instanceDisplayName`、`projectName`、`agent`、`model`、`modelVariant`、`durationMs`、`startedAt`、`taskStartedAt`、`endedAt`、`counts`、`permission`、`question`、`error`。`modelVariant` 是清洗、限长的安全字符串；它来自 OpenCode 的 Assistant `info.variant`，缺失时才来自 `session.model.variant`，不推断、不改名为原始 `reasoning_effort`。`session` 只允许 `ref`、`scope` 与清洗后的 `name`；`scope` 可为 `root`、`subagent`、`auxiliary` 或 `unknown`，缺失时服务端按 `unknown` 兼容。`parentID` 始终禁止进入 envelope；事件专属对象只允许声明过的标量、有限数组和计数，未知键 fail-closed。服务端把实例标识作为 `source.name`，把会话名（缺失时使用匿名 fallback）作为 title 和 `sessionName` 字段，并在有 `projectName` 时增加“项目”行。
 
 Question/Permission 内容默认使用 `actionContentMode=strict`，只发送类别和可用计数；`summary` 发送清洗、截断摘要而不发送完整描述；`full` 才会发送显式白名单中的问题文本、选项 label/description、推荐信息、权限标题/描述/操作目标或 patterns。`full` 仍受单段文本、数组和总 payload 上限约束。
 
@@ -216,7 +218,7 @@ Question/Permission 内容默认使用 `actionContentMode=strict`，只发送类
 - error message、response body 和任意未列入 allowlist 的字段；
 - URL、Bearer Token、Token 文件内容。
 
-Client 通过已有的 `input.client.session.get()` 判断 scope：非空字符串 `parentID` 为 `subagent`，明确 `undefined/null` 为 `root`，API 失败、非对象、空字符串或类型异常为 `unknown`。OpenCode v1.18.4 的 `message.updated.properties.info` 仅在 `role=assistant` 时被消费；清洗后的 `mode` 作为 agent，`providerID/modelID` 作为 model 元数据，`info.time.created/completed` 作为任务时间，并按匿名 session ref 放入最多 1000 条、触发后保留最近 500 条的 LRU。若 agent/model 或 Assistant 时间仍缺失，Client 最多调用一次 `session.messages(limit=10)`，逆序读取最后 assistant 的 `info`，不读取 `parts`。缓存不保存 raw ID、message ID、parts、路径、tokens 或 cost；unknown 不永久缓存，状态与缓存有界清理。若显式开启 `metadataDiagnostics`，诊断只记录这些读取动作的安全形状和 bounded allowlist 元数据，`parentID` 仍只记录 `parentIDState`，不记录其值；时间诊断只记录 `created/completed` 的存在性或 key 名。Assistant `info` 和 fallback `info` 仅可额外记录 `variant`、`reasoningEffort`、`reasoning_effort` 的清洗短 string/number/boolean；对象/数组只记录 `object`/`array` 类型。`session.get` 仅记录 nested model 的安全 `modelKeys`（最多 24 个）及对应的 `modelVariant`/`modelReasoningEffort`/`modelReasoning_effort`，顶层候选分别写为 `topLevelVariant`、`topLevelReasoningEffort`、`topLevelReasoning_effort`，不展开 model 或 provider options。
+Client 通过已有的 `input.client.session.get()` 判断 scope：非空字符串 `parentID` 为 `subagent`；只有原本会归类为 root/unknown 且清洗后的 Session 名称精确为 `smartfetch-secondary`（或显式配置的有限 auxiliary 名称）时才为 `auxiliary`，明确 `undefined/null` 仍为 `root`，API 失败、非对象、空字符串或类型异常为 `unknown`。OpenCode v1.18.4 的 `message.updated.properties.info` 仅在 `role=assistant` 时被消费；清洗后的 `mode` 作为 agent，`providerID/modelID` 作为 model 元数据，`info.time.created/completed` 作为任务时间，并按匿名 session ref 放入最多 1000 条、触发后保留最近 500 条的 LRU。若 agent/model 或 Assistant 时间仍缺失，Client 最多调用一次 `session.messages(limit=10)`，逆序读取最后 assistant 的 `info`，不读取 `parts`。缓存不保存 raw ID、message ID、parts、路径、tokens 或 cost；unknown 不永久缓存，状态与缓存有界清理。若显式开启 `metadataDiagnostics`，诊断只记录这些读取动作的安全形状和 bounded allowlist 元数据，`parentID` 仍只记录 `parentIDState`，不记录其值；时间诊断只记录 `created/completed` 的存在性或 key 名。Assistant `info` 和 fallback `info` 仅可额外记录 `variant`、`reasoningEffort`、`reasoning_effort` 的清洗短 string/number/boolean；对象/数组只记录 `object`/`array` 类型。`session.get` 仅记录 nested model 的安全 `modelKeys`（最多 24 个）及对应的 `modelVariant`/`modelReasoningEffort`/`modelReasoning_effort`，顶层候选分别写为 `topLevelVariant`、`topLevelReasoningEffort`、`topLevelReasoning_effort`，不展开 model 或 provider options。
 
 服务端对未知字段 fail-closed。不要把 OpenCode 原始 event object 直接 POST 到 AstrBot；必须由第一方 V1 Plugin 先转换为稳定 envelope。通知事件的丰富优先级为已有 event 字段、assistant 缓存、`session.get()` 兼容字段，最后才是一次 messages fallback；`provider/model`、provider-only 和 model-only 分别按组合、provider、model 展示，assistant `mode` 映射为 agent。`session.get` 或 messages 失败只记录固定脱敏 warning，不输出异常文本、ID、ref、标题或响应正文，且失败不阻断通知。若需要排查运行时结构，选择明确档位（例如低/高复杂度的新会话）运行多个新会话，临时设置 `metadataDiagnostics` 为 `once` 或 `sample`，采集后立即恢复为 `off`；诊断日志不得作为 payload、缓存或持久化数据使用。
 

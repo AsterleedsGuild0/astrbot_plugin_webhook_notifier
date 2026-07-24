@@ -127,7 +127,7 @@ JSON
 1. 先构建并安装包含 OpenCode provider 的 Webhook Notifier 测试包，然后在 AstrBot 中重载插件；未部署新服务端版本时，旧插件无法创建或处理 OpenCode Endpoint。
 2. 在 AstrBot 私聊创建 OpenCode Endpoint：`<唤醒词>whn token new private <名称> --provider opencode`。
 3. 分别保存 Plugin Page 的 Base URL、聊天返回的 Endpoint Path 和单独交付的 Bearer Token，并在受控环境中组成客户端所需的完整 Endpoint URL。
-4. 将 `integrations/opencode/webhook-notifier.ts` 放到运行 OpenCode 的机器，复制 `integrations/opencode/opencode.jsonc` 的 V1 `plugin` tuple，并用 `{env:...}` 或 `{file:...}` 提供 URL/Token。`actionContentMode` 默认 `strict`；只有明确接受业务文本/目标路径泄露风险时才设置为 `summary` 或 `full`。
+4. 将 `integrations/opencode/webhook-notifier.ts` 放到运行 OpenCode 的机器，复制 `integrations/opencode/opencode.jsonc` 的 V1 `plugin` tuple，并用 `{env:...}` 或 `{file:...}` 提供 URL/Token。可选配置 `instanceDisplayName` 作为 OpenCode 实例标识；`projectName` 由客户端自动推导 worktree basename，不需要用户配置。`actionContentMode` 默认 `strict`；只有明确接受业务文本/目标路径泄露风险时才设置为 `summary` 或 `full`。
 5. 服务端升级并重载后再部署新版 Client；完全重启 OpenCode Desktop 或 CLI 进程，再触发完成、失败和权限请求事件并核对 Bot 通知。旧服务端严格 allowlist 不接受新 `session.scope`。
 
 `python scripts/smoke_opencode_plugin.py --cli` 只验证 OpenCode CLI 会实际调用 V1 Plugin server，不能替代 AstrBot 测试包部署、Endpoint 创建和 Bot 端到端通知验收。完整流程见[OpenCode 集成指南](docs/opencode-integration.md)。
@@ -172,7 +172,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 | --- | --- | --- |
 | `enabled` | `true` | 启用插件；创建可投递 endpoint 后自动启动 HTTP 服务 |
 | `render_mode` | `text` | 选择 `text` 或 `html_image` 以使用纯文本或是HTML渲染模式 |
-| `notification_mode` | `focused` | `focused` 仅抑制成功完成的 subagent；`all` 发送全部通知 |
+| `notification_mode` | `focused` | `focused` 仅抑制成功完成的 subagent/auxiliary；`all` 发送全部通知 |
 | `enable_private_notifications` | `false` | 是否允许 Webhook 主动投递到私聊目标 |
 | `fallback_to_text` | `true` | HTML 图片链路失败时是否降级为文本 |
 | `server` | 本地监听 | 配置 `host`、`port`、`base_path`、`public_base_url` 与请求体上限 |
@@ -194,7 +194,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 - 私聊主动通知默认关闭；开启前核对 QQ 官方规则或 OneBot 实现的风控边界。
 - 社区 hook 可能发送截断 prompt、cwd、session 文件、模型和消息计数等元数据；部署前评估数据外发边界，提交 Issue、日志或截图时一并脱敏。
 - OpenCode 通知默认只发送 action 类别/计数；`full` 内容模式是显式 opt-in，虽有字段白名单和大小上限，仍可能外发问题、权限描述或目标路径。
-- `actionContentMode` 只控制 OpenCode Question/Permission 内容隐私，与服务端 `notification_mode` 正交；`focused` 只抑制成功完成的 subagent，unknown 会 fail-open 放行。
+- `actionContentMode` 只控制 OpenCode Question/Permission 内容隐私，与服务端 `notification_mode` 正交；`focused` 只抑制成功完成的 subagent/auxiliary，unknown 会 fail-open 放行。
 - OpenCode Client 只发送匿名 `session.ref` 与 `session.scope`，不发送 `parentID`；部署必须服务端先升级、OpenCode Client 后重启。
 - adapter 实例的 `platform_id` 发生变化时，不要直接编辑数据文件，按 [rebind runbook](docs/platform-id-rebind-runbook.md) 离线处理。
 

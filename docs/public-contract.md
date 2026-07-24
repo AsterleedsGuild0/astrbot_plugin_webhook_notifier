@@ -33,9 +33,10 @@
 - #19：OpenCode Server Adapter 与四类 V1 envelope。
 - #20：OpenCode V1 Client Plugin、正确 `plugin` tuple、env/file 凭据、状态机、timeout/retry 和 at-least-once 语义。
 - #21：严格白名单、匿名 session ref/name fallback、Bun/Python/CLI smoke 和集成文档。
-- OpenCode 丰富通知字段：`projectDisplayName`、会话名、agent、`provider/model`、会话开始时间、Assistant 任务时间与可读耗时/低敏计数，以及默认 strict、显式 opt-in 的 `actionContentMode`。NormalizedEvent 的 title 使用会话名或匿名 fallback，source 使用项目名或固定 `OpenCode`，`sessionName` 始终存在且不重复展示 `projectDisplayName`。
-- OpenCode V1 `session.scope`（`root|subagent|unknown`）与 Client scope 判断；`parentID` 不是公共字段，绝不发送。
-- 全局 `notification_mode` 仅允许 `focused`（默认）和 `all`；`focused` 只抑制 `subagent` 的 `completed`，unknown scope/status fail-open。策略过滤返回 HTTP 200、`message=skipped`、`skip_reason=notification_mode_filtered`、`rendered=false`、`delivered=false`、`retryable=false`，且不进入 renderer、T2I 或 sender。
+- OpenCode 丰富通知字段：实例标识 `instanceDisplayName`、客户端自动推导的 `projectName`、会话名、agent、`provider/model`、会话开始时间、Assistant 任务时间与可读耗时/低敏计数，以及默认 strict、显式 opt-in 的 `actionContentMode`；项目名只在详细字段中显示。
+- OpenCode 可选模型档位字段 `modelVariant`：优先来自 Assistant `info.variant`，缺失时来自 `session.model.variant`；展示标签为“思考深度”，已知值按本地化映射显示。该字段不保证等同于 provider 原始 `reasoning_effort`/`reasoningEffort`，不根据 provider/model 推断。
+- OpenCode V1 `session.scope`（`root|subagent|auxiliary|unknown`）与 Client scope 判断；`parentID` 不是公共字段，绝不发送。默认精确识别 `smartfetch-secondary`，非空 `parentID` 始终优先为 `subagent`。
+- 全局 `notification_mode` 仅允许 `focused`（默认）和 `all`；`focused` 只抑制 `subagent` 与 `auxiliary` 的 `completed`，unknown scope/status fail-open。策略过滤返回 HTTP 200、`message=skipped`、`scope`、`reason=notification_mode_filtered`、`skip_reason=notification_mode_filtered`、`rendered=false`、`delivered=false`、`retryable=false`，且不进入 renderer、T2I 或 sender。
 
 `actionContentMode` 与 `notification_mode` 正交：前者只控制 Question/Permission 内容隐私，后者只控制通知是否发送。
 
