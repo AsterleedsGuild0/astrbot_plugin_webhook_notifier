@@ -26,7 +26,7 @@ def _payload(session: dict) -> dict:
     }
 
 
-@pytest.mark.parametrize("scope", ["root", "subagent", "unknown"])
+@pytest.mark.parametrize("scope", ["root", "subagent", "auxiliary", "unknown"])
 def test_opencode_scope_round_trips_without_render_fields(scope: str) -> None:
     event = OpenCodeProviderAdapter().parse(
         headers={"x-opencode-event": "opencode.session_idle"},

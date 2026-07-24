@@ -230,7 +230,7 @@ class TestRenderHtmlData:
         event = _make_event(title="Session One")
         event.status = "action_required"
         event.fields = [
-            {"label": "projectDisplayName", "value": "Demo"},
+            {"label": "projectName", "value": "Demo"},
             {"label": "sessionName", "value": "Session One"},
             {"label": "question[12].header", "value": "Environment"},
             {"label": "unknownField", "value": "keep"},

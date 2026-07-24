@@ -22,6 +22,9 @@ import type {
 const {
   _hashSessionRef,
   _sanitiseName,
+  _projectNameFromPath,
+  _projectNameFromInput,
+  _deriveSessionScope,
   _deriveErrorCategory,
   _derivePermissionCategory,
   _resolveConfig,
@@ -290,6 +293,66 @@ describe("_sanitiseName", () => {
 
   it("returns undefined if only dangerous chars", () => {
     expect(_sanitiseName("\u202e\u200b")).toBeUndefined();
+  });
+});
+
+describe("project and instance display names", () => {
+  it("keeps only the safe basename using the documented input priority", () => {
+    expect(_projectNameFromInput({
+      client: {} as any,
+      worktree: "/private/primary-project",
+      project: { worktree: "/private/fallback-project" },
+      directory: "/private/directory-project",
+    } as any)).toBe("primary-project");
+    expect(_projectNameFromInput({
+      client: {} as any,
+      project: { worktree: "/private/fallback-project" },
+      directory: "/private/directory-project",
+    } as any)).toBe("fallback-project");
+    expect(_projectNameFromInput({
+      client: {} as any,
+      directory: "/private/directory-project",
+    } as any)).toBe("directory-project");
+  });
+
+  it("omits roots and never returns the complete path", () => {
+    expect(_projectNameFromPath("/")).toBeUndefined();
+    expect(_projectNameFromPath(".")).toBeUndefined();
+    expect(_projectNameFromPath("/private/project/")).toBe("project");
+    expect(_projectNameFromPath("/private/project")).not.toContain("/private");
+  });
+
+  it("re-sanitises an internal project value before envelope construction", async () => {
+    const envelope = await _buildEnvelope(
+      makeEvent({ type: "session.idle", projectName: "/private/project" }),
+      "evt-project-boundary",
+    );
+    expect(envelope!.projectName).toBe("project");
+    expect(JSON.stringify(envelope)).not.toContain("/private/project");
+  });
+
+  it("includes the configured instanceDisplayName", async () => {
+    const config = _resolveConfig(makeConfig({ instanceDisplayName: "Desktop A" }), noopLog())!;
+    const envelope = await _buildEnvelope(
+      makeEvent({ type: "session.idle", projectName: "actual-project" }),
+      "evt-instance",
+      config,
+    );
+    expect(envelope).toMatchObject({
+      instanceDisplayName: "Desktop A",
+      projectName: "actual-project",
+    });
+  });
+});
+
+describe("_deriveSessionScope", () => {
+  it("recognises only the exact smartfetch auxiliary name", () => {
+    expect(_deriveSessionScope({ title: "smartfetch-secondary" })).toBe("auxiliary");
+    expect(_deriveSessionScope({ title: "foo-secondary" })).toBe("root");
+  });
+
+  it("prioritises a non-empty parentID over an auxiliary-looking name", () => {
+    expect(_deriveSessionScope({ title: "smartfetch-secondary", parentID: "parent-1" })).toBe("subagent");
   });
 });
 
@@ -618,7 +681,7 @@ describe("_buildEnvelope", () => {
   });
 
   it("includes project/session/model/time and bounded low-sensitivity counts", async () => {
-    const cfg = _resolveConfig(makeConfig({ projectDisplayName: "Demo Project" }), noopLog())!;
+    const cfg = _resolveConfig(makeConfig({ instanceDisplayName: "Demo Instance" }), noopLog())!;
     const e = await _buildEnvelope(
       makeEvent({
         type: "session.idle",
@@ -635,7 +698,7 @@ describe("_buildEnvelope", () => {
       cfg,
     );
     expect(e).toMatchObject({
-      projectDisplayName: "Demo Project",
+      instanceDisplayName: "Demo Instance",
       agent: "build-agent",
       model: "openai/gpt-5",
       durationMs: 65000,
@@ -1347,6 +1410,7 @@ describe("PluginModule — default export shape", () => {
 
 describe("Server — V1 loader integration path", () => {
   const mockInput = {
+    worktree: "/private/My-Project",
     client: {
       session: {
         get: async () => ({ data: { title: "My Session" } }),
@@ -1412,6 +1476,8 @@ describe("Server — V1 loader integration path", () => {
     expect(body.session.ref).toMatch(/^[0-9a-f]{32}$/);
     // Session name enriched from client.session.get
     expect(body.session.name).toBe("My Session");
+    expect(body.instanceDisplayName).toBeUndefined();
+    expect(body.projectName).toBe("My-Project");
   });
 
   it("session.status busy→idle with legacy string status via wrapper", async () => {
@@ -1812,6 +1878,7 @@ describe("v1.18.4 message.updated assistant metadata", () => {
             mode: " build-agent ",
             providerID: "provider-a",
             modelID: "model-a",
+            variant: "medium",
             time: { created: 1_749_999_999_000, completed: 1_750_000_000_000 },
             parts: [{ text: "private body" }],
             tokens: { input: 10 },
@@ -1826,6 +1893,7 @@ describe("v1.18.4 message.updated assistant metadata", () => {
       agent: "build-agent",
       providerID: "provider-a",
       modelID: "model-a",
+      modelVariant: "medium",
       created: "2025-06-15T15:06:39.000Z",
       completed: "2025-06-15T15:06:40.000Z",
     });
@@ -1846,6 +1914,7 @@ describe("v1.18.4 message.updated assistant metadata", () => {
       agent: "build-agent",
       providerID: "provider-a",
       modelID: "model-a",
+      modelVariant: "medium",
       created: "2025-06-15T15:06:39.000Z",
       completed: "2025-06-15T15:06:40.000Z",
     });
@@ -1874,6 +1943,122 @@ describe("v1.18.4 message.updated assistant metadata", () => {
 
     expect(sendCount).toBe(0);
     expect(_sessions.size).toBe(0);
+  });
+
+  it("prefers Assistant info.variant over session.model.variant", async () => {
+    globalThis.fetch = mock(async () => new Response("ok", { status: 200 }));
+    const hooks = await defaultModule.server(
+      {
+        client: {
+          session: {
+            get: async () => ({
+              data: {
+                model: { providerID: "provider-a", modelID: "model-a", variant: "medium" },
+                time: { created: 1_750_000_000_000 },
+              },
+            }),
+          },
+        },
+      } as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: {
+        id: "message-variant-priority",
+        type: "message.updated",
+        properties: {
+          info: {
+            sessionID: "variant-priority-session",
+            role: "assistant",
+            mode: "agent",
+            providerID: "provider-a",
+            modelID: "model-a",
+            variant: "max",
+            time: { created: 1_750_000_000_000, completed: 1_750_000_001_000 },
+          },
+        },
+      },
+    });
+    await hooks.event!({
+      event: {
+        id: "variant-priority-busy",
+        type: "session.status",
+        properties: { sessionID: "variant-priority-session", status: { type: "busy" } },
+      },
+    });
+    await hooks.event!({
+      event: {
+        id: "variant-priority-idle",
+        type: "session.status",
+        properties: { sessionID: "variant-priority-session", status: { type: "idle" } },
+      },
+    });
+
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.modelVariant).toBe("max");
+  });
+
+  it("falls back to session.model.variant when Assistant variant is missing", async () => {
+    globalThis.fetch = mock(async () => new Response("ok", { status: 200 }));
+    const hooks = await defaultModule.server(
+      {
+        client: {
+          session: {
+            get: async () => ({
+              data: {
+                model: { providerID: "deepseek", modelID: "deepseek-v4-flash", variant: "default" },
+              },
+            }),
+          },
+        },
+      } as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: {
+        id: "variant-fallback-busy",
+        type: "session.status",
+        properties: { sessionID: "variant-fallback-session", status: { type: "busy" } },
+      },
+    });
+    await hooks.event!({
+      event: {
+        id: "variant-fallback-idle",
+        type: "session.status",
+        properties: { sessionID: "variant-fallback-session", status: { type: "idle" } },
+      },
+    });
+
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.modelVariant).toBe("default");
+  });
+
+  it("omits modelVariant when neither safe source provides it", async () => {
+    globalThis.fetch = mock(async () => new Response("ok", { status: 200 }));
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({ data: {} }) } } } as any,
+      makeConfig(),
+    );
+
+    await hooks.event!({
+      event: {
+        id: "variant-missing-busy",
+        type: "session.status",
+        properties: { sessionID: "variant-missing-session", status: { type: "busy" } },
+      },
+    });
+    await hooks.event!({
+      event: {
+        id: "variant-missing-idle",
+        type: "session.status",
+        properties: { sessionID: "variant-missing-session", status: { type: "idle" } },
+      },
+    });
+
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body).not.toHaveProperty("modelVariant");
   });
 });
 
@@ -2688,8 +2873,8 @@ describe("_enrichEvent — session metadata enrichment", () => {
 });
 
 describe("session scope contract", () => {
-  it("builds root, subagent and unknown scopes without parentID", async () => {
-    for (const scope of ["root", "subagent", "unknown"] as const) {
+  it("builds root, subagent, auxiliary and unknown scopes without parentID", async () => {
+    for (const scope of ["root", "subagent", "auxiliary", "unknown"] as const) {
       const envelope = await _buildEnvelope(
         makeEvent({ type: "session.idle", sessionScope: scope }),
         `scope-${scope}`,
@@ -2724,6 +2909,29 @@ describe("session scope contract", () => {
     );
     expect(event.sessionScope).toBe("subagent");
     expect(JSON.stringify(event)).not.toContain("parent-1");
+  });
+
+  it("derives auxiliary only for exact smartfetch-secondary and keeps parent priority", async () => {
+    const auxiliary = { type: "session.idle", sessionId: "auxiliary-1" } as OpenCodeEvent;
+    await _enrichEvent(
+      auxiliary,
+      { client: { session: { get: async () => ({ data: { title: "smartfetch-secondary" } }) } } } as any,
+    );
+    expect(auxiliary.sessionScope).toBe("auxiliary");
+
+    const ordinary = { type: "session.idle", sessionId: "ordinary-secondary" } as OpenCodeEvent;
+    await _enrichEvent(
+      ordinary,
+      { client: { session: { get: async () => ({ data: { title: "foo-secondary" } }) } } } as any,
+    );
+    expect(ordinary.sessionScope).toBe("root");
+
+    const child = { type: "session.idle", sessionId: "child-secondary" } as OpenCodeEvent;
+    await _enrichEvent(
+      child,
+      { client: { session: { get: async () => ({ data: { title: "smartfetch-secondary", parentID: "parent" } }) } } } as any,
+    );
+    expect(child.sessionScope).toBe("subagent");
   });
 
   it("uses unknown for API failure, non-object data, empty and invalid parentID", async () => {

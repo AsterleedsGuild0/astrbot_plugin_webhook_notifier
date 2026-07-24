@@ -81,9 +81,10 @@ class NormalizedEvent:
     fields: list[dict[str, Any]] = field(default_factory=list)
     links: list[dict[str, Any]] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    model_variant: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "provider": self.provider,
             "event": self.event,
             "version": self.version,
@@ -98,6 +99,9 @@ class NormalizedEvent:
             "links": self.links,
             "raw": self.raw,
         }
+        if self.model_variant is not None:
+            result["model_variant"] = self.model_variant
+        return result
 
 
 @dataclass(frozen=True)

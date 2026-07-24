@@ -365,6 +365,7 @@ class WebhookServer:
                 request_id=request_id,
                 provider=event.provider,
                 event_name=event.event,
+                scope=self._session_scope_value(event),
             )
 
         logger.info(
@@ -686,6 +687,7 @@ class WebhookServer:
         request_id: str,
         provider: str,
         event_name: str,
+        scope: str = "unknown",
     ) -> web.Response:
         """Return the non-retryable response for a policy-filtered event."""
         render_mode = self._get_render_mode()
@@ -697,6 +699,7 @@ class WebhookServer:
                     "request_id": request_id,
                     "provider": provider,
                     "event": event_name,
+                    "scope": scope,
                     "delivered": False,
                     "targets": [],
                     "render_mode": render_mode,
@@ -705,6 +708,7 @@ class WebhookServer:
                     "fallback_reason": None,
                     "skipped": True,
                     "skip_reason": "notification_mode_filtered",
+                    "reason": "notification_mode_filtered",
                     "rendered": False,
                     "retryable": False,
                 },

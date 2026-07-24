@@ -365,8 +365,10 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert e.summary == "会话完成"
         assert e.raw == {}
         assert e.version == 1
+        assert e.model_variant is None
         fields = {f["label"]: f["value"] for f in e.fields}
         assert fields["sessionName"] == e.title
+        assert "modelVariant" not in fields
 
     def test_session_idle_with_all_optionals(self):
         e = self._make(
@@ -378,6 +380,7 @@ class TestOpenCodeProviderAdapterParseSuccess:
                 "session": {"ref": "s_ref", "name": "My Task"},
                 "agent": "my-agent",
                 "model": "gpt-5",
+                "modelVariant": "medium",
                 "durationMs": 15000,
                 "taskStartedAt": "2026-07-22T12:00:00Z",
                 "endedAt": "2026-07-22T12:00:15Z",
@@ -389,8 +392,33 @@ class TestOpenCodeProviderAdapterParseSuccess:
         labels = {f["label"] for f in e.fields}
         assert "agent" in labels
         assert "model" in labels
+        assert e.model_variant == "medium"
+        assert "modelVariant" in labels
         assert "durationMs" in labels
         assert "sessionRef" in labels
+
+    @pytest.mark.parametrize(
+        ("variant", "display_value"),
+        [
+            ("default", "默认"),
+            ("low", "低"),
+            ("medium", "中"),
+            ("high", "高"),
+            ("max", "最高"),
+            ("experimental", "experimental"),
+        ],
+    )
+    def test_model_variant_is_normalized_and_display_localized(
+        self, variant, display_value
+    ):
+        event = self._make(payload={**_VALID_PAYLOAD, "modelVariant": variant})
+        assert event.model_variant == variant
+        raw_fields = {f["label"]: f["value"] for f in event.fields}
+        assert raw_fields["modelVariant"] == variant
+        display_fields = {
+            f["label"]: f["value"] for f in render_html_data(event)["event"]["fields"]
+        }
+        assert display_fields["思考深度"] == display_value
 
     def test_session_error(self):
         e = self._make(
@@ -458,7 +486,8 @@ class TestOpenCodeProviderAdapterParseSuccess:
                 "version": 1,
                 "emittedAt": "2026-07-22T12:00:00.000Z",
                 "session": {"ref": "s_ref", "name": "Session One"},
-                "projectDisplayName": "Demo Project",
+                "instanceDisplayName": "Demo Instance",
+                "projectName": "demo-project",
                 "agent": "build-agent",
                 "model": "openai/gpt-5",
                 "durationMs": 65000,
@@ -494,8 +523,8 @@ class TestOpenCodeProviderAdapterParseSuccess:
             headers={"x-opencode-event": "opencode.question_asked"},
         )
         fields = {f["label"]: f["value"] for f in e.fields}
-        assert e.source["name"] == "Demo Project"
-        assert "projectDisplayName" not in fields
+        assert e.source["name"] == "Demo Instance"
+        assert fields["projectName"] == "demo-project"
         assert fields["sessionName"] == "Session One"
         assert fields["model"] == "openai/gpt-5"
         assert fields["duration"] == "1m 5s"
@@ -508,6 +537,27 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert fields["questionCount"] == "1"
         assert fields["optionCount"] == "2"
         assert "Deploy to production" in fields["question[1].options"]
+
+    def test_instance_source_and_project_detail_are_separate(self):
+        event = self._make(
+            payload={
+                **_VALID_PAYLOAD,
+                "session": {"ref": "s_ref", "name": "Session One"},
+                "instanceDisplayName": "OpenCode Desktop",
+                "projectName": "actual-project",
+            }
+        )
+        fields = {f["label"]: f["value"] for f in event.fields}
+        assert event.source["name"] == "OpenCode Desktop"
+        assert fields["projectName"] == "actual-project"
+        assert fields["sessionName"] == "Session One"
+
+    def test_unknown_legacy_instance_field_is_rejected(self):
+        legacy_field = "project" + "DisplayName"
+        with pytest.raises(ProviderError) as error:
+            self._make(payload={**_VALID_PAYLOAD, legacy_field: "Legacy Instance"})
+        assert error.value.code == "invalid_payload"
+        assert str(error.value) == "不允许的字段"
 
     def test_rich_permission_fields_are_allowlisted(self):
         e = self._make(
@@ -579,15 +629,15 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert display_fields["问题 1 选项"] == "1. 继续（推荐）\n2. 取消"
 
     @pytest.mark.parametrize(
-        "session_name, project_name, expected_title, expected_source",
+        "session_name, instance_name, expected_title, expected_source",
         [
-            ("Task", "Project", "Task", "Project"),
-            (None, "Project", "OpenCode Session s_ref", "Project"),
+            ("Task", "OpenCode Desktop", "Task", "OpenCode Desktop"),
+            (None, "OpenCode Desktop", "OpenCode Session s_ref", "OpenCode Desktop"),
             ("Task", None, "Task", "OpenCode"),
         ],
     )
     def test_title_source_and_session_name_contract(
-        self, session_name, project_name, expected_title, expected_source
+        self, session_name, instance_name, expected_title, expected_source
     ):
         payload = {
             **_VALID_PAYLOAD,
@@ -595,15 +645,14 @@ class TestOpenCodeProviderAdapterParseSuccess:
         }
         if session_name is not None:
             payload["session"]["name"] = session_name
-        if project_name is not None:
-            payload["projectDisplayName"] = project_name
+        if instance_name is not None:
+            payload["instanceDisplayName"] = instance_name
 
         event = self._make(payload=payload)
         fields = {f["label"]: f["value"] for f in event.fields}
         assert event.title == expected_title
         assert event.source["name"] == expected_source
         assert fields["sessionName"] == expected_title
-        assert "projectDisplayName" not in fields
 
 
 class TestOpenCodeFormatting:
@@ -772,6 +821,11 @@ class TestOpenCodeProviderAdapterParseErrors:
         with pytest.raises(ProviderError):
             self._parse(payload={**_VALID_PAYLOAD, "durationMs": 604800001})
 
+    @pytest.mark.parametrize("value", [123, "", " " * 2, "x" * 129])
+    def test_model_variant_requires_safe_bounded_string(self, value):
+        with pytest.raises(ProviderError):
+            self._parse(payload={**_VALID_PAYLOAD, "modelVariant": value})
+
     @pytest.mark.parametrize("value", [123, "not-a-timestamp", "2026-07-22T12:00:00"])
     def test_task_started_at_requires_timezone_timestamp(self, value):
         with pytest.raises(ProviderError) as exc:
@@ -851,9 +905,7 @@ class TestOpenCodeProviderAdapterParseErrors:
 
     def test_oversized_payload_rejected(self):
         with pytest.raises(ProviderError):
-            self._parse(
-                payload={**_VALID_PAYLOAD, "projectDisplayName": "x" * (65 * 1024)}
-            )
+            self._parse(payload={**_VALID_PAYLOAD, "projectName": "x" * (65 * 1024)})
 
 
 # ─── Name 清洗集成 ────────────────────────────────────────

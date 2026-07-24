@@ -41,10 +41,14 @@ def _event(scope: str, status: str) -> NormalizedEvent:
 
 
 @pytest.mark.parametrize("mode", ["focused", "all"])
-@pytest.mark.parametrize("scope", ["root", "subagent", "unknown"])
+@pytest.mark.parametrize("scope", ["root", "subagent", "auxiliary", "unknown"])
 @pytest.mark.parametrize("status", ["completed", "failed", "action_required"])
 def test_policy_matrix(mode: str, scope: str, status: str) -> None:
-    expected = not (mode == "focused" and scope == "subagent" and status == "completed")
+    expected = not (
+        mode == "focused"
+        and scope in {"subagent", "auxiliary"}
+        and status == "completed"
+    )
     assert should_notify(mode, scope, status) is expected
 
 
@@ -120,8 +124,11 @@ async def test_filtered_event_skips_all_render_and_send_stages(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["subagent", "auxiliary"])
 @pytest.mark.parametrize("status", ["failed", "action_required"])
-async def test_focused_allows_failed_and_action_required(status: str) -> None:
+async def test_focused_allows_failed_and_action_required(
+    status: str, scope: str
+) -> None:
     class Sender:
         def __init__(self):
             self.sent = 0
@@ -141,7 +148,53 @@ async def test_focused_allows_failed_and_action_required(status: str) -> None:
         plugin_config={"notification_mode": "focused", "render_mode": "text"},
     )
     response = await server._dispatch_event(
-        _event("subagent", status), _endpoint(), None, "allowed-request"
+        _event(scope, status), _endpoint(), None, "allowed-request"
+    )
+    assert json.loads(cast(bytes, response.body).decode())["message"] == "ok"
+    assert sender.sent == 1
+
+
+@pytest.mark.asyncio
+async def test_focused_filters_auxiliary_completion_with_scope_and_reason() -> None:
+    sender = _RecordingSender()
+    server = WebhookServer(
+        config=ServerConfig(),
+        registry=object(),  # type: ignore[arg-type]
+        sender=sender,  # type: ignore[arg-type]
+        plugin_config={"notification_mode": "focused", "render_mode": "text"},
+    )
+    response = await server._dispatch_event(
+        _event("auxiliary", "completed"), _endpoint(), None, "auxiliary-request"
+    )
+    payload = json.loads(cast(bytes, response.body).decode())
+    assert payload["message"] == "skipped"
+    assert payload["data"]["scope"] == "auxiliary"
+    assert payload["data"]["skip_reason"] == "notification_mode_filtered"
+    assert payload["data"]["reason"] == "notification_mode_filtered"
+
+
+@pytest.mark.asyncio
+async def test_all_sends_auxiliary_completion() -> None:
+    class Sender:
+        def __init__(self):
+            self.sent = 0
+
+        def preflight_private_notification_policy(self, *_args, **_kwargs):
+            return None
+
+        async def send_text(self, *_args, **_kwargs):
+            self.sent += 1
+            return [{"name": "default", "ok": True, "error": None}]
+
+    sender = Sender()
+    server = WebhookServer(
+        config=ServerConfig(),
+        registry=object(),  # type: ignore[arg-type]
+        sender=sender,  # type: ignore[arg-type]
+        plugin_config={"notification_mode": "all", "render_mode": "text"},
+    )
+    response = await server._dispatch_event(
+        _event("auxiliary", "completed"), _endpoint(), None, "auxiliary-all-request"
     )
     assert json.loads(cast(bytes, response.body).decode())["message"] == "ok"
     assert sender.sent == 1

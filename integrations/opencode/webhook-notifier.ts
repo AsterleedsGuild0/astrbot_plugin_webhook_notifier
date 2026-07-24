@@ -1,7 +1,7 @@
 /**
  * OpenCode V1 Webhook Notifier Plugin
  *
- * Single-file TypeScript Plugin for OpenCode Desktop/CLI (SDK 1.17.9).
+ * Single-file TypeScript Plugin for OpenCode Desktop/CLI (SDK 1.18.x).
  * Listens on `event` hook, filters to four MVP event types, constructs
  * a safe minimal envelope, and POSTs to a configurable webhook URL.
  *
@@ -29,7 +29,8 @@ interface RawPluginOptions {
   timeoutMs?: number;
   enabled?: boolean;
   events?: string[];
-  projectDisplayName?: string;
+  instanceDisplayName?: string;
+  auxiliarySessionNames?: string[];
   actionContentMode?: string;
   metadataDiagnostics?: string;
   [key: string]: unknown;
@@ -45,7 +46,8 @@ interface ResolvedConfig {
   timeoutMs: number;
   enabled: boolean;
   events: Set<string>;
-  projectDisplayName: string | undefined;
+  instanceDisplayName: string | undefined;
+  auxiliarySessionNames: Set<string>;
   actionContentMode: ActionContentMode;
   metadataDiagnostics: MetadataDiagnostics;
 }
@@ -65,9 +67,11 @@ interface Envelope {
     name?: string;
     scope: SessionScope;
   };
-  projectDisplayName?: string;
+  instanceDisplayName?: string;
+  projectName?: string;
   agent?: string;
   model?: string;
+  modelVariant?: string;
   durationMs?: number;
   startedAt?: string;
   taskStartedAt?: string;
@@ -82,7 +86,7 @@ interface Envelope {
   error?: { category: string; code?: string };
 }
 
-type SessionScope = "root" | "subagent" | "unknown";
+type SessionScope = "root" | "subagent" | "auxiliary" | "unknown";
 
 interface QuestionEnvelope {
   count?: number;
@@ -125,8 +129,10 @@ interface OpenCodeEvent {
     time?: { created?: unknown; updated?: unknown };
   };
   sessionScope?: SessionScope;
+  projectName?: string;
   agent?: string;
   model?: unknown;
+  modelVariant?: unknown;
   provider?: unknown;
   durationMs?: number;
   startedAt?: unknown;
@@ -193,6 +199,7 @@ interface AssistantMetadata {
   agent?: string;
   providerID?: string;
   modelID?: string;
+  modelVariant?: string;
   created?: string;
   completed?: string;
 }
@@ -218,6 +225,8 @@ interface MetadataDiagnosticContext {
 // ─── Constants ──────────────────────────────────────────────
 
 const MAX_NAME_LENGTH = 200;
+const MAX_AUXILIARY_SESSION_NAMES = 16;
+const DEFAULT_AUXILIARY_SESSION_NAMES = new Set(["smartfetch-secondary"]);
 const MAX_SESSION_REF_LENGTH = 128;
 const MAX_AGENT_MODEL_LENGTH = 128;
 const MAX_ACTION_TEXT_LENGTH = 512;
@@ -418,6 +427,51 @@ function _sanitiseName(raw: string | null | undefined): string | undefined {
     s = s.slice(0, MAX_NAME_LENGTH).trimEnd();
   }
   return s || undefined;
+}
+
+/**
+ * Keep only a safe final path component for the project display field.
+ * Paths are never copied into the envelope; only this bounded basename may
+ * leave the plugin.
+ */
+function _projectNameFromPath(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const value = raw.trim();
+  if (!value || value === "." || value === "..") return undefined;
+  if (/^(?:[\\/]+|[A-Za-z]:[\\/]*)$/.test(value)) return undefined;
+
+  const withoutTrailingSeparators = value.replace(/[\\/]+$/, "");
+  if (!withoutTrailingSeparators || withoutTrailingSeparators === "." || withoutTrailingSeparators === "..") {
+    return undefined;
+  }
+  const basename = withoutTrailingSeparators.split(/[\\/]/).pop();
+  if (!basename || basename === "." || basename === ".." || /^[A-Za-z]:$/.test(basename)) {
+    return undefined;
+  }
+  return _sanitiseName(basename);
+}
+
+function _projectNameFromInput(input: PluginInput): string | undefined {
+  const projectWorktree = input.project && typeof input.project === "object"
+    ? input.project.worktree
+    : undefined;
+  for (const candidate of [input.worktree, projectWorktree, input.directory]) {
+    const projectName = _projectNameFromPath(candidate);
+    if (projectName) return projectName;
+  }
+  return undefined;
+}
+
+function _normaliseAuxiliarySessionNames(raw: unknown): Set<string> {
+  const names = new Set(DEFAULT_AUXILIARY_SESSION_NAMES);
+  if (!Array.isArray(raw)) return names;
+  for (const value of raw.slice(0, MAX_AUXILIARY_SESSION_NAMES)) {
+    if (names.size >= MAX_AUXILIARY_SESSION_NAMES) break;
+    if (typeof value !== "string") continue;
+    const name = _sanitiseName(value);
+    if (name) names.add(name);
+  }
+  return names;
 }
 
 /**
@@ -842,9 +896,11 @@ function _assistantMetadataFromInfo(raw: unknown): AssistantMetadata | undefined
   const agent = _sanitiseActionText(info.mode, MAX_AGENT_MODEL_LENGTH);
   const providerID = _sanitiseActionText(info.providerID, MAX_AGENT_MODEL_LENGTH);
   const modelID = _sanitiseActionText(info.modelID, MAX_AGENT_MODEL_LENGTH);
+  const modelVariant = _sanitiseActionText(info.variant, MAX_AGENT_MODEL_LENGTH);
   if (agent) metadata.agent = agent;
   if (providerID) metadata.providerID = providerID;
   if (modelID) metadata.modelID = modelID;
+  if (modelVariant) metadata.modelVariant = modelVariant;
 
   if (info.time && typeof info.time === "object" && !Array.isArray(info.time)) {
     const time = info.time as Record<string, unknown>;
@@ -863,11 +919,13 @@ function _cacheAssistantMetadata(sessionRef: string, metadata: AssistantMetadata
   const agent = _sanitiseActionText(metadata.agent, MAX_AGENT_MODEL_LENGTH);
   const providerID = _sanitiseActionText(metadata.providerID, MAX_AGENT_MODEL_LENGTH);
   const modelID = _sanitiseActionText(metadata.modelID, MAX_AGENT_MODEL_LENGTH);
+  const modelVariant = _sanitiseActionText(metadata.modelVariant, MAX_AGENT_MODEL_LENGTH);
   const created = _safeTimestamp(metadata.created);
   const completed = _safeTimestamp(metadata.completed);
   if (agent) safeMetadata.agent = agent;
   if (providerID) safeMetadata.providerID = providerID;
   if (modelID) safeMetadata.modelID = modelID;
+  if (modelVariant) safeMetadata.modelVariant = modelVariant;
   if (created) safeMetadata.created = created;
   if (completed) safeMetadata.completed = completed;
   if (Object.keys(safeMetadata).length === 0) return;
@@ -881,6 +939,9 @@ function _cacheAssistantMetadata(sessionRef: string, metadata: AssistantMetadata
   };
   if (startsNewAssistantMessage && safeMetadata.completed === undefined) {
     delete merged.completed;
+  }
+  if (startsNewAssistantMessage && safeMetadata.modelVariant === undefined) {
+    delete merged.modelVariant;
   }
   _assistantMetadata.delete(sessionRef);
   _assistantMetadata.set(sessionRef, merged);
@@ -935,12 +996,25 @@ function _modelFromSessionData(sessionData: Record<string, unknown>): string | u
   return _normaliseModel({ provider });
 }
 
+/** Read only the OpenCode session.model.variant fallback. */
+function _modelVariantFromSessionData(sessionData: Record<string, unknown>): string | undefined {
+  const rawModel = sessionData.model;
+  if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) return undefined;
+  return _sanitiseActionText(
+    (rawModel as Record<string, unknown>).variant,
+    MAX_AGENT_MODEL_LENGTH,
+  );
+}
+
 function _applyAssistantMetadata(event: OpenCodeEvent, metadata: AssistantMetadata | undefined): void {
   if (!metadata) return;
   if (!event.agent && metadata.agent) event.agent = metadata.agent;
   if (!event.model) {
     const model = _modelFromAssistantMetadata(metadata);
     if (model) event.model = model;
+  }
+  if (!event.modelVariant && metadata.modelVariant) {
+    event.modelVariant = metadata.modelVariant;
   }
   if (event.taskStartedAt === undefined && metadata.created) {
     event.taskStartedAt = metadata.created;
@@ -1126,7 +1200,7 @@ function _getState(sessionKey: string): SessionState {
 }
 
 function _cacheSessionScope(sessionRef: string, scope: SessionScope): void {
-  if (scope !== "root" && scope !== "subagent") return;
+  if (scope !== "root" && scope !== "subagent" && scope !== "auxiliary") return;
   _sessionScopes.delete(sessionRef);
   _sessionScopes.set(sessionRef, scope);
 }
@@ -1239,8 +1313,7 @@ function _resolveConfig(raw: RawPluginOptions | undefined, log: DiagnosticLog): 
       .add("question_asked");
   }
 
-  const projectDisplayName =
-    _sanitiseName(raw.projectDisplayName);
+  const instanceDisplayName = _sanitiseName(raw.instanceDisplayName);
 
   const actionContentMode: ActionContentMode =
     raw.actionContentMode === "summary" || raw.actionContentMode === "full"
@@ -1258,7 +1331,8 @@ function _resolveConfig(raw: RawPluginOptions | undefined, log: DiagnosticLog): 
     timeoutMs,
     enabled: true,
     events: eventFilter,
-    projectDisplayName,
+    instanceDisplayName,
+    auxiliarySessionNames: _normaliseAuxiliarySessionNames(raw.auxiliarySessionNames),
     actionContentMode,
     metadataDiagnostics,
   };
@@ -1277,7 +1351,8 @@ const _SUPPORTED_INPUT_EVENTS = new Set([
 async function _buildEnvelope(
   event: OpenCodeEvent,
   eventId: string,
-  config?: Pick<ResolvedConfig, "projectDisplayName" | "actionContentMode">,
+  config?: Pick<ResolvedConfig, "actionContentMode">
+    & Partial<Pick<ResolvedConfig, "instanceDisplayName">>,
 ): Promise<Envelope | null> {
   // Derive output event type
   const outputEvent = _mapEventType(event);
@@ -1302,8 +1377,13 @@ async function _buildEnvelope(
 
   const actionContentMode = config?.actionContentMode ?? "strict";
 
-  if (config?.projectDisplayName) {
-    envelope.projectDisplayName = config.projectDisplayName;
+  const instanceDisplayName = config?.instanceDisplayName;
+  if (instanceDisplayName) {
+    envelope.instanceDisplayName = instanceDisplayName;
+  }
+  const projectName = _projectNameFromPath(event.projectName);
+  if (projectName) {
+    envelope.projectName = projectName;
   }
 
   if (sessionName) {
@@ -1326,6 +1406,10 @@ async function _buildEnvelope(
   );
   if (model) {
     envelope.model = model;
+  }
+  const modelVariant = _sanitiseActionText(event.modelVariant, MAX_AGENT_MODEL_LENGTH);
+  if (modelVariant) {
+    envelope.modelVariant = modelVariant;
   }
   const startedAt = _safeTimestamp(event.startedAt);
   const taskStartedAt = _safeTimestamp(event.taskStartedAt);
@@ -1406,7 +1490,7 @@ async function _processEvent(
   if (event.sessionScope === undefined) {
     event.sessionScope = _cachedSessionScope(sessionRef) ?? "unknown";
   }
-  if (event.sessionScope === "root" || event.sessionScope === "subagent") {
+  if (event.sessionScope === "root" || event.sessionScope === "subagent" || event.sessionScope === "auxiliary") {
     _cacheSessionScope(sessionRef, event.sessionScope);
   }
 
@@ -1865,15 +1949,27 @@ async function _consumeAssistantMetadata(
 
 // ─── Session Enrichment ──────────────────────────────────────
 
-function _deriveSessionScope(data: unknown): SessionScope {
+function _deriveSessionScope(
+  data: unknown,
+  auxiliarySessionNames: ReadonlySet<string> = DEFAULT_AUXILIARY_SESSION_NAMES,
+): SessionScope {
   if (!data || typeof data !== "object" || Array.isArray(data)) return "unknown";
   const sessionData = data as Record<string, unknown>;
-  if (!("parentID" in sessionData) || sessionData.parentID === undefined || sessionData.parentID === null) {
-    return "root";
-  }
-  return typeof sessionData.parentID === "string" && sessionData.parentID.trim().length > 0
-    ? "subagent"
-    : "unknown";
+  const baseScope: SessionScope = !("parentID" in sessionData) || sessionData.parentID === undefined || sessionData.parentID === null
+    ? "root"
+    : typeof sessionData.parentID === "string" && sessionData.parentID.trim().length > 0
+      ? "subagent"
+      : "unknown";
+  if (baseScope === "subagent") return baseScope;
+
+  const sessionName = _sanitiseName(
+    typeof sessionData.title === "string"
+      ? sessionData.title
+      : typeof sessionData.name === "string"
+        ? sessionData.name
+        : undefined,
+  );
+  return sessionName && auxiliarySessionNames.has(sessionName) ? "auxiliary" : baseScope;
 }
 
 /**
@@ -1885,7 +1981,11 @@ async function _enrichEvent(
   event: OpenCodeEvent,
   input: PluginInput,
   diagnostics?: MetadataDiagnosticContext,
+  auxiliarySessionNames: ReadonlySet<string> = DEFAULT_AUXILIARY_SESSION_NAMES,
 ): Promise<void> {
+  if (!event.projectName) {
+    event.projectName = _projectNameFromInput(input);
+  }
   const rawSessionId = event.sessionId;
   if (!rawSessionId) return;
 
@@ -1896,7 +1996,7 @@ async function _enrichEvent(
   }
   const setScope = (scope: SessionScope): void => {
     event.sessionScope = scope;
-    if (scope === "root" || scope === "subagent") {
+    if (scope === "root" || scope === "subagent" || scope === "auxiliary") {
       _cacheSessionScope(sessionRef, scope);
     }
   };
@@ -1916,7 +2016,7 @@ async function _enrichEvent(
       _log.warn(SESSION_GET_WARNING);
     } else {
       sessionData = data as Record<string, unknown>;
-      setScope(_deriveSessionScope(sessionData));
+      setScope(_deriveSessionScope(sessionData, auxiliarySessionNames));
 
       // Only fill fields not already present in the event or assistant cache.
       if (!event.session) event.session = {};
@@ -1936,6 +2036,10 @@ async function _enrichEvent(
       if (!event.model) {
         const model = _modelFromSessionData(sessionData);
         if (model) event.model = model;
+      }
+      if (!event.modelVariant) {
+        const modelVariant = _modelVariantFromSessionData(sessionData);
+        if (modelVariant) event.modelVariant = modelVariant;
       }
 
       const sessionTime =
@@ -1997,6 +2101,7 @@ async function _enrichEvent(
       const metadata = _assistantMetadataFromInfo(info);
       if (metadata) {
         _cacheAssistantMetadata(sessionRef, metadata);
+        if (metadata.modelVariant) event.modelVariant = metadata.modelVariant;
         _applyAssistantMetadata(event, metadata);
       }
       break;
@@ -2019,7 +2124,7 @@ const _log: DiagnosticLog = {
   },
 };
 
-// ─── Plugin API Types (self-declared, matching OpenCode v1.17.9) ──
+// ─── Plugin API Types (self-declared, matching OpenCode v1.18.x) ──
 // No runtime dependency on @opencode-ai/plugin.
 
 /** Plugin input context from the OpenCode runtime. */
@@ -2030,6 +2135,10 @@ interface PluginInput {
       messages?(params: { path: { id: string }; query: { limit: number } }): Promise<unknown>;
     };
   };
+  /** OpenCode project context; only worktree is used for the safe basename. */
+  project?: { worktree?: unknown } | null;
+  directory?: unknown;
+  worktree?: unknown;
 }
 
 /** Plugin configuration options from opencode.jsonc plugins array. */
@@ -2039,7 +2148,8 @@ interface PluginOptions {
   timeoutMs?: number;
   enabled?: boolean;
   events?: string[];
-  projectDisplayName?: string;
+  instanceDisplayName?: string;
+  auxiliarySessionNames?: string[];
   actionContentMode?: string;
   metadataDiagnostics?: string;
   [key: string]: unknown;
@@ -2107,7 +2217,7 @@ const server: Plugin = async (input, options) => {
 
         // Attempt session metadata enrichment from runtime
         if (normalized.sessionId) {
-          await _enrichEvent(normalized, input, diagnostics);
+          await _enrichEvent(normalized, input, diagnostics, config.auxiliarySessionNames);
         }
 
         await _onEvent(normalized, config, _log);
@@ -2154,6 +2264,9 @@ export {
   _hashSessionRef,
   _generateId,
   _sanitiseName,
+  _projectNameFromPath,
+  _projectNameFromInput,
+  _deriveSessionScope,
   _deriveErrorCategory,
   _derivePermissionCategory,
   _resolveConfig,

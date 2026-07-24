@@ -23,6 +23,7 @@ class SessionScope(str, enum.Enum):
 
     ROOT = "root"
     SUBAGENT = "subagent"
+    AUXILIARY = "auxiliary"
     UNKNOWN = "unknown"
 
 
@@ -53,7 +54,7 @@ def should_notify(
 ) -> bool:
     """Return whether a standardized event may enter rendering/delivery.
 
-    ``focused`` rejects exactly successful ``subagent`` completions.  Every
+    ``focused`` rejects exactly successful ``subagent`` and ``auxiliary`` completions.  Every
     other scope or status is allowed, including unknown and future values.
     Invalid modes are normalized to ``all`` and therefore fail open.
     """
@@ -61,7 +62,11 @@ def should_notify(
     resolved_mode = normalize_notification_mode(mode)
     return not (
         resolved_mode == NotificationMode.FOCUSED.value
-        and session_scope == SessionScope.SUBAGENT.value
+        and session_scope
+        in {
+            SessionScope.SUBAGENT.value,
+            SessionScope.AUXILIARY.value,
+        }
         and status == "completed"
     )
 

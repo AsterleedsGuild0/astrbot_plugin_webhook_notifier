@@ -47,12 +47,13 @@ _STATUS_LABELS = {
 }
 
 _FIELD_LABELS = {
-    "projectDisplayName": "项目",
+    "projectName": "项目",
     "sessionName": "会话名称",
     "会话": "会话名称",
     "agent": "执行代理",
     "model": "模型",
     "modelProvider": "模型提供方",
+    "modelVariant": "思考深度",
     "duration": "当前任务耗时",
     "durationMs": "当前任务耗时",
     "startedAt": "会话开始时间",
@@ -114,11 +115,20 @@ _OPENCODE_FIELD_ORDER = {
     "执行代理": 20,
     "模型提供方": 29,
     "模型": 30,
+    "思考深度": 35,
     "当前任务耗时": 40,
     "会话已持续": 50,
     "会话开始时间": 60,
     "当前任务开始时间": 70,
     "当前任务结束时间": 80,
+}
+
+_MODEL_VARIANT_LABELS = {
+    "default": "默认",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "max": "最高",
 }
 
 
@@ -369,6 +379,12 @@ def _is_provider_only_model(value: Any) -> bool:
     return "/" not in normalized and normalized in _MODEL_PROVIDERS
 
 
+def _localize_model_variant(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return _MODEL_VARIANT_LABELS.get(value.strip().lower(), value)
+
+
 def prepare_display_fields(
     fields: Any,
     *,
@@ -428,6 +444,8 @@ def prepare_display_fields(
         )
         if raw_label in {"duration", "durationMs", "耗时", "当前任务耗时"}:
             value = format_duration_value(value)
+        elif raw_label == "modelVariant":
+            value = _localize_model_variant(value)
         elif raw_label in {
             "startedAt",
             "taskStartedAt",
@@ -512,6 +530,16 @@ def build_display_event_data(
         title=str(result.get("title", "")),
         display_context=context,
     )
+    if result.get("model_variant") is not None and not any(
+        str(field.get("label", "")) == "思考深度" for field in display_fields
+    ):
+        display_fields.append(
+            {
+                "label": "思考深度",
+                "value": _localize_model_variant(result["model_variant"]),
+                "short": True,
+            }
+        )
     if result.get("provider") == "opencode":
         session_elapsed = _derive_opencode_session_elapsed(result)
         if session_elapsed is not None:

@@ -58,8 +58,10 @@ _MSG_SECURE: dict[str, str] = {
     "session.scope": "无效的 session.scope 字段",
     "agent": "无效的 agent 字段",
     "model": "无效的 model 字段",
+    "modelVariant": "无效的 modelVariant 字段",
     "durationMs": "无效的 durationMs 字段",
-    "projectDisplayName": "无效的 projectDisplayName 字段",
+    "instanceDisplayName": "无效的 instanceDisplayName 字段",
+    "projectName": "无效的 projectName 字段",
     "startedAt": "无效的 startedAt 字段",
     "taskStartedAt": "无效的 taskStartedAt 字段",
     "endedAt": "无效的 endedAt 字段",
@@ -221,6 +223,7 @@ def _check_session_scope(val: Any) -> SessionScope:
     if not isinstance(val, str) or val not in {
         SessionScope.ROOT.value,
         SessionScope.SUBAGENT.value,
+        SessionScope.AUXILIARY.value,
         SessionScope.UNKNOWN.value,
     }:
         raise ProviderError(
@@ -240,6 +243,13 @@ def _check_agent_or_model(val: Any, field: str) -> str | None:
     if len(trimmed) > _MAX_AGENT_MODEL:
         raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
     return trimmed
+
+
+def _check_model_variant(val: Any) -> str | None:
+    """校验可选的 OpenCode variant；不把它解释为 provider 原始 reasoning effort。"""
+    if val is None:
+        return None
+    return _check_action_text(val, "modelVariant", max_length=_MAX_AGENT_MODEL)
 
 
 def _check_duration_ms(val: Any) -> int | None:
@@ -617,8 +627,10 @@ class OpenCodeProviderAdapter(ProviderAdapter):
                     "session",
                     "agent",
                     "model",
+                    "modelVariant",
                     "durationMs",
-                    "projectDisplayName",
+                    "instanceDisplayName",
+                    "projectName",
                     "startedAt",
                     "taskStartedAt",
                     "endedAt",
@@ -657,9 +669,13 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         # 5. 可选标量
         agent = _check_agent_or_model(payload.get("agent"), "agent")
         model = _check_agent_or_model(payload.get("model"), "model")
+        model_variant = _check_model_variant(payload.get("modelVariant"))
         duration_ms = _check_duration_ms(payload.get("durationMs"))
-        project_display_name = _clean_session_name(
-            _check_session_name(payload.get("projectDisplayName"))
+        instance_display_name = _clean_session_name(
+            _check_session_name(payload.get("instanceDisplayName"))
+        )
+        project_name = _clean_session_name(
+            _check_session_name(payload.get("projectName"))
         )
         started_at = _check_optional_timestamp(payload.get("startedAt"), "startedAt")
         task_started_at = _check_optional_timestamp(
@@ -743,8 +759,10 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             session_scope=session_scope,
             agent=agent,
             model=model,
+            model_variant=model_variant,
             duration_ms=duration_ms,
-            project_display_name=project_display_name,
+            instance_display_name=instance_display_name,
+            project_name=project_name,
             started_at=started_at,
             task_started_at=task_started_at,
             ended_at=ended_at,
@@ -765,8 +783,10 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         session_scope: SessionScope,
         agent: str | None,
         model: str | None,
+        model_variant: str | None,
         duration_ms: int | None,
-        project_display_name: str | None,
+        instance_display_name: str | None,
+        project_name: str | None,
         started_at: str | None,
         task_started_at: str | None,
         ended_at: str | None,
@@ -800,10 +820,18 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         # fields — 仅 allowlist，sessionRef 使用 ref12（全 ref 不进入 NormalizedEvent）
         fields: list[dict[str, Any]] = []
         fields.append({"label": "sessionName", "value": display_name, "short": False})
+        if project_name:
+            fields.append(
+                {"label": "projectName", "value": project_name, "short": True}
+            )
         if agent:
             fields.append({"label": "agent", "value": agent, "short": True})
         if model:
             fields.append({"label": "model", "value": model, "short": True})
+        if model_variant:
+            fields.append(
+                {"label": "modelVariant", "value": model_variant, "short": True}
+            )
         if duration_ms is not None:
             fields.append(
                 {"label": "durationMs", "value": str(duration_ms), "short": True}
@@ -967,8 +995,12 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             status=status,
             session_scope=session_scope,
             summary=summary,
-            source={"name": project_display_name or "OpenCode", "url": None},
+            source={
+                "name": instance_display_name or "OpenCode",
+                "url": None,
+            },
             actor={"name": actor_name, "url": None},
+            model_variant=model_variant,
             fields=fields,
             links=[],
             raw={},
