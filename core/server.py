@@ -8,7 +8,9 @@ from aiohttp import web
 
 from astrbot.api import logger
 
-from .models import EndpointRecord, NormalizedEvent, ServerConfig
+from .display import DEFAULT_DISPLAY_TIMEZONE, create_display_context
+from .models import DisplayContext, EndpointRecord, NormalizedEvent, ServerConfig
+from .notification_policy import normalize_notification_mode, should_notify
 from .providers import ProviderError, ProviderRegistry, ProviderRegistryError
 from .registry import EndpointRegistry
 from .renderer import (
@@ -53,6 +55,7 @@ class WebhookServer:
         plugin_config: dict[str, Any] | None = None,
         template_registry: TemplateRegistry | None = None,
         provider_registry: ProviderRegistry | None = None,
+        display_context: DisplayContext | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -61,6 +64,10 @@ class WebhookServer:
         self._plugin_config: dict[str, Any] = plugin_config or {}
         self._template_registry = template_registry
         self._provider_registry = provider_registry or ProviderRegistry()
+        self._display_context = display_context or create_display_context(
+            self._plugin_config.get("display_timezone", DEFAULT_DISPLAY_TIMEZONE),
+            warn=logger.warning,
+        )
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -140,6 +147,20 @@ class WebhookServer:
 
     def _get_fallback_to_text(self) -> bool:
         return bool(self._plugin_config.get("fallback_to_text", True))
+
+    def _get_notification_mode(self) -> str:
+        """读取全局通知降噪模式。
+
+        缺失配置使用 focused；运行时非法值 fail-open 为 all。
+        """
+        if "notification_mode" not in self._plugin_config:
+            return normalize_notification_mode()
+        return normalize_notification_mode(self._plugin_config.get("notification_mode"))
+
+    @staticmethod
+    def _session_scope_value(event: NormalizedEvent) -> str:
+        scope = event.session_scope
+        return scope.value if hasattr(scope, "value") else str(scope)
 
     def _get_render_options(self) -> dict[str, Any]:
         raw = self._plugin_config.get("render_options", "")
@@ -328,9 +349,25 @@ class WebhookServer:
         request_id: str,
     ) -> web.Response:
         """应用发送策略后按全局渲染模式处理已标准化事件。"""
+        notification_mode = self._get_notification_mode()
+        if not should_notify(
+            mode=notification_mode,
+            session_scope=event.session_scope,
+            status=event.status,
+        ):
+            logger.info(
+                "[WebhookNotifier] notification filtered "
+                f"provider={event.provider} event={event.event} "
+                f"mode={notification_mode} scope={self._session_scope_value(event)} "
+                f"status={event.status} reason=notification_mode_filtered"
+            )
+            return self._build_notification_mode_skip_response(
+                request_id=request_id,
+                provider=event.provider,
+                event_name=event.event,
+            )
+
         logger.info(
-            f"[WebhookNotifier] request_id={request_id} "
-            f"endpoint={endpoint.name} "
             f"event.provider={event.provider} endpoint.provider={endpoint.provider} "
             f"event={event.event}"
         )
@@ -385,7 +422,7 @@ class WebhookServer:
     ) -> web.Response:
         """纯文本渲染与发送。"""
         try:
-            rendered = render_text_default(event)
+            rendered = render_text_default(event, self._display_context)
         except Exception as e:
             logger.error(f"[WebhookNotifier] request_id={request_id} 文本渲染失败: {e}")
             return self._error_response(
@@ -517,7 +554,7 @@ class WebhookServer:
             error.reason = "html_render_not_available"  # type: ignore[attr-defined]
             raise error
         try:
-            event_data = render_html_data(event)["event"]
+            event_data = render_html_data(event, self._display_context)["event"]
             rendered_html = render_html_template(template.content, event_data)
         except Exception as exc:
             error = RuntimeError(f"HTML 模板渲染失败: {exc}")
@@ -569,7 +606,7 @@ class WebhookServer:
         )
 
         try:
-            rendered = render_text_default(event)
+            rendered = render_text_default(event, self._display_context)
         except Exception as e:
             logger.error(
                 f"[WebhookNotifier] request_id={request_id} 降级文本渲染也失败: {e}"
@@ -642,6 +679,37 @@ class WebhookServer:
         else:
             message = "ok"
         return web.json_response({"code": 0, "message": message, "data": data})
+
+    def _build_notification_mode_skip_response(
+        self,
+        *,
+        request_id: str,
+        provider: str,
+        event_name: str,
+    ) -> web.Response:
+        """Return the non-retryable response for a policy-filtered event."""
+        render_mode = self._get_render_mode()
+        return web.json_response(
+            {
+                "code": 0,
+                "message": "skipped",
+                "data": {
+                    "request_id": request_id,
+                    "provider": provider,
+                    "event": event_name,
+                    "delivered": False,
+                    "targets": [],
+                    "render_mode": render_mode,
+                    "requested_render_mode": render_mode,
+                    "fallback_to_text": False,
+                    "fallback_reason": None,
+                    "skipped": True,
+                    "skip_reason": "notification_mode_filtered",
+                    "rendered": False,
+                    "retryable": False,
+                },
+            }
+        )
 
     @staticmethod
     def _error_response(

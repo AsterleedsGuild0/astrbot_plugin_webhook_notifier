@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import enum
+from datetime import tzinfo
 from dataclasses import dataclass, field
 from typing import Any
+
+from .notification_policy import SessionScope
 
 
 class EndpointStatus(str, enum.Enum):
@@ -71,6 +74,7 @@ class NormalizedEvent:
     emitted_at: str = ""  # ISO-8601 UTC
     title: str = ""
     status: str = "success"  # success | warning | failed | info | unknown
+    session_scope: SessionScope = SessionScope.UNKNOWN
     summary: str = ""
     source: dict[str, Any] = field(default_factory=lambda: {"name": "", "url": None})
     actor: dict[str, Any] = field(default_factory=lambda: {"name": None, "url": None})
@@ -94,6 +98,14 @@ class NormalizedEvent:
             "links": self.links,
             "raw": self.raw,
         }
+
+
+@dataclass(frozen=True)
+class DisplayContext:
+    """Renderer 共用的展示上下文，不进入 provider 或 endpoint 契约。"""
+
+    timezone_name: str
+    timezone: tzinfo
 
 
 @dataclass

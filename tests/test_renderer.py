@@ -20,6 +20,15 @@ from core.renderer import (
     validate_html_template,
     validate_image_result,
 )
+from core.display import (
+    INVALID_DISPLAY_TIMEZONE_WARNING,
+    MISSING_DEFAULT_TIMEZONE_WARNING,
+    create_display_context,
+    format_duration_ms,
+    format_timestamp,
+    prepare_display_fields,
+    status_label,
+)
 
 
 def _make_event(
@@ -61,7 +70,7 @@ class TestRenderTextDefault:
         result = render_text_default(event)
         assert "[oh-my-pi]" in result
         assert "会话完成" in result
-        assert "会话：" in result
+        assert "会话名称：" in result
         assert "模型：" in result
         assert "耗时：" in result
 
@@ -111,7 +120,7 @@ class TestRenderTextDefault:
                 {"label": "模型", "value": "openai/gpt-5.5", "short": True},
                 {
                     "label": "开始时间",
-                    "value": "2026-07-08 19:59:00 UTC+08:00",
+                    "value": "2026-07-08T11:59:00.000Z",
                     "short": True,
                 },
                 {"label": "耗时", "value": "57.7s", "short": True},
@@ -129,7 +138,7 @@ class TestRenderTextDefault:
             "模型" not in line or line == "模型：openai/gpt-5.5" for line in lines
         )
         assert "cwd：/home/user/project" in lines
-        assert "开始时间：2026-07-08 19:59:00 UTC+08:00" in lines
+        assert "开始时间：2026-07-08 19:59:00 CST (UTC+08:00)" in lines
 
 
 class TestRenderTextJinja2:
@@ -182,6 +191,8 @@ class TestRenderTextJinja2:
         expected_template = """\
 [{{ event.source.name }}] {{ event.title }}
 
+状态：{{ event.status_display }}
+
 {% if event.summary %}{{ event.summary }}
 {% endif %}{% for field in event.fields %}
 {{ field.label }}：{{ field.value }}{% endfor %}
@@ -215,6 +226,374 @@ class TestRenderHtmlData:
         context = render_html_data(event)
         assert context["event"]["source"] == "AstrBot"
 
+    def test_status_and_opencode_labels_are_localized_in_display_copy(self):
+        event = _make_event(title="Session One")
+        event.status = "action_required"
+        event.fields = [
+            {"label": "projectDisplayName", "value": "Demo"},
+            {"label": "sessionName", "value": "Session One"},
+            {"label": "question[12].header", "value": "Environment"},
+            {"label": "unknownField", "value": "keep"},
+        ]
+        display = render_html_data(event)["event"]
+        labels = [field["label"] for field in display["fields"]]
+        assert display["status_display"] == "待处理"
+        assert labels == ["项目", "会话名称", "问题 12 标题", "unknownField"]
+
+    def test_html_status_badge_is_localized_without_changing_event_status(self):
+        event = _make_event()
+        event.status = "action_required"
+        html = render_html_default(event)
+        assert "待处理" in html
+        assert "action_required" not in html
+
+
+class TestDisplayLocalization:
+    def test_status_mapping_keeps_visual_semantics_values(self):
+        assert status_label("completed") == "已完成"
+        assert status_label("failed") == "失败"
+        assert status_label("action_required") == "待处理"
+
+    def test_dynamic_labels_unknown_fallback_and_duration_dedup(self):
+        fields = prepare_display_fields(
+            [
+                {"label": "durationMs", "value": 1000},
+                {"label": "duration", "value": "58h 37m"},
+                {"label": "question[2]", "value": "Choose"},
+                {"label": "question[2].options", "value": "A | B"},
+                {"label": "futureField", "value": "raw"},
+            ]
+        )
+        assert [field["label"] for field in fields] == [
+            "当前任务耗时",
+            "问题 2",
+            "问题 2 选项",
+            "futureField",
+        ]
+        assert fields[0]["value"] == "2 天 10 小时 37 分钟"
+        assert fields[2]["value"] == "1. A\n2. B"
+
+    def test_model_provider_display_and_session_name_is_always_independent(self):
+        fields = prepare_display_fields(
+            [
+                {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                {"label": "model", "value": "cpa"},
+                {"label": "sessionRef", "value": "anonymous-ref"},
+                {"label": "sessionName", "value": "Session One"},
+            ],
+            title="Session One",
+        )
+        assert [(field["label"], field["value"]) for field in fields] == [
+            ("模型", "cpa/gpt-5.6-sol"),
+            ("模型提供方", "cpa"),
+            ("会话名称", "Session One"),
+        ]
+        no_title = prepare_display_fields(
+            [{"label": "sessionName", "value": "Session One"}]
+        )
+        assert no_title[0]["label"] == "会话名称"
+
+    def test_question_counts_and_summary_are_context_aware(self):
+        strict = prepare_display_fields(
+            [
+                {"label": "questionCount", "value": "1"},
+                {"label": "optionCount", "value": "2"},
+                {"label": "question.summary", "value": "Choose"},
+            ]
+        )
+        assert [field["label"] for field in strict] == [
+            "问题数量",
+            "选项数量",
+            "问题摘要",
+        ]
+
+        detailed = prepare_display_fields(
+            [
+                {"label": "questionCount", "value": "1"},
+                {"label": "optionCount", "value": "2"},
+                {"label": "question.summary", "value": "Choose"},
+                {"label": "question[1]", "value": "Choose"},
+            ]
+        )
+        assert [field["label"] for field in detailed] == ["问题 1"]
+
+        multiple = prepare_display_fields(
+            [
+                {"label": "question.summary", "value": "Choose two"},
+                {"label": "question[1]", "value": "Choose"},
+                {"label": "question[2]", "value": "Choose another"},
+            ]
+        )
+        assert "问题摘要" in [field["label"] for field in multiple]
+
+    def test_duration_ms_alone_is_readable_chinese(self):
+        fields = prepare_display_fields([{"label": "durationMs", "value": 65000}])
+        assert fields[0]["label"] == "当前任务耗时"
+        assert fields[0]["value"] == "1 分钟 5 秒"
+        assert format_duration_ms(211_020_000) == "2 天 10 小时 37 分钟"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-07-24T01:44:35Z",
+            "2026-07-24T09:44:35+08:00",
+            "2026-07-23T20:44:35-05:00",
+        ],
+    )
+    def test_timestamp_inputs_convert_to_default_asia_shanghai(self, value):
+        assert format_timestamp(value) == "2026-07-24 09:44:35 CST (UTC+08:00)"
+
+    def test_configured_utc_and_tokyo_timezones(self):
+        value = "2026-07-24T01:44:35Z"
+        utc_context = create_display_context("UTC")
+        tokyo_context = create_display_context("Asia/Tokyo")
+        assert format_timestamp(value, utc_context) == (
+            "2026-07-24 01:44:35 UTC (UTC+00:00)"
+        )
+        assert format_timestamp(value, tokyo_context) == (
+            "2026-07-24 10:44:35 JST (UTC+09:00)"
+        )
+
+    @pytest.mark.parametrize("value", ["2026-07-24 01:44:35", "not-a-time"])
+    def test_naive_and_invalid_timestamp_are_preserved(self, value):
+        assert format_timestamp(value) == value
+
+    def test_invalid_timezone_falls_back_without_leaking_value(self):
+        warnings: list[str] = []
+        context = create_display_context(
+            "Sensitive/Private-Config", warn=warnings.append
+        )
+        assert context.timezone_name == "Asia/Shanghai"
+        assert warnings == [INVALID_DISPLAY_TIMEZONE_WARNING]
+        assert "Sensitive" not in warnings[0]
+
+    def test_missing_default_zoneinfo_data_falls_back_to_utc(self, monkeypatch):
+        import core.display as display
+        from zoneinfo import ZoneInfoNotFoundError
+
+        def missing_timezone(_name: str):
+            raise ZoneInfoNotFoundError
+
+        warnings: list[str] = []
+        monkeypatch.setattr(display, "_load_timezone", missing_timezone)
+        context = display.create_display_context("Asia/Shanghai", warn=warnings.append)
+        assert context.timezone_name == "UTC"
+        assert warnings == [MISSING_DEFAULT_TIMEZONE_WARNING]
+
+    def test_text_html_footer_and_fields_share_display_timezone(self):
+        event = _make_event(
+            title="Session One",
+            fields=[
+                {"label": "sessionName", "value": "Session One"},
+                {"label": "startedAt", "value": "2026-07-24T01:44:35Z"},
+                {"label": "endedAt", "value": "2026-07-24T09:44:35+08:00"},
+            ],
+        )
+        event.emitted_at = "2026-07-23T20:44:35-05:00"
+        context = create_display_context("Asia/Shanghai")
+        expected = "2026-07-24 09:44:35 CST (UTC+08:00)"
+
+        text = render_text_default(event, context)
+        html_data = render_html_data(event, context)["event"]
+        html = render_html_default(event, context)
+
+        assert "会话名称：Session One" in text
+        assert text.count(expected) == 2
+        assert [field["value"] for field in html_data["fields"][1:]] == [
+            expected,
+            expected,
+        ]
+        assert html_data["event_time"] == expected
+        assert html_data["generated_at"].endswith("CST (UTC+08:00)")
+        assert "会话名称" in html
+        assert html.count(expected) == 3
+
+    def test_task_time_labels_and_display_timezone(self):
+        context = create_display_context("Asia/Tokyo")
+        fields = prepare_display_fields(
+            [
+                {"label": "startedAt", "value": "2026-07-24T01:00:00Z"},
+                {"label": "taskStartedAt", "value": "2026-07-24T01:15:00Z"},
+                {"label": "endedAt", "value": "2026-07-24T01:45:00Z"},
+                {"label": "durationMs", "value": 1_800_000},
+            ],
+            display_context=context,
+        )
+        assert [(field["label"], field["value"]) for field in fields] == [
+            ("会话开始时间", "2026-07-24 10:00:00 JST (UTC+09:00)"),
+            ("当前任务开始时间", "2026-07-24 10:15:00 JST (UTC+09:00)"),
+            ("当前任务结束时间", "2026-07-24 10:45:00 JST (UTC+09:00)"),
+            ("当前任务耗时", "30 分钟"),
+        ]
+
+    def test_action_required_does_not_synthesize_end_or_duration_fields(self):
+        event = _make_event(
+            fields=[
+                {"label": "startedAt", "value": "2026-07-24T01:00:00Z"},
+                {"label": "taskStartedAt", "value": "2026-07-24T01:15:00Z"},
+            ]
+        )
+        event.status = "action_required"
+        display = render_html_data(event)["event"]
+        labels = [field["label"] for field in display["fields"]]
+        assert labels == ["会话开始时间", "当前任务开始时间"]
+        assert "当前任务结束时间" not in labels
+        assert "当前任务耗时" not in labels
+
+    @pytest.mark.parametrize("status", ["completed", "action_required"])
+    def test_opencode_session_elapsed_is_derived_for_active_and_completed_events(
+        self, status
+    ):
+        event = _make_event(
+            fields=[
+                {"label": "startedAt", "value": "2026-07-21T07:13:00Z"},
+                {"label": "question[1]", "value": "Run `pytest`?"},
+            ]
+        )
+        event.provider = "opencode"
+        event.status = status
+        event.emitted_at = "2026-07-24T01:00:00Z"
+
+        display = render_html_data(event)["event"]
+        assert ("会话已持续", "2 天 17 小时 47 分钟") in [
+            (field["label"], field["value"]) for field in display["fields"]
+        ]
+        assert "当前任务耗时" not in [field["label"] for field in display["fields"]]
+
+    @pytest.mark.parametrize(
+        ("started_at", "emitted_at"),
+        [
+            ("invalid", "2026-07-24T01:00:00Z"),
+            ("2026-07-24T00:00:00", "2026-07-24T01:00:00Z"),
+            ("2026-07-24T00:00:00Z", "invalid"),
+            ("2026-07-24T00:00:00Z", "2026-07-24T01:00:00"),
+            ("2026-07-24T02:00:00Z", "2026-07-24T01:00:00Z"),
+        ],
+    )
+    def test_invalid_or_negative_opencode_session_elapsed_is_omitted(
+        self, started_at, emitted_at
+    ):
+        event = _make_event(fields=[{"label": "startedAt", "value": started_at}])
+        event.provider = "opencode"
+        event.emitted_at = emitted_at
+        labels = [
+            field["label"] for field in render_html_data(event)["event"]["fields"]
+        ]
+        assert "会话已持续" not in labels
+
+    @pytest.mark.parametrize(
+        "provider", ["omp", "unknown", "OpenCode", "OpenCode-compatible"]
+    )
+    def test_non_opencode_provider_does_not_derive_session_elapsed(self, provider):
+        event = _make_event(
+            fields=[{"label": "startedAt", "value": "2026-07-24T00:00:00Z"}]
+        )
+        event.provider = provider
+        event.emitted_at = "2026-07-24T01:00:00Z"
+        labels = [
+            field["label"] for field in render_html_data(event)["event"]["fields"]
+        ]
+        assert "会话已持续" not in labels
+
+    def test_session_elapsed_text_html_order_and_task_duration_are_independent(self):
+        event = _make_event(
+            fields=[
+                {"label": "permission.description", "value": "Allow `bash`"},
+                {"label": "endedAt", "value": "2026-07-24T00:59:00Z"},
+                {"label": "question[1]", "value": "Run `pytest`?"},
+                {"label": "taskStartedAt", "value": "2026-07-24T00:58:30Z"},
+                {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                {"label": "durationMs", "value": 30_000},
+                {"label": "startedAt", "value": "2026-07-23T23:00:00Z"},
+                {"label": "agent", "value": "Designer"},
+            ]
+        )
+        event.provider = "opencode"
+        event.emitted_at = "2026-07-24T01:00:00Z"
+
+        expected_labels = [
+            "执行代理",
+            "模型",
+            "当前任务耗时",
+            "会话已持续",
+            "会话开始时间",
+            "当前任务开始时间",
+            "当前任务结束时间",
+            "权限说明",
+            "问题 1",
+        ]
+        display = render_html_data(event)["event"]
+        assert [field["label"] for field in display["fields"]] == expected_labels
+        assert [field["value"] for field in display["fields"]][2:4] == [
+            "30 秒",
+            "2 小时",
+        ]
+
+        text = render_text_default(event)
+        html = render_html_default(event)
+        assert "当前任务耗时：30 秒" in text
+        assert "会话已持续：2 小时" in text
+        assert "当前任务耗时" in html and "30 秒" in html
+        assert "会话已持续" in html and "2 小时" in html
+        assert text.index("当前任务耗时") < text.index("会话已持续")
+        assert html.index("当前任务耗时") < html.index("会话已持续")
+
+    def test_display_timezone_changes_timestamps_but_not_session_elapsed(self):
+        event = _make_event(
+            fields=[{"label": "startedAt", "value": "2026-07-24T01:00:00Z"}]
+        )
+        event.provider = "opencode"
+        event.emitted_at = "2026-07-24T10:30:00+09:00"
+
+        utc_fields = render_html_data(event, create_display_context("UTC"))["event"][
+            "fields"
+        ]
+        tokyo_fields = render_html_data(event, create_display_context("Asia/Tokyo"))[
+            "event"
+        ]["fields"]
+        utc_values = {field["label"]: field["value"] for field in utc_fields}
+        tokyo_values = {field["label"]: field["value"] for field in tokyo_fields}
+        assert utc_values["会话已持续"] == "30 分钟"
+        assert tokyo_values["会话已持续"] == "30 分钟"
+        assert utc_values["会话开始时间"].endswith("UTC (UTC+00:00)")
+        assert tokyo_values["会话开始时间"].endswith("JST (UTC+09:00)")
+
+    def test_omp_and_unknown_field_labels_are_preserved(self):
+        fields = prepare_display_fields(
+            [
+                {"label": "开始时间", "value": "2026-07-24T01:00:00Z"},
+                {"label": "耗时", "value": "2m"},
+                {"label": "futureField", "value": "keep"},
+            ]
+        )
+        assert [(field["label"], field["value"]) for field in fields] == [
+            ("开始时间", "2026-07-24 09:00:00 CST (UTC+08:00)"),
+            ("耗时", "2 分钟"),
+            ("futureField", "keep"),
+        ]
+
+    def test_question_options_text_and_html_are_multiline_and_escaped(self):
+        values = [
+            [
+                {"label": "Allow", "description": "<b>safe</b>", "recommended": True},
+                {"label": "Deny", "description": "No", "recommended": False},
+            ],
+            '[{"label":"Allow","description":"<b>safe</b>","recommended":true},{"label":"Deny"}]',
+            "Allow: <b>safe</b> (recommended=true) | Deny",
+        ]
+        for value in values:
+            event = _make_event(
+                fields=[{"label": "question[1].options", "value": value}]
+            )
+            text = render_text_default(event)
+            html = render_html_default(event)
+            assert "1. Allow（推荐）" in text
+            assert "   <b>safe</b>" in text
+            assert "2. Deny" in text
+            assert "1. Allow（推荐）" in html
+            assert "   &lt;b&gt;safe&lt;/b&gt;" in html
+            assert " | " not in html
+
 
 class TestRenderHtml:
     def test_default_template_renders(self):
@@ -229,7 +608,7 @@ class TestRenderHtml:
         assert "<!doctype html>" in html.lower() or "<html" in html.lower()
         assert "oh-my-pi" in html
         assert "gpt-5.5" in html
-        assert "57.7s" in html
+        assert "57.7 秒" in html
         assert "会话完成" in html
 
     def test_empty_summary(self):
@@ -258,7 +637,8 @@ class TestRenderHtml:
         html = render_html_default(event)
         for f in fields:
             assert f["label"] in html
-            assert f["value"] in html
+            expected_value = "1 分钟 30 秒" if f["label"] == "耗时" else f["value"]
+            assert expected_value in html
 
     def test_no_fields(self):
         """无字段时应显示占位文本。"""
@@ -293,6 +673,89 @@ class TestRenderHtml:
         assert "路径 &lt;cwd&gt;" in html
         assert "/tmp/&lt;project&gt;" in html
         assert "<script>alert(1)</script>" not in html
+
+    def test_inline_code_is_rendered_and_all_content_is_escaped(self):
+        event = _make_event(
+            summary="执行 `pytest tests`，不要解析 <em>HTML</em>",
+            fields=[
+                {
+                    "label": "问题",
+                    "value": "编辑 `core/renderer.py` 后保留 <img src=x onerror=alert(1)>",
+                },
+                {
+                    "label": "权限",
+                    "value": "允许 `<script>alert(1)</script>` 吗？",
+                },
+            ],
+        )
+        html = render_html_default(event)
+        assert "执行 <code>pytest tests</code>" in html
+        assert "&lt;em&gt;HTML&lt;/em&gt;" in html
+        assert "编辑 <code>core/renderer.py</code>" in html
+        assert "&lt;img src=x onerror=alert(1)&gt;" in html
+        assert "<code>&lt;script&gt;alert(1)&lt;/script&gt;</code>" in html
+        assert "<img src=x" not in html
+        assert "<script>alert(1)</script>" not in html
+
+    def test_inline_code_supports_multiple_spans_and_preserves_invalid_ticks(self):
+        event = _make_event(
+            fields=[
+                {
+                    "label": "内容",
+                    "value": "运行 `python -m pytest`，再看 `中文 文件.py`；未闭合 `tail；空 ``；双 ``code``",
+                }
+            ]
+        )
+        html = render_html_default(event)
+        assert "<code>python -m pytest</code>" in html
+        assert "<code>中文 文件.py</code>" in html
+        assert "未闭合 `tail" in html
+        assert "空 ``" in html
+        assert "双 ``code``" in html
+        assert html.count("<code>") == 2
+
+    def test_inline_code_in_multiline_options_keeps_numbering_and_description(self):
+        event = _make_event(
+            fields=[
+                {
+                    "label": "question[1].options",
+                    "value": [
+                        {
+                            "label": "运行 `pytest`",
+                            "description": "检查 `tests/test_renderer.py`",
+                            "recommended": True,
+                        },
+                        {
+                            "label": "跳过",
+                            "description": "保留 `--no-run`",
+                        },
+                    ],
+                }
+            ]
+        )
+        html = render_html_default(event)
+        assert "1. 运行 <code>pytest</code>（推荐）" in html
+        assert "   检查 <code>tests/test_renderer.py</code>" in html
+        assert "2. 跳过" in html
+        assert "   保留 <code>--no-run</code>" in html
+
+    def test_text_mode_keeps_backticks_without_html_tags(self):
+        event = _make_event(
+            summary="运行 `pytest`",
+            fields=[{"label": "命令", "value": "`python -m compileall core`"}],
+        )
+        text = render_text_default(event)
+        assert "运行 `pytest`" in text
+        assert "命令：`python -m compileall core`" in text
+        assert "<code>" not in text
+
+    def test_long_inline_code_has_wrapping_css(self):
+        event = _make_event(fields=[{"label": "命令", "value": f"`{'x' * 500}`"}])
+        html = render_html_default(event)
+        assert f"<code>{'x' * 500}</code>" in html
+        assert ".field-value code" in html
+        assert "overflow-wrap: anywhere" in html
+        assert "word-break: break-all" in html
 
     def test_html_template_keeps_falsey_field_values(self):
         """0 和 False 等字段值也应展示，不能被默认值吞掉。"""
@@ -331,7 +794,7 @@ class TestRenderHtml:
         """未传入 event_time 时应回退到 emitted_at。"""
         event = _make_event()
         context = render_html_data(event)
-        assert context["event"]["event_time"] == context["event"]["emitted_at"]
+        assert context["event"]["event_time"] == ("2026-07-08 20:00:00 CST (UTC+08:00)")
 
     def test_default_template_contains_styles(self):
         """默认 HTML 模板应包含 macOS 浅色卡片样式及 shrinkwrap CSS。"""

@@ -18,6 +18,19 @@
     "hint": "默认关闭 Webhook 私聊主动通知。开启后允许向所有平台的 FriendMessage 目标发送；OneBot/NapCat 频繁私聊（尤其发图）存在 QQ 风控或封禁风险，不建议开启；QQ 官方 Bot 也仅应在确认主动消息规则与额度后开启；其他平台请自行评估风险。",
     "default": false
   },
+  "notification_mode": {
+    "description": "Webhook 通知降噪模式",
+    "type": "string",
+    "options": ["focused", "all"],
+    "hint": "focused（默认）仅抑制成功完成的 subagent 通知；all 发送全部通知。未知会话范围和未知状态均放行。",
+    "default": "focused"
+  },
+  "display_timezone": {
+    "description": "通知展示时区",
+    "type": "string",
+    "hint": "用于文本通知、HTML 卡片和页脚时间的 IANA timezone，例如 Asia/Shanghai、UTC、Asia/Tokyo。Webhook 原始时间戳仍保持 canonical ISO 值。",
+    "default": "Asia/Shanghai"
+  },
   "fallback_to_text": {
     "description": "HTML 卡片渲染失败时降级为纯文本",
     "type": "bool",

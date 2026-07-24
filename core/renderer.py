@@ -11,8 +11,10 @@ from typing import Any
 from jinja2 import BaseLoader
 from jinja2.sandbox import SandboxedEnvironment
 from jinja2.utils import Namespace
+from markupsafe import Markup
 
-from .models import NormalizedEvent
+from .models import DisplayContext, NormalizedEvent
+from .display import build_display_event_data, format_timestamp
 
 DEFAULT_FALLBACK_VIEWPORT_WIDTH = 1280
 DEVICE_SCALE_CANDIDATES = (1.0, 1.3, 1.8)
@@ -41,11 +43,14 @@ _SENSITIVE_KEYS = {
 _FORBIDDEN_TAGS = {"script", "iframe", "object", "embed", "base", "form"}
 _CSS_DANGEROUS = re.compile(r"url\s*\(|@import\b|expression\s*\(", re.I)
 _EXTERNAL_RESOURCE = re.compile(r"(?:https?|file)\s*:", re.I)
+_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\r\n]+)`(?!`)")
 
 
 # 默认文本模板（与 FSD 一致）
 DEFAULT_TEXT_TEMPLATE = """\
 [{{ event.source.name }}] {{ event.title }}
+
+状态：{{ event.status_display }}
 
 {% if event.summary %}{{ event.summary }}
 {% endif %}{% for field in event.fields %}
@@ -227,6 +232,23 @@ DEFAULT_HTML_TEMPLATE = """\
       word-break: break-word;
     }
 
+    .summary code,
+    .field-value code {
+      padding: 0.08em 0.34em;
+      border: 1px solid rgba(60, 60, 67, 0.14);
+      border-radius: 6px;
+      color: #34343a;
+      background: rgba(118, 118, 128, 0.10);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", "PingFang SC", monospace;
+      font-size: 0.88em;
+      line-height: inherit;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-all;
+      -webkit-box-decoration-break: clone;
+      box-decoration-break: clone;
+    }
+
     .section-label {
       margin: 22px 0 8px;
       color: #8a8a8e;
@@ -271,6 +293,13 @@ DEFAULT_HTML_TEMPLATE = """\
       background: rgba(245, 245, 247, 0.55);
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+
+    .field-name-secondary,
+    .field-value-secondary {
+      color: #8a8a8e;
+      font-size: 16px;
+      font-weight: 500;
     }
 
     .field-value {
@@ -320,6 +349,7 @@ DEFAULT_HTML_TEMPLATE = """\
   {% set title = event.title|default('Webhook 通知', true) %}
   {% set source = event.source|default('AstrBot', true) %}
   {% set status = event.status|default('info', true)|string %}
+  {% set status_display = event.status_display|default(status, true)|string %}
   {% set status_text = status|lower %}
   {% set status_tone = 'default' %}
   {% if status_text in ['success', 'ok', 'succeeded', 'completed', '成功', '完成', '已完成'] %}
@@ -341,17 +371,17 @@ DEFAULT_HTML_TEMPLATE = """\
           <span class="eyebrow">来源：{{ source|e }}</span>
         </div>
         <div class="status-wrap">
-          <span class="status-badge status-{{ status_tone }}">{{ status|e }}</span>
+          <span class="status-badge status-{{ status_tone }}">{{ status_display|e }}</span>
         </div>
       </div>
 
       <h1>{{ title|e }}</h1>
 
       {% if summary|string|trim %}
-      <div class="summary">{{ summary|e }}</div>
+      <div class="summary">{{ summary|inline_code }}</div>
       {% endif %}
 
-      <div class="section-label">字段</div>
+      <div class="section-label">详细信息</div>
       <ul class="fields">
         {% set visible_count = namespace(value=0) %}
         {% if event.fields %}
@@ -364,7 +394,7 @@ DEFAULT_HTML_TEMPLATE = """\
                 {% set visible_count.value = visible_count.value + 1 %}
         <li class="field">
           <div class="field-name">{{ safe_name|e }}</div>
-          <div class="field-value">{{ safe_value|e }}</div>
+          <div class="field-value">{{ safe_value|inline_code }}</div>
         </li>
               {% endif %}
             {% endfor %}
@@ -379,8 +409,8 @@ DEFAULT_HTML_TEMPLATE = """\
               {% if 'token' not in safe_key and 'raw' not in safe_key and 'prompt' not in safe_key %}
                 {% set visible_count.value = visible_count.value + 1 %}
         <li class="field">
-          <div class="field-name">{{ safe_name|e }}</div>
-          <div class="field-value">{{ safe_value|e }}</div>
+          <div class="field-name{% if field.secondary %} field-name-secondary{% endif %}">{{ safe_name|e }}</div>
+          <div class="field-value{% if field.secondary %} field-value-secondary{% endif %}">{{ safe_value|inline_code }}</div>
         </li>
               {% endif %}
             {% endfor %}
@@ -401,6 +431,22 @@ DEFAULT_HTML_TEMPLATE = """\
 </html>"""
 
 
+def _render_inline_code(value: Any) -> Markup:
+    """安全渲染成对单反引号，不解释其他 Markdown 或 HTML。"""
+
+    text = "" if value is None else str(value)
+    parts: list[Markup] = []
+    cursor = 0
+    for match in _INLINE_CODE_RE.finditer(text):
+        parts.append(Markup.escape(text[cursor : match.start()]))
+        parts.append(
+            Markup("<code>") + Markup.escape(match.group(1)) + Markup("</code>")
+        )
+        cursor = match.end()
+    parts.append(Markup.escape(text[cursor:]))
+    return Markup("").join(parts)
+
+
 def _create_sandbox(autoescape: bool = False) -> SandboxedEnvironment:
     """创建 Jinja2 sandbox 环境。
 
@@ -415,6 +461,7 @@ def _create_sandbox(autoescape: bool = False) -> SandboxedEnvironment:
     )
     env.globals.clear()
     env.globals["namespace"] = Namespace
+    env.filters["inline_code"] = _render_inline_code
     return env
 
 
@@ -551,6 +598,7 @@ def render_preview(template_str: str, event: Any, canvas_width: Any) -> tuple[st
 def render_text(
     event: NormalizedEvent,
     template_str: str | None = None,
+    display_context: DisplayContext | None = None,
 ) -> str:
     """使用 Jinja2 sandbox 将标准化事件渲染为纯文本。
 
@@ -569,21 +617,28 @@ def render_text(
 
     env = _create_sandbox()
     template = env.from_string(template_str)
-    result = template.render(event=event.to_dict())
+    result = template.render(
+        event=build_display_event_data(event.to_dict(), display_context=display_context)
+    )
     return result
 
 
-def render_text_default(event: NormalizedEvent) -> str:
+def render_text_default(
+    event: NormalizedEvent, display_context: DisplayContext | None = None
+) -> str:
     """使用默认模板渲染 OMP session_stop 事件为纯文本。
 
     与 FSD 中 OMP 示例格式保持一致。
     """
-    data = event.to_dict()
+    data = build_display_event_data(event.to_dict(), display_context=display_context)
     lines: list[str] = []
 
     source_name = _get(data, ["source", "name"], "unknown")
     title = _get(data, ["title"], "事件")
     lines.append(f"[{source_name}] {title}")
+    lines.append(
+        f"状态：{_get(data, ['status_display'], _get(data, ['status'], '未知'))}"
+    )
     lines.append("")
 
     summary = _get(data, ["summary"], "")
@@ -599,7 +654,9 @@ def render_text_default(event: NormalizedEvent) -> str:
     return "\n".join(lines)
 
 
-def render_html_data(event: NormalizedEvent) -> dict[str, Any]:
+def render_html_data(
+    event: NormalizedEvent, display_context: DisplayContext | None = None
+) -> dict[str, Any]:
     """为 HTML 模板准备数据 dict。
 
     基于 event.to_dict()，添加 HTML 模板所需的辅助字段
@@ -612,16 +669,17 @@ def render_html_data(event: NormalizedEvent) -> dict[str, Any]:
     Returns:
         包含 event 上下文的 dict：{"event": {...}}。
     """
-    data = event.to_dict()
-
-    # 将 source 展平为字符串（设计师模板预期 event.source 为字符串）
-    if isinstance(data.get("source"), dict):
-        source_name = data["source"].get("name") or "AstrBot"
-        data["source"] = source_name
+    data = build_display_event_data(
+        event.to_dict(),
+        flatten_source=True,
+        display_context=display_context,
+    )
 
     # 添加辅助时间字段
-    data["generated_at"] = datetime.now(timezone.utc).isoformat()
-    data["event_time"] = data.get("emitted_at", "")
+    data["generated_at"] = format_timestamp(
+        datetime.now(timezone.utc).isoformat(), display_context
+    )
+    data["event_time"] = format_timestamp(data.get("emitted_at", ""), display_context)
 
     # NormalizedEvent 已用 list[dict] 存储 fields，模板 list 分支可用
     return {"event": data}
@@ -630,6 +688,7 @@ def render_html_data(event: NormalizedEvent) -> dict[str, Any]:
 def render_html(
     event: NormalizedEvent,
     template_str: str | None = None,
+    display_context: DisplayContext | None = None,
 ) -> str:
     """使用 Jinja2 sandbox 将标准化事件渲染为 HTML。
 
@@ -648,13 +707,15 @@ def render_html(
     if template_str is None:
         template_str = DEFAULT_HTML_TEMPLATE
 
-    context = render_html_data(event)
+    context = render_html_data(event, display_context)
     return render_html_template(template_str, context["event"])
 
 
-def render_html_default(event: NormalizedEvent) -> str:
+def render_html_default(
+    event: NormalizedEvent, display_context: DisplayContext | None = None
+) -> str:
     """使用默认 HTML 模板将标准化事件渲染为 HTML 卡片。"""
-    return render_html(event, DEFAULT_HTML_TEMPLATE)
+    return render_html(event, DEFAULT_HTML_TEMPLATE, display_context)
 
 
 def validate_image_result(result: Any) -> bool:

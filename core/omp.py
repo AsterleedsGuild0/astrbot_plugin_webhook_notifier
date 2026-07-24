@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .models import NormalizedEvent
+from .notification_policy import SessionScope
 from .providers import ProviderAdapter, ProviderError
 
 OMP_SOURCE_NAME = "oh-my-pi"
@@ -150,9 +151,7 @@ def normalize_omp_payload(
         fields.append({"label": "模型", "value": session_model, "short": True})
 
     if started_at:
-        fields.append(
-            {"label": "开始时间", "value": _format_timestamp(started_at), "short": True}
-        )
+        fields.append({"label": "开始时间", "value": started_at, "short": True})
 
     # 耗时 - 格式化
     duration_display = _format_duration(duration_ms)
@@ -216,6 +215,7 @@ def normalize_omp_payload(
         emitted_at=emitted_at,
         title=title,
         status="success",
+        session_scope=SessionScope.UNKNOWN,
         summary=summary.strip(),
         source={"name": OMP_SOURCE_NAME, "url": None},
         actor={"name": None, "url": None},
@@ -262,34 +262,6 @@ def _join_provider_model(provider: str, model: str) -> str:
     if not provider or model.startswith(f"{provider}/"):
         return model
     return f"{provider}/{model}"
-
-
-def _format_timestamp(timestamp: str) -> str:
-    """将 ISO-8601 时间戳格式化为本地可读时间。"""
-    timestamp = timestamp.strip()
-    if not timestamp:
-        return ""
-    try:
-        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            local_dt = dt.astimezone()
-        else:
-            local_dt = dt.astimezone()
-        return f"{local_dt:%Y-%m-%d %H:%M:%S} {_format_utc_offset(local_dt)}"
-    except (ValueError, TypeError):
-        return timestamp
-
-
-def _format_utc_offset(dt: datetime) -> str:
-    """返回 UTC+08:00 形式的时区偏移。"""
-    offset = dt.utcoffset()
-    if offset is None:
-        return ""
-    total_minutes = int(offset.total_seconds() // 60)
-    sign = "+" if total_minutes >= 0 else "-"
-    total_minutes = abs(total_minutes)
-    hours, minutes = divmod(total_minutes, 60)
-    return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
 
 class OmpProviderAdapter(ProviderAdapter):

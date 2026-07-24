@@ -156,12 +156,7 @@ class TestNormalizeOmpPayload:
             elif field["label"] == "模型":
                 assert field["value"] == "openai/gpt-5.5"
             elif field["label"] == "开始时间":
-                assert field["value"].startswith("2026-07-08 ")
-                assert "2026-07-08T" not in field["value"]
-                assert (
-                    field["value"].endswith(("UTC+00:00", "UTC+08:00"))
-                    or "UTC" in field["value"]
-                )
+                assert field["value"] == "2026-07-08T11:59:00.000Z"
             elif field["label"] == "耗时":
                 assert "s" in field["value"] or "ms" in field["value"]
             elif field["label"] == "输入":
@@ -302,6 +297,24 @@ class TestNormalizeOmpPayload:
         event = normalize_omp_payload(body)
         started_fields = [f for f in event.fields if f["label"] == "开始时间"]
         assert started_fields[0]["value"] == "not-a-time"
+
+    def test_timestamps_remain_canonical_until_common_display_layer(self):
+        body = {
+            "emittedAt": "2026-07-24T01:44:35Z",
+            "round": {
+                "startedAt": "2026-07-24T09:44:35+08:00",
+                "endedAt": "2026-07-23T20:44:35-05:00",
+                "lastAssistant": {"timestamp": "2026-07-24T01:44:35Z"},
+            },
+        }
+        event = normalize_omp_payload(body)
+        started = next(f for f in event.fields if f["label"] == "开始时间")
+        assert event.emitted_at == body["emittedAt"]
+        assert started["value"] == body["round"]["startedAt"]
+        assert (
+            event.raw["round.lastAssistant.timestamp"]
+            == (body["round"]["lastAssistant"]["timestamp"])
+        )
 
     def test_empty_session(self):
         """session 为空时不崩溃。"""

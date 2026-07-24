@@ -351,6 +351,41 @@ class TestGetFallbackToText:
         assert srv._get_fallback_to_text() is False
 
 
+class TestDisplayTimezone:
+    @pytest.mark.asyncio
+    async def test_server_uses_configured_timezone_for_text_rendering(self):
+        sender = FakeSender()
+        srv = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            plugin_config={"render_mode": "text", "display_timezone": "UTC"},
+        )
+        event = _make_event()
+        event.fields.append({"label": "startedAt", "value": "2026-07-24T01:44:35Z"})
+        response = await srv._handle_text(
+            event, _make_endpoint(), None, "timezone-text"
+        )
+        assert response.status == 200
+        assert "2026-07-24 01:44:35 UTC (UTC+00:00)" in sender.sent_texts[0]
+
+    def test_server_invalid_timezone_warns_without_config_value(self, monkeypatch):
+        warnings: list[str] = []
+        monkeypatch.setattr("core.server.logger.warning", warnings.append)
+        secret_config = "Private/Server-Timezone"
+        srv = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            FakeSender(),
+            plugin_config={"display_timezone": secret_config},
+        )
+        assert srv._display_context.timezone_name == "Asia/Shanghai"
+        assert warnings == [
+            "[WebhookNotifier] display_timezone 无效，已回退到 Asia/Shanghai"
+        ]
+        assert secret_config not in warnings[0]
+
+
 # ─── _get_render_options ───────────────────────────────────
 
 
@@ -559,7 +594,7 @@ class TestPrivatePolicyPreflight:
         # _dispatch_event 新增 event.provider/endpoint.provider 日志，取最后一条验证跳过消息
         assert len(info_logs) >= 1
         log = next(
-            (l for l in reversed(info_logs) if "result=skipped" in l),
+            (entry for entry in reversed(info_logs) if "result=skipped" in entry),
             info_logs[-1],
         )
         assert log.startswith("[WebhookNotifier] ")

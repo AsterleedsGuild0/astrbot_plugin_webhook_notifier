@@ -28,7 +28,9 @@ from .core.help_card import (
     build_help_text,
     render_help_card_html,
 )
+from .core.display import DEFAULT_DISPLAY_TIMEZONE, create_display_context
 from .core.models import EndpointStatus, ServerConfig
+from .core.notification_policy import normalize_notification_mode
 from .core.omp import OmpProviderAdapter
 from .core.opencode import OpenCodeProviderAdapter
 from .core.providers import ProviderRegistry
@@ -158,6 +160,10 @@ class WebhookNotifierPlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = config
+        self._display_context = create_display_context(
+            self.config.get("display_timezone", DEFAULT_DISPLAY_TIMEZONE),
+            warn=logger.warning,
+        )
 
         # 运行时组件（在 initialize 中初始化）
         self._registry: EndpointRegistry | None = None
@@ -1569,6 +1575,7 @@ class WebhookNotifierPlugin(Star):
                 plugin_config=dict(self.config),
                 template_registry=self._template_registry,
                 provider_registry=self._provider_registry,
+                display_context=self._display_context,
             )
             await self._server.start()
         except Exception as e:
@@ -1690,6 +1697,11 @@ class WebhookNotifierPlugin(Star):
         private_notifications = bool(
             self.config.get("enable_private_notifications", False)
         )
+        notification_mode = (
+            normalize_notification_mode(self.config.get("notification_mode"))
+            if "notification_mode" in self.config
+            else normalize_notification_mode()
+        )
         host = self._server_config.host if self._server_config else "127.0.0.1"
         port = self._server_config.port if self._server_config else 18080
         base_path = self._server_config.base_path if self._server_config else "/webhook"
@@ -1706,6 +1718,8 @@ class WebhookNotifierPlugin(Star):
             f"渲染模式：{render_mode}",
             f"渲染降级：{'开启' if fallback else '关闭'}",
             f"Webhook 私聊状态通知：{'开启' if private_notifications else '关闭'}",
+            f"通知降噪模式：{notification_mode}",
+            f"展示时区：{self._display_context.timezone_name}",
             f"监听 IP：{host}",
             f"监听端口：{port}",
             f"基础路径：{base_path}",

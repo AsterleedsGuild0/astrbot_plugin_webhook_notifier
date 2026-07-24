@@ -364,6 +364,53 @@ def test_private_notifications_schema_defaults_to_false():
     assert setting["default"] is False
 
 
+def test_notification_mode_schema_and_status_defaults_to_focused():
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    setting = schema["notification_mode"]
+    assert setting["type"] == "string"
+    assert setting["options"] == ["focused", "all"]
+    assert setting["default"] == "focused"
+
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    assert "通知降噪模式：focused" in plugin._build_status_text()
+
+
+def test_display_timezone_schema_and_runtime_defaults_to_asia_shanghai():
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    setting = schema["display_timezone"]
+    assert setting["type"] == "string"
+    assert setting["default"] == "Asia/Shanghai"
+
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    assert plugin._display_context.timezone_name == "Asia/Shanghai"
+    assert "展示时区：Asia/Shanghai" in plugin._build_status_text()
+
+
+def test_valid_display_timezone_is_accepted():
+    plugin = WebhookNotifierPlugin(
+        Context(), AstrBotConfig(display_timezone="Asia/Tokyo")
+    )
+    assert plugin._display_context.timezone_name == "Asia/Tokyo"
+
+
+def test_invalid_display_timezone_warning_is_fixed_and_redacted(caplog):
+    secret_config = "Private/Customer-Timezone"
+    caplog.set_level(logging.WARNING, logger="astrbot")
+    plugin = WebhookNotifierPlugin(
+        Context(), AstrBotConfig(display_timezone=secret_config)
+    )
+    assert plugin._display_context.timezone_name == "Asia/Shanghai"
+    assert "display_timezone 无效，已回退到 Asia/Shanghai" in caplog.text
+    assert secret_config not in caplog.text
+
+
+def test_invalid_notification_mode_is_fail_open_in_status():
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig(notification_mode="bad"))
+    assert "通知降噪模式：all" in plugin._build_status_text()
+
+
 @pytest.mark.asyncio
 async def test_missing_private_notification_config_initializes_sender_disabled(
     tmp_path, monkeypatch
