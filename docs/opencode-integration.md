@@ -121,7 +121,7 @@ OpenCode 配置顶层的 `plugin` 必须是 tuple 数组。每一项是：
 default.server(input, options)
 ```
 
-`server` 返回包含 `event` hook 的 hooks 对象。插件使用 `input.client.session.get()` 做非关键的会话标题、scope、会话开始时间、agent 和 model 丰富；`session.time.created` 是唯一的 `startedAt` 来源。当前/最后 Assistant Message 的 `info.time.created` 和 `info.time.completed` 分别形成可选的 `taskStartedAt` 与 `endedAt`，只有两者都可靠时才计算 `durationMs`。`session.time.updated` 不参与任务结束时间或耗时计算。在 agent/model 或 Assistant 时间元数据仍缺失时最多调用一次 `input.client.session.messages({path:{id}, query:{limit:10}})` 做兼容 fallback。丰富失败不阻止事件发送。
+`server` 返回包含 `event` hook 的 hooks 对象。插件使用 `input.client.session.get()` 做非关键的会话标题、scope、会话开始时间、agent 和 model 丰富；`session.time.created` 是唯一的 `startedAt` 来源。对 `session_idle`，插件优先使用本轮首次 `busy` 到 `idle` 的接收时间计算 `taskStartedAt`、`endedAt` 与 `durationMs`；只有本轮没有可靠 busy 周期时间时，才使用当前/最后 Assistant Message 的 `info.time.created` 和 `info.time.completed` 作为 fallback。`session.time.updated` 不参与任务结束时间或耗时计算。在 agent/model 或 Assistant 元数据仍缺失时最多调用一次 `input.client.session.messages({path:{id}, query:{limit:10}})` 做兼容 fallback。丰富失败不阻止事件发送。
 
 仓库内的 `integrations/opencode/opencode.jsonc` 是可复制的配置模板，但复制到自己的配置目录时，应替换模块 URL，并只用下面的 env/file 方式提供凭据。
 
@@ -164,8 +164,10 @@ Token 也可以使用受控文件：
 | --- | --- | --- |
 | `session.status` 从 `busy` 到 `idle`，或兼容的 `session.idle` | `opencode.session_idle` | 当前工作周期只发送一次 |
 | `session.error` | `opencode.session_error` | 立即发送，并抑制当前周期后续 idle |
-| `permission.updated`，兼容 `permission.asked` | `opencode.permission_asked` | 独立发送，不改变 busy/idle 周期 |
-| `question.asked` | `opencode.question_asked` | 仅发送 asked；内容模式由 `actionContentMode` 控制 |
+| `permission.updated`，兼容 `permission.asked` | `opencode.permission_asked` | 同一 Session 内 150ms 窗口聚合，不改变 busy/idle 周期 |
+| `permission.replied` | 不发送 | 在 150ms flush 前按 `requestID` 撤销对应权限请求 |
+| `question.asked` | `opencode.question_asked` | 同一 Session 内 150ms 窗口聚合；内容模式由 `actionContentMode` 控制 |
+| `question.replied`、`question.rejected` | 不发送 | 在 150ms flush 前按 `requestID` 撤销对应问题请求 |
 | `message.updated` | 不发送 | 仅消费 `info.role=assistant` 的清洗后 agent/model、`variant` 与 `time.created/completed` 元数据；user 或 malformed 更新忽略 |
 
 状态规则：
@@ -174,7 +176,8 @@ Token 也可以使用受控文件：
 2. `busy` 开始新周期，清除上一周期的 idle/error 抑制状态。
 3. 一个周期的 `error` 已通知后，后续 `idle` 不再补发完成通知。
 4. 同一周期的 `idle`、兼容旧 `session.idle` 和并发 idle 只允许一个通知通过。
-5. permission 和 question asked 事件不依赖 busy/idle 状态，可在任意周期独立通知；`question.replied`、`question.rejected` 等结束事件忽略。
+5. permission 和 question asked 事件不依赖 busy/idle 状态，可在任意周期独立通知；同一 Session、同一类型使用固定 150ms 本地内存 debounce，不同 Session 或不同类型不合并。
+6. flush 会先摘除 bucket，再进行异步 enrichment/build/send；回复只撤销尚未 flush 的成员。聚合 envelope 在 bucket 创建时生成稳定 ID，重试复用同一 ID；已发送通知不撤回。
 
 ---
 
@@ -207,7 +210,9 @@ OpenCode Session <ref12>
 
 Envelope 只允许显式 V1 字段：`id`、`event`、`version`、`emittedAt`、`session`、可选 `instanceDisplayName`、`projectName`、`agent`、`model`、`modelVariant`、`durationMs`、`startedAt`、`taskStartedAt`、`endedAt`、`counts`、`permission`、`question`、`error`。`modelVariant` 是清洗、限长的安全字符串；它来自 OpenCode 的 Assistant `info.variant`，缺失时才来自 `session.model.variant`，不推断、不改名为原始 `reasoning_effort`。`session` 只允许 `ref`、`scope` 与清洗后的 `name`；`scope` 可为 `root`、`subagent`、`auxiliary` 或 `unknown`，缺失时服务端按 `unknown` 兼容。`parentID` 始终禁止进入 envelope；事件专属对象只允许声明过的标量、有限数组和计数，未知键 fail-closed。服务端把实例标识作为 `source.name`，把会话名（缺失时使用匿名 fallback）作为 title 和 `sessionName` 字段，并在有 `projectName` 时增加“项目”行。
 
-Question/Permission 内容默认使用 `actionContentMode=strict`，只发送类别和可用计数；`summary` 发送清洗、截断摘要而不发送完整描述；`full` 才会发送显式白名单中的问题文本、选项 label/description、推荐信息、权限标题/描述/操作目标或 patterns。`full` 仍受单段文本、数组和总 payload 上限约束。
+Question/Permission 内容默认使用 `actionContentMode=strict`，只发送 Permission item 的 `category` 与 Question 的 `count`/`optionCount` 计数；`summary` 发送清洗、截断摘要而不发送完整描述；`full` 才会发送显式白名单中的问题文本、选项 label/description、推荐信息、权限标题/描述/操作目标或 patterns。Permission 使用 `{count, items[]}`，最多 16 个 item；Question 保持 `{count, optionCount, summary?, items?}`，最多 8 个问题、每题 12 个选项，计数可反映去重后的总量。`full` 仍受单段文本、数组和总 payload 上限约束。序列化后的 UTF-8 请求体超过 64 KiB 时，聚合体不会先发送原体或重试原体，而会降级为 Permission 的计数/类别摘要或 Question 的计数摘要；降级体仍超限则跳过发送。
+
+聚合只使用 raw session ID 作为进程内内存 key，不出站、不写日志；成员用官方 request `id` 去重，缺失时仅使用外层 event id 作为本地 fallback。Permission 与 Question 始终分开聚合。
 
 明确不会进入请求、日志或 `NormalizedEvent.raw` 的内容包括：
 
@@ -218,7 +223,7 @@ Question/Permission 内容默认使用 `actionContentMode=strict`，只发送类
 - error message、response body 和任意未列入 allowlist 的字段；
 - URL、Bearer Token、Token 文件内容。
 
-Client 通过已有的 `input.client.session.get()` 判断 scope：非空字符串 `parentID` 为 `subagent`；只有原本会归类为 root/unknown 且清洗后的 Session 名称精确为 `smartfetch-secondary`（或显式配置的有限 auxiliary 名称）时才为 `auxiliary`，明确 `undefined/null` 仍为 `root`，API 失败、非对象、空字符串或类型异常为 `unknown`。OpenCode v1.18.4 的 `message.updated.properties.info` 仅在 `role=assistant` 时被消费；清洗后的 `mode` 作为 agent，`providerID/modelID` 作为 model 元数据，`info.time.created/completed` 作为任务时间，并按匿名 session ref 放入最多 1000 条、触发后保留最近 500 条的 LRU。若 agent/model 或 Assistant 时间仍缺失，Client 最多调用一次 `session.messages(limit=10)`，逆序读取最后 assistant 的 `info`，不读取 `parts`。缓存不保存 raw ID、message ID、parts、路径、tokens 或 cost；unknown 不永久缓存，状态与缓存有界清理。若显式开启 `metadataDiagnostics`，诊断只记录这些读取动作的安全形状和 bounded allowlist 元数据，`parentID` 仍只记录 `parentIDState`，不记录其值；时间诊断只记录 `created/completed` 的存在性或 key 名。Assistant `info` 和 fallback `info` 仅可额外记录 `variant`、`reasoningEffort`、`reasoning_effort` 的清洗短 string/number/boolean；对象/数组只记录 `object`/`array` 类型。`session.get` 仅记录 nested model 的安全 `modelKeys`（最多 24 个）及对应的 `modelVariant`/`modelReasoningEffort`/`modelReasoning_effort`，顶层候选分别写为 `topLevelVariant`、`topLevelReasoningEffort`、`topLevelReasoning_effort`，不展开 model 或 provider options。
+Client 通过已有的 `input.client.session.get()` 判断 scope：非空字符串 `parentID` 为 `subagent`；只有原本会归类为 root/unknown 且清洗后的 Session 名称精确为 `smartfetch-secondary`（或显式配置的有限 auxiliary 名称）时才为 `auxiliary`，明确 `undefined/null` 仍为 `root`，API 失败、非对象、空字符串或类型异常为 `unknown`。OpenCode v1.18.4 的 `message.updated.properties.info` 仅在 `role=assistant` 时被消费；清洗后的 `mode` 作为 agent，`providerID/modelID` 作为 model 元数据，`info.time.created/completed` 仅在 idle 周期缺少可靠 busy 时间时作为任务时间 fallback，并按匿名 session ref 放入最多 1000 条、触发后保留最近 500 条的 LRU。若 agent/model 或 Assistant 元数据仍缺失，Client 最多调用一次 `session.messages(limit=10)`，逆序读取最后 assistant 的 `info`，不读取 `parts`。缓存不保存 raw ID、message ID、parts、路径、tokens 或 cost；新 busy 周期只清理上一周期的 Assistant 时间缓存，保留必要的 agent/model 元数据；unknown 不永久缓存，状态与缓存有界清理。若显式开启 `metadataDiagnostics`，诊断只记录这些读取动作的安全形状和 bounded allowlist 元数据，`parentID` 仍只记录 `parentIDState`，不记录其值；时间诊断只记录 `created/completed` 的存在性或 key 名。Assistant `info` 和 fallback `info` 仅可额外记录 `variant`、`reasoningEffort`、`reasoning_effort` 的清洗短 string/number/boolean；对象/数组只记录 `object`/`array` 类型。`session.get` 仅记录 nested model 的安全 `modelKeys`（最多 24 个）及对应的 `modelVariant`/`modelReasoningEffort`/`modelReasoning_effort`，顶层候选分别写为 `topLevelVariant`、`topLevelReasoningEffort`、`topLevelReasoning_effort`，不展开 model 或 provider options。
 
 服务端对未知字段 fail-closed。不要把 OpenCode 原始 event object 直接 POST 到 AstrBot；必须由第一方 V1 Plugin 先转换为稳定 envelope。通知事件的丰富优先级为已有 event 字段、assistant 缓存、`session.get()` 兼容字段，最后才是一次 messages fallback；`provider/model`、provider-only 和 model-only 分别按组合、provider、model 展示，assistant `mode` 映射为 agent。`session.get` 或 messages 失败只记录固定脱敏 warning，不输出异常文本、ID、ref、标题或响应正文，且失败不阻断通知。若需要排查运行时结构，选择明确档位（例如低/高复杂度的新会话）运行多个新会话，临时设置 `metadataDiagnostics` 为 `once` 或 `sample`，采集后立即恢复为 `off`；诊断日志不得作为 payload、缓存或持久化数据使用。
 

@@ -29,7 +29,7 @@ HTML 模板只提供一个根变量：`event`。不要使用顶层 `title`、`fi
 | `event.summary` | string | `任务已完成` | 可为空 |
 | `event.source` | string | `OpenCode Desktop` | HTML 兼容字段；OpenCode 来源是实例名，见下文 |
 | `event.actor` | object | `{"name": null, "url": null}` | 事件执行者信息 |
-| `event.model_variant` | string，可选 | `medium` | OpenCode runtime 的 variant；展示时进入“思考深度”字段，缺失时不显示 |
+| `event.model_variant` | string，可选 | `medium` | OpenCode runtime 的 variant；仅在存在模型时于展示副本中追加到模型值，不单独显示 |
 | `event.fields` | array of object | `[{"label": "模型", "value": "openai/gpt-5.5"}]` | 展示字段列表 |
 | `event.links` | array of object | `[]` | 链接列表；当前 OMP 通常为空 |
 | `event.raw` | object | `{}` | Provider 原始兼容数据，不建议默认展示 |
@@ -37,7 +37,7 @@ HTML 模板只提供一个根变量：`event`。不要使用顶层 `title`、`fi
 | `event.generated_at` | string | `2026-07-15 20:00:01 CST (UTC+08:00)` | 本次 HTML 渲染生成时间，已转换到展示时区 |
 | `event.event_time` | string | `2026-07-15 20:00:00 CST (UTC+08:00)` | `event.emitted_at` 的展示值，已转换到展示时区 |
 
-`fields` 在 HTML/默认文本渲染前会复制为展示字段：已知 OpenCode 键映射为中文，未知键保留原键名；展示副本会隐藏 `sessionRef` 和重复的 `durationMs`，在已有完整问题内容时隐藏问题/选项计数，并对重复问题摘要去重。OpenCode 的 `projectName` 映射为“项目”，仅在 envelope 有自动推导的最后一级项目名时出现；`sessionName` 只要存在就始终作为“会话名称”独立展示，即使它与 `event.title` 相同。耗时、时间、模型档位和问题选项会转换为适合阅读的格式，其中选项描述独立缩进换行。`modelVariant` 显示为“思考深度”，`default`/`low`/`medium`/`high`/`max` 分别显示为“默认”/“低”/“中”/“高”/“最高”，未知安全短值原样显示，缺失时不显示该行。时间字段的展示标签为：`startedAt` →“会话开始时间”、`taskStartedAt` →“当前任务开始时间”、`endedAt` →“当前任务结束时间”、`duration`/`durationMs` →“当前任务耗时”。仅有 provider 的 `model` 显示为“模型提供方”，`provider/model` 仍显示为“模型”。`NormalizedEvent` 仅在有值时保留可选的 `model_variant`，Webhook envelope 仅在有值时保留可选的 `modelVariant`。
+`fields` 在 HTML/默认文本渲染前会复制为展示字段：已知 OpenCode 键映射为中文，未知键保留原键名；展示副本会隐藏 `sessionRef` 和重复的 `durationMs`，在已有完整问题/权限明细时隐藏重复计数，并对重复问题摘要去重。Permission 明细使用 `permission[1].category`、`.summary`、`.title`、`.description`、`.action`、`.target`、`.patterns`，中文分别显示为“权限 1 类型”等；`permissionCount` 显示为“权限请求数”。Question 继续使用连续编号的 `question[1]`，同一聚合中的 `questionCount`/`optionCount` 不重复展示。OpenCode 的 `projectName` 映射为“项目”，仅在 envelope 有自动推导的最后一级项目名时出现；`sessionName` 只要存在就始终作为“会话名称”独立展示，即使它与 `event.title` 相同。耗时、时间和问题选项会转换为适合阅读的格式，其中选项描述独立缩进换行。`modelVariant` 保持安全短值原文，仅在同时存在 `model` 时以半角括号追加到模型值，括号前无空格，例如 `cpa/gpt-5.6-sol(max)`；仅有 variant 时不显示。时间字段的展示标签为：`startedAt` →“会话开始时间”、`taskStartedAt` →“当前任务开始时间”、`endedAt` →“当前任务结束时间”、`duration`/`durationMs` →“当前任务耗时”。仅有 provider 的 `model` 仍显示为“模型提供方”，有 variant 时同样追加括号；`provider/model` 仍显示为“模型”。`NormalizedEvent` 仅在有值时保留可选的 `model_variant`，Webhook envelope 仅在有值时保留可选的 `modelVariant`。
 
 当且仅当 `event.provider` 为 `opencode`、`startedAt` 和 `event.emitted_at` 都是可解析且带时区的时间，并且事件时间不早于会话开始时间时，展示层会额外派生“会话已持续”。它使用 `event.emitted_at - startedAt` 计算，并复用中文耗时格式；不会写回 envelope、`NormalizedEvent` 或 Provider adapter，也不会增加原始毫秒字段。“会话已持续”描述的是事件产生时的已流逝时间，不暗示 Session 已永久结束。它与来自 `duration`/`durationMs` 的“当前任务耗时”相互独立，因此 Question/Permission 等未结束事件也可以只有“会话已持续”。OMP、未知 Provider、非法时间、naive 时间或负时长均不会自动派生。
 
