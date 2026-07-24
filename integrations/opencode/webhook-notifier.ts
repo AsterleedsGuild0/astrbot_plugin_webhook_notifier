@@ -108,7 +108,7 @@ interface QuestionOption {
   recommended?: string | boolean | number;
 }
 
-interface PermissionEnvelope {
+interface PermissionItem {
   category: string;
   title?: string;
   summary?: string;
@@ -118,10 +118,25 @@ interface PermissionEnvelope {
   patterns?: string[];
 }
 
+interface PermissionEnvelope {
+  count: number;
+  items: PermissionItem[];
+}
+
 /** OpenCode V1 event (a subset of the full payload that we touch). */
 interface OpenCodeEvent {
   type: string;
   sessionId?: string;
+  /** Official request id; only retained in local aggregation state. */
+  requestId?: string;
+  /** Wrapper event id used as a local fallback when request id is absent. */
+  eventId?: string;
+  /** Plugin receipt time; never copied into the outgoing envelope. */
+  receivedAtMs?: number;
+  /** Internal marker for a timing snapshot claimed by an idle cycle. */
+  cycleTimingCaptured?: boolean;
+  /** Internal marker that the claimed cycle timing passed validation. */
+  cycleTimingReliable?: boolean;
   status?: string;
   session?: {
     name?: string;
@@ -143,6 +158,8 @@ interface OpenCodeEvent {
     changes?: unknown;
   };
   questions?: QuestionInput[];
+  questionCount?: number;
+  questionOptionCount?: number;
   error?: {
     name?: string;
     message?: string;
@@ -188,6 +205,10 @@ interface SessionState {
   hadErrorForCycle: boolean;
   /** Opaque cycle key — incremented on each new busy. */
   cycle: number;
+  /** Epoch milliseconds when the current busy cycle began. */
+  cycleStartedAtMs?: number;
+  /** Epoch milliseconds when the current cycle's idle event was received. */
+  cycleEndedAtMs?: number;
   /** Event ID for a pending retry (stable across retries). */
   pendingEventId: string | undefined;
   /** Last access time used for bounded cleanup. */
@@ -230,8 +251,10 @@ const DEFAULT_AUXILIARY_SESSION_NAMES = new Set(["smartfetch-secondary"]);
 const MAX_SESSION_REF_LENGTH = 128;
 const MAX_AGENT_MODEL_LENGTH = 128;
 const MAX_ACTION_TEXT_LENGTH = 512;
+const MAX_ACTION_SUMMARY = 256;
 const MAX_ACTION_ITEMS = 8;
 const MAX_ACTION_OPTIONS = 12;
+const MAX_PERMISSION_ITEMS = 16;
 const MAX_PERMISSION_PATTERNS = 16;
 const MAX_ENVELOPE_BYTES = 64 * 1024;
 const MAX_COUNT = 1_000_000;
@@ -254,6 +277,9 @@ const MAX_METADATA_DIAGNOSTIC_SAMPLES_PER_PHASE = 8;
 const MAX_METADATA_SAMPLE_SESSIONS = 1000;
 const RETAIN_METADATA_SAMPLE_SESSIONS = 500;
 const MAX_METADATA_DIAGNOSTIC_NUMBER = 1_000_000;
+const ACTION_DEBOUNCE_MS = 150;
+const MAX_ACTION_BUCKETS = 1000;
+const MAX_ACTION_BUCKET_REQUESTS = 1_000_000;
 
 type MetadataDiagnosticPhase =
   | "message_updated"
@@ -388,6 +414,26 @@ function _generateId(): string {
 /** ISO-8601 with timezone (trailing Z). */
 function _nowISO(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Production timing source. Tests may replace it temporarily without
+ * changing the production default of Date.now().
+ */
+let _clock: () => number = () => Date.now();
+
+function _nowMs(): number {
+  const now = _clock();
+  return Number.isFinite(now) && now >= 0 ? now : Date.now();
+}
+
+function _setClockForTests(clock?: () => number): void {
+  _clock = clock ?? (() => Date.now());
+}
+
+function _safeEpochMs(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return undefined;
+  return raw;
 }
 
 // ─── Name Sanitisation ──────────────────────────────────────
@@ -1016,14 +1062,18 @@ function _applyAssistantMetadata(event: OpenCodeEvent, metadata: AssistantMetada
   if (!event.modelVariant && metadata.modelVariant) {
     event.modelVariant = metadata.modelVariant;
   }
-  if (event.taskStartedAt === undefined && metadata.created) {
-    event.taskStartedAt = metadata.created;
+  // A reliable claimed idle cycle owns its timing snapshot. Assistant
+  // timestamps are only a fallback when busy-cycle timing is not reliable.
+  if (event.cycleTimingReliable !== true) {
+    if (event.taskStartedAt === undefined && metadata.created) {
+      event.taskStartedAt = metadata.created;
+    }
+    if (event.endedAt === undefined && metadata.completed) {
+      event.endedAt = metadata.completed;
+    }
+    const durationMs = _taskDurationMs(event.taskStartedAt, event.endedAt);
+    if (durationMs !== undefined) event.durationMs = durationMs;
   }
-  if (event.endedAt === undefined && metadata.completed) {
-    event.endedAt = metadata.completed;
-  }
-  const durationMs = _taskDurationMs(event.taskStartedAt, event.endedAt);
-  if (durationMs !== undefined) event.durationMs = durationMs;
 }
 
 function _taskDurationMs(taskStartedAt: unknown, endedAt: unknown): number | undefined {
@@ -1123,8 +1173,14 @@ function _buildQuestionEnvelope(event: OpenCodeEvent, mode: ActionContentMode): 
     .map(_normaliseQuestionItem)
     .filter((item): item is QuestionItem => item !== undefined);
 
-  const count = rawQuestions.length > 0 ? Math.min(rawQuestions.length, MAX_ACTION_ITEMS) : undefined;
-  const optionCount = items.reduce((total, item) => total + (item.options?.length ?? 0), 0);
+  const count = event.questionCount !== undefined
+    ? Math.min(event.questionCount, MAX_COUNT)
+    : rawQuestions.length > 0
+      ? Math.min(rawQuestions.length, MAX_COUNT)
+      : undefined;
+  const optionCount = event.questionOptionCount !== undefined
+    ? Math.min(event.questionOptionCount, MAX_COUNT)
+    : items.reduce((total, item) => total + (item.options?.length ?? 0), 0);
   if (count === undefined && items.length === 0) return undefined;
 
   const result: QuestionEnvelope = {
@@ -1145,10 +1201,10 @@ function _buildQuestionEnvelope(event: OpenCodeEvent, mode: ActionContentMode): 
 function _buildPermissionEnvelope(
   event: OpenCodeEvent,
   mode: ActionContentMode,
-): PermissionEnvelope | undefined {
+): PermissionItem | undefined {
   if (!event.permission) return undefined;
   const permission = event.permission;
-  const result: PermissionEnvelope = { category: _derivePermissionCategory(permission) };
+  const result: PermissionItem = { category: _derivePermissionCategory(permission) };
   if (mode === "strict") return result;
 
   const title = _sanitiseActionText(permission.title);
@@ -1173,9 +1229,108 @@ function _buildPermissionEnvelope(
   return result;
 }
 
+type ActionKind = "permission" | "question";
+
+interface ActionBucketMember {
+  /** Official request id, outer event id fallback, or opaque local key. */
+  requestId: string;
+  permission?: PermissionItem;
+  question?: QuestionEnvelope;
+}
+
+interface ActionEnvelopeOverride {
+  kind: ActionKind;
+  permission?: PermissionEnvelope;
+  question?: QuestionEnvelope;
+}
+
+interface ActionEventSnapshot extends OpenCodeEvent {
+  sessionId: string;
+  type: "permission.updated" | "question.asked";
+}
+
+interface ActionBucket {
+  sessionId: string;
+  kind: ActionKind;
+  eventId: string;
+  createdAtMs: number;
+  timer: ReturnType<typeof setTimeout>;
+  baseEvent: ActionEventSnapshot;
+  members: Map<string, ActionBucketMember>;
+  config: ResolvedConfig;
+  input: PluginInput;
+  diagnostics: MetadataDiagnosticContext;
+}
+
 // ─── State Machine ──────────────────────────────────────────
 
 const _sessions = new Map<string, SessionState>();
+
+/** Action buckets are keyed by raw session ID only inside this process. */
+const _actionBuckets = new Map<string, Map<ActionKind, ActionBucket>>();
+
+function _actionBucketFor(sessionId: string, kind: ActionKind): ActionBucket | undefined {
+  return _actionBuckets.get(sessionId)?.get(kind);
+}
+
+function _unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  const candidate = timer as unknown as { unref?: () => void };
+  candidate.unref?.();
+}
+
+function _deleteActionBucket(bucket: ActionBucket): void {
+  const byKind = _actionBuckets.get(bucket.sessionId);
+  if (!byKind || byKind.get(bucket.kind) !== bucket) return;
+  clearTimeout(bucket.timer);
+  byKind.delete(bucket.kind);
+  if (byKind.size === 0) _actionBuckets.delete(bucket.sessionId);
+}
+
+function _takeActionBucket(sessionId: string, kind: ActionKind): ActionBucket | undefined {
+  const bucket = _actionBucketFor(sessionId, kind);
+  if (!bucket) return undefined;
+  _deleteActionBucket(bucket);
+  return bucket;
+}
+
+function _actionBucketCount(): number {
+  let count = 0;
+  for (const byKind of _actionBuckets.values()) count += byKind.size;
+  return count;
+}
+
+function _cleanupActionBuckets(): void {
+  if (_actionBucketCount() <= MAX_ACTION_BUCKETS) return;
+  const buckets: ActionBucket[] = [];
+  for (const byKind of _actionBuckets.values()) {
+    for (const bucket of byKind.values()) buckets.push(bucket);
+  }
+  buckets.sort((a, b) => a.createdAtMs - b.createdAtMs);
+  for (const bucket of buckets.slice(0, Math.max(0, buckets.length - MAX_ACTION_BUCKETS))) {
+    _takeActionBucket(bucket.sessionId, bucket.kind);
+    void _flushActionBucket(bucket);
+  }
+}
+
+/** Test-only reset; production has no shutdown hook assumption. */
+function _resetActionBuckets(): void {
+  for (const byKind of _actionBuckets.values()) {
+    for (const bucket of byKind.values()) clearTimeout(bucket.timer);
+  }
+  _actionBuckets.clear();
+}
+
+interface IdleClaim {
+  sessionRef: string;
+  cycle: number;
+  eventId: string;
+  endedAtMs: number;
+}
+
+interface EventStateContext {
+  sessionRef: string;
+  state: SessionState;
+}
 
 /** Get or initialise state for a session key (already the hashed ref). */
 function _getState(sessionKey: string): SessionState {
@@ -1187,16 +1342,127 @@ function _getState(sessionKey: string): SessionState {
       hadErrorForCycle: false,
       cycle: 0,
       pendingEventId: undefined,
-      lastAccessMs: Date.now(),
+      lastAccessMs: _nowMs(),
     };
     _sessions.set(sessionKey, st);
   } else {
-    st.lastAccessMs = Date.now();
+    st.lastAccessMs = _nowMs();
     // Refresh insertion order as a small LRU improvement for cleanup.
     _sessions.delete(sessionKey);
     _sessions.set(sessionKey, st);
   }
   return st;
+}
+
+/** Clear only Assistant timestamps when a genuinely new busy cycle starts. */
+function _clearAssistantTiming(sessionRef: string): void {
+  const metadata = _assistantMetadata.get(sessionRef);
+  if (!metadata) return;
+  const retained: AssistantMetadata = { ...metadata };
+  delete retained.created;
+  delete retained.completed;
+  if (Object.keys(retained).length === 0) {
+    _assistantMetadata.delete(sessionRef);
+    return;
+  }
+  _assistantMetadata.delete(sessionRef);
+  _assistantMetadata.set(sessionRef, retained);
+}
+
+function _startBusyCycle(state: SessionState, sessionRef: string, receivedAtMs: number): void {
+  state.hadBusy = true;
+  state.sentIdle = false;
+  state.hadErrorForCycle = false;
+  state.cycle++;
+  state.cycleStartedAtMs = receivedAtMs;
+  state.cycleEndedAtMs = undefined;
+  state.pendingEventId = undefined;
+  _clearAssistantTiming(sessionRef);
+}
+
+async function _eventStateContext(event: OpenCodeEvent): Promise<EventStateContext | null> {
+  if (!event.sessionId) return null;
+  const sessionRef = await _hashSessionRef(event.sessionId);
+  const state = _getState(sessionRef);
+  if (event.sessionScope === undefined) {
+    event.sessionScope = _cachedSessionScope(sessionRef) ?? "unknown";
+  }
+  if (event.sessionScope === "root" || event.sessionScope === "subagent" || event.sessionScope === "auxiliary") {
+    _cacheSessionScope(sessionRef, event.sessionScope);
+  }
+  return { sessionRef, state };
+}
+
+function _applyCycleTimingSnapshot(
+  event: OpenCodeEvent,
+  state: SessionState,
+  endedAtMs: number,
+): void {
+  event.cycleTimingCaptured = true;
+  const startedAtMs = _safeEpochMs(state.cycleStartedAtMs);
+  const durationMs = startedAtMs === undefined
+    ? undefined
+    : endedAtMs - startedAtMs;
+  const validDuration = durationMs !== undefined
+    && Number.isInteger(durationMs)
+    && durationMs >= 0
+    && durationMs <= MAX_DURATION_MS;
+  event.cycleTimingReliable = validDuration;
+  if (!validDuration) return;
+
+  event.taskStartedAt = new Date(startedAtMs).toISOString();
+  event.endedAt = new Date(endedAtMs).toISOString();
+  event.durationMs = durationMs;
+}
+
+async function _claimIdleEvent(
+  event: OpenCodeEvent,
+  config: ResolvedConfig,
+): Promise<IdleClaim | null> {
+  if (!config.events.has("session_idle")) return null;
+  const context = await _eventStateContext(event);
+  if (!context) return null;
+  const { sessionRef, state } = context;
+
+  // This guard is held across enrichment and transport preparation so the
+  // legacy and status idle events share one frozen claim.
+  if (_idleProcessing.has(sessionRef)) return null;
+  _idleProcessing.add(sessionRef);
+
+  if (!state.hadBusy || state.hadErrorForCycle || state.sentIdle) {
+    _idleProcessing.delete(sessionRef);
+    return null;
+  }
+
+  let claim: IdleClaim | undefined;
+  try {
+    const eventId = _generateId();
+    const endedAtMs = _safeEpochMs(event.receivedAtMs) ?? _nowMs();
+    claim = { sessionRef, cycle: state.cycle, eventId, endedAtMs };
+    state.sentIdle = true;
+    state.pendingEventId = eventId;
+    state.cycleEndedAtMs = endedAtMs;
+    _applyCycleTimingSnapshot(event, state, endedAtMs);
+    return claim;
+  } catch (error) {
+    // Roll back the claim itself, while the cycle/event guard prevents an old
+    // idle failure from mutating a newer busy cycle.
+    if (claim) {
+      _rollbackIdleClaim(claim);
+    } else {
+      _idleProcessing.delete(sessionRef);
+    }
+    throw error;
+  }
+}
+
+function _rollbackIdleClaim(claim: IdleClaim): void {
+  const state = _sessions.get(claim.sessionRef);
+  if (state && state.cycle === claim.cycle && state.pendingEventId === claim.eventId) {
+    state.sentIdle = false;
+    state.pendingEventId = undefined;
+  }
+  _idleProcessing.delete(claim.sessionRef);
 }
 
 function _cacheSessionScope(sessionRef: string, scope: SessionScope): void {
@@ -1345,14 +1611,19 @@ const _SUPPORTED_INPUT_EVENTS = new Set([
   "session.idle",
   "session.error",
   "permission.updated",
+  "permission.asked",
+  "permission.replied",
   "question.asked",
+  "question.replied",
+  "question.rejected",
 ]);
 
 async function _buildEnvelope(
   event: OpenCodeEvent,
   eventId: string,
   config?: Pick<ResolvedConfig, "actionContentMode">
-    & Partial<Pick<ResolvedConfig, "instanceDisplayName">>,
+    & Partial<Pick<ResolvedConfig, "instanceDisplayName">>
+    & { actionOverride?: ActionEnvelopeOverride; allowOversizedAction?: boolean },
 ): Promise<Envelope | null> {
   // Derive output event type
   const outputEvent = _mapEventType(event);
@@ -1428,12 +1699,18 @@ async function _buildEnvelope(
   }
 
   // Event-specific fields
-  if (outputEvent === "opencode.permission_asked" && event.permission) {
-    const permission = _buildPermissionEnvelope(event, actionContentMode);
+  if (outputEvent === "opencode.permission_asked") {
+    const permission = config?.actionOverride?.kind === "permission"
+      ? config.actionOverride.permission
+      : event.permission
+        ? { count: 1, items: [_buildPermissionEnvelope(event, actionContentMode)].filter((item): item is PermissionItem => item !== undefined) }
+        : undefined;
     if (permission) envelope.permission = permission;
   }
   if (outputEvent === "opencode.question_asked") {
-    const question = _buildQuestionEnvelope(event, actionContentMode);
+    const question = config?.actionOverride?.kind === "question"
+      ? config.actionOverride.question
+      : _buildQuestionEnvelope(event, actionContentMode);
     if (question) envelope.question = question;
   }
   if (outputEvent === "opencode.session_error" && event.error) {
@@ -1442,8 +1719,229 @@ async function _buildEnvelope(
 
   // The individual action limits keep this deterministic; retain a final guard
   // so a future allowlisted field cannot accidentally create an oversized hook.
-  if (_textEncoder.encode(JSON.stringify(envelope)).length > MAX_ENVELOPE_BYTES) return null;
+  if (!config?.allowOversizedAction && _textEncoder.encode(JSON.stringify(envelope)).length > MAX_ENVELOPE_BYTES) {
+    return null;
+  }
   return envelope;
+}
+
+function _actionRequestId(event: OpenCodeEvent, kind: ActionKind): string {
+  const requestId = typeof event.requestId === "string" && event.requestId.length > 0
+    ? event.requestId
+    : typeof event.eventId === "string" && event.eventId.length > 0
+      ? event.eventId
+      : undefined;
+  if (requestId) return requestId;
+
+  // This opaque key is local-only. Without either official request id or the
+  // wrapper event id, a later reply/rejection cannot precisely withdraw it.
+  _log.warn(`[webhook-notifier] ${kind} action member has no reliable request id; precise withdrawal is unavailable`);
+  return _generateId();
+}
+
+function _snapshotActionEvent(event: OpenCodeEvent): ActionEventSnapshot | null {
+  if (!event.sessionId) return null;
+  const snapshot: ActionEventSnapshot = {
+    type: event.type === "question.asked" ? "question.asked" : "permission.updated",
+    sessionId: event.sessionId,
+    session: {
+      name: _sanitiseName(event.session?.name ?? event.session?.title),
+    },
+    sessionScope: event.sessionScope,
+    projectName: _projectNameFromPath(event.projectName),
+    agent: _sanitiseActionText(event.agent, MAX_AGENT_MODEL_LENGTH),
+    model: _normaliseModel(
+      event.model !== undefined
+        ? event.provider !== undefined && typeof event.model === "string"
+          ? { provider: event.provider, model: event.model }
+          : event.model
+        : event.provider !== undefined
+          ? { provider: event.provider }
+          : undefined,
+    ),
+    modelVariant: _sanitiseActionText(event.modelVariant, MAX_AGENT_MODEL_LENGTH),
+    startedAt: _safeTimestamp(event.startedAt),
+    taskStartedAt: _safeTimestamp(event.taskStartedAt),
+    endedAt: _safeTimestamp(event.endedAt),
+    counts: _normaliseCounts(event.counts),
+  };
+  return snapshot;
+}
+
+function _buildActionMember(
+  event: OpenCodeEvent,
+  kind: ActionKind,
+  mode: ActionContentMode,
+): ActionBucketMember | undefined {
+  const requestId = _actionRequestId(event, kind);
+  if (kind === "permission") {
+    const permission = _buildPermissionEnvelope(event, mode);
+    return permission ? { requestId, permission } : undefined;
+  }
+  const question = _buildQuestionEnvelope(event, mode) ?? { count: 0, optionCount: 0 };
+  return { requestId, question };
+}
+
+function _mergePermissionBucket(bucket: ActionBucket): PermissionEnvelope {
+  const items: PermissionItem[] = [];
+  for (const member of bucket.members.values()) {
+    if (member.permission && items.length < MAX_PERMISSION_ITEMS) items.push(member.permission);
+  }
+  return { count: bucket.members.size, items };
+}
+
+function _mergeQuestionBucket(bucket: ActionBucket): QuestionEnvelope {
+  let count = 0;
+  let optionCount = 0;
+  const summaries: string[] = [];
+  const items: QuestionItem[] = [];
+  for (const member of bucket.members.values()) {
+    const question = member.question;
+    if (!question) continue;
+    count = Math.min(MAX_COUNT, count + (question.count ?? 0));
+    optionCount = Math.min(MAX_COUNT, optionCount + (question.optionCount ?? 0));
+    if (question.summary) summaries.push(question.summary);
+    if (question.items) {
+      for (const item of question.items) {
+        if (items.length >= MAX_ACTION_ITEMS) break;
+        items.push(item);
+      }
+    }
+  }
+  const result: QuestionEnvelope = { count, optionCount };
+  if (summaries.length > 0) {
+    result.summary = _sanitiseActionText(summaries.join("；"), MAX_ACTION_SUMMARY);
+  }
+  if (items.length > 0) result.items = items;
+  return result;
+}
+
+function _actionOverride(bucket: ActionBucket): ActionEnvelopeOverride {
+  return bucket.kind === "permission"
+    ? { kind: "permission", permission: _mergePermissionBucket(bucket) }
+    : { kind: "question", question: _mergeQuestionBucket(bucket) };
+}
+
+function _serializedEnvelopeBytes(envelope: Envelope): number {
+  return _textEncoder.encode(JSON.stringify(envelope)).length;
+}
+
+/** Remove action正文 from an oversized aggregate without changing its ID/metadata. */
+function _degradeActionEnvelope(envelope: Envelope, kind: ActionKind): Envelope {
+  const degraded: Envelope = { ...envelope };
+  if (kind === "permission" && envelope.permission) {
+    degraded.permission = {
+      count: envelope.permission.count,
+      items: envelope.permission.items.map((item) => ({ category: item.category })),
+    };
+  }
+  if (kind === "question" && envelope.question) {
+    degraded.question = {
+      count: envelope.question.count,
+      optionCount: envelope.question.optionCount,
+    };
+  }
+  return degraded;
+}
+
+function _prepareActionEnvelopeForSend(
+  envelope: Envelope,
+  kind: ActionKind,
+  log: DiagnosticLog,
+): Envelope | null {
+  if (_serializedEnvelopeBytes(envelope) <= MAX_ENVELOPE_BYTES) return envelope;
+
+  const degraded = _degradeActionEnvelope(envelope, kind);
+  if (_serializedEnvelopeBytes(degraded) <= MAX_ENVELOPE_BYTES) {
+    log.warn("[webhook-notifier] action aggregate exceeded 64KiB; sent count/category fallback");
+    return degraded;
+  }
+
+  log.warn("[webhook-notifier] action aggregate exceeded 64KiB after fallback; skipped");
+  return null;
+}
+
+async function _flushActionBucket(bucket: ActionBucket): Promise<void> {
+  try {
+    await _enrichEvent(
+      bucket.baseEvent,
+      bucket.input,
+      bucket.diagnostics,
+      bucket.config.auxiliarySessionNames,
+    );
+    const envelope = await _buildEnvelope(
+      bucket.baseEvent,
+      bucket.eventId,
+      { ...bucket.config, actionOverride: _actionOverride(bucket), allowOversizedAction: true },
+    );
+    if (!envelope) return;
+    const sendEnvelope = _prepareActionEnvelopeForSend(envelope, bucket.kind, _log);
+    if (!sendEnvelope) return;
+    _diagnoseOutgoingEnvelope(
+      sendEnvelope,
+      _metadataDiagnosticContextForSessionRef(
+        { mode: bucket.config.metadataDiagnostics, log: _log },
+        sendEnvelope.session.ref,
+      ),
+    );
+    _log.warn(`[webhook-notifier] sending ${sendEnvelope.event}`);
+    await _sendWithRetry(sendEnvelope, bucket.config, _log);
+  } catch {
+    _log.error("[webhook-notifier] unexpected internal error");
+  }
+}
+
+async function _queueActionEvent(
+  event: OpenCodeEvent,
+  input: PluginInput,
+  config: ResolvedConfig,
+  diagnostics: MetadataDiagnosticContext,
+  kind: ActionKind,
+): Promise<void> {
+  if (!event.sessionId) return;
+  const snapshot = _snapshotActionEvent(event);
+  const member = _buildActionMember(event, kind, config.actionContentMode);
+  if (!snapshot || !member) return;
+
+  let byKind = _actionBuckets.get(event.sessionId);
+  if (!byKind) {
+    byKind = new Map<ActionKind, ActionBucket>();
+    _actionBuckets.set(event.sessionId, byKind);
+  }
+  let bucket = byKind.get(kind);
+  if (!bucket) {
+    const eventId = _generateId();
+    bucket = {
+      sessionId: event.sessionId,
+      kind,
+      eventId,
+      createdAtMs: _nowMs(),
+      timer: setTimeout(() => {
+        const pending = _takeActionBucket(event.sessionId!, kind);
+        if (pending) void _flushActionBucket(pending);
+      }, ACTION_DEBOUNCE_MS),
+      baseEvent: snapshot,
+      members: new Map<string, ActionBucketMember>(),
+      config,
+      input,
+      diagnostics,
+    };
+    _unrefTimer(bucket.timer);
+    byKind.set(kind, bucket);
+  }
+
+  if (bucket.members.has(member.requestId)) return;
+  if (bucket.members.size >= MAX_ACTION_BUCKET_REQUESTS) return;
+  bucket.members.set(member.requestId, member);
+  _cleanupActionBuckets();
+}
+
+function _removeActionRequest(event: OpenCodeEvent, kind: ActionKind): void {
+  if (!event.sessionId || !event.requestId) return;
+  const bucket = _actionBucketFor(event.sessionId, kind);
+  if (!bucket) return;
+  bucket.members.delete(event.requestId);
+  if (bucket.members.size === 0) _deleteActionBucket(bucket);
 }
 
 /**
@@ -1464,6 +1962,7 @@ function _mapEventType(event: OpenCodeEvent): OutputEvent | null {
     case "session.error":
       return "opencode.session_error";
     case "permission.updated":
+    case "permission.asked":
       return "opencode.permission_asked";
     case "question.asked":
       return "opencode.question_asked";
@@ -1481,63 +1980,69 @@ function _mapEventType(event: OpenCodeEvent): OutputEvent | null {
 async function _processEvent(
   event: OpenCodeEvent,
   config: ResolvedConfig,
+  options?: { idleClaim?: IdleClaim; statePrepared?: boolean },
 ): Promise<Envelope | null> {
   const rawSessionId = event.sessionId;
   if (!rawSessionId) return null;
-
-  const sessionRef = await _hashSessionRef(rawSessionId);
-  const st = _getState(sessionRef);
-  if (event.sessionScope === undefined) {
-    event.sessionScope = _cachedSessionScope(sessionRef) ?? "unknown";
-  }
-  if (event.sessionScope === "root" || event.sessionScope === "subagent" || event.sessionScope === "auxiliary") {
-    _cacheSessionScope(sessionRef, event.sessionScope);
-  }
-
   const t = event.type;
+
+  // Replies only mutate the local pre-flush bucket. They never enter the
+  // busy/idle state machine and never produce a webhook.
+  if (t === "permission.replied") {
+    _removeActionRequest(event, "permission");
+    return null;
+  }
+  if (t === "question.replied" || t === "question.rejected") {
+    _removeActionRequest(event, "question");
+    return null;
+  }
+
+  // Direct callers retain the historical single-event processing behavior.
+  // The V1 hook uses _queueActionEvent instead, so real notifications debounce.
+  if (t === "permission.updated" || t === "permission.asked") {
+    // Production V1 events must use _queueActionEvent so same-session action
+    // requests get the fixed aggregation window. Keep this direct path only
+    // for existing unit helpers and explicit internal callers.
+    if (!config.events.has("permission_asked")) return null;
+    return _buildEnvelope(event, _generateId(), config);
+  }
+  if (t === "question.asked") {
+    // Do not route the production hook through this immediate helper; it is a
+    // compatibility path for direct tests/internal single-event processing.
+    if (!config.events.has("question_asked")) return null;
+    return _buildEnvelope(event, _generateId(), config);
+  }
+
+  const context = await _eventStateContext(event);
+  if (!context) return null;
+  const { sessionRef, state: st } = context;
 
   // --- session.status = busy ---
   if (t === "session.status" && event.status === "busy") {
-    st.hadBusy = true;
-    st.sentIdle = false;
-    st.hadErrorForCycle = false;
-    st.cycle++;
-    st.pendingEventId = undefined;
+    if (!options?.statePrepared && (!st.hadBusy || st.sentIdle)) {
+      _startBusyCycle(st, sessionRef, _safeEpochMs(event.receivedAtMs) ?? _nowMs());
+    }
     return null; // no webhook for busy
   }
 
   // --- session.idle (deprecated) or session.status = idle ---
   if (t === "session.idle" || (t === "session.status" && event.status === "idle")) {
-    if (!config.events.has("session_idle")) return null;
-
-    // Atomic claim: prevent concurrent idle processing for the same session.
-    // This guard runs before any await in this branch, ensuring that
-    // concurrent session.status=idle + legacy session.idle for the same
-    // session only construct/send one envelope.
-    if (_idleProcessing.has(sessionRef)) return null;
-    _idleProcessing.add(sessionRef);
-
+    const claim = options?.idleClaim ?? await _claimIdleEvent(event, config);
+    if (!claim) return null;
     try {
-      // State machine rules:
-      // 1. No busy observed → ignore (initial idle)
-      // 2. Error in cycle → suppress (error already notified)
-      // 3. Already sent → ignore (dedup)
-      if (!st.hadBusy || st.hadErrorForCycle || st.sentIdle) {
-        return null;
-      }
-
-      const eventId = _generateId();
-      st.sentIdle = true;
-      st.pendingEventId = eventId;
-
-      const envelope = await _buildEnvelope(event, eventId, config);
+      const envelope = await _buildEnvelope(event, claim.eventId, config);
       if (!envelope) {
-        // Rollback: envelope construction failed, allow retry on next idle
-        st.sentIdle = false;
-        st.pendingEventId = undefined;
+        // Roll back only the claimed cycle. A newer busy cycle may already
+        // have replaced this state while enrichment was in flight.
+        _rollbackIdleClaim(claim);
         return null;
       }
       return envelope;
+    } catch (error) {
+      // _onEvent is a last-resort safety net, but rollback must happen here,
+      // adjacent to the claim, when envelope construction rejects.
+      _rollbackIdleClaim(claim);
+      throw error;
     } finally {
       _idleProcessing.delete(sessionRef);
     }
@@ -1559,24 +2064,6 @@ async function _processEvent(
       st.pendingEventId = undefined;
       return null;
     }
-    return envelope;
-  }
-
-  // --- permission.updated ---
-  if (t === "permission.updated") {
-    if (!config.events.has("permission_asked")) return null;
-    // Permission events don't interact with the busy/idle/error state machine
-    const eventId = _generateId();
-    const envelope = await _buildEnvelope(event, eventId, config);
-    return envelope;
-  }
-
-  // question.asked is the only question lifecycle event that requires action.
-  // Its content is copied only according to the configured bounded mode.
-  if (t === "question.asked") {
-    if (!config.events.has("question_asked")) return null;
-    const eventId = _generateId();
-    const envelope = await _buildEnvelope(event, eventId, config);
     return envelope;
   }
 
@@ -1713,6 +2200,12 @@ async function _sendWithRetry(
   config: ResolvedConfig,
   log: DiagnosticLog,
 ): Promise<void> {
+  // Check the exact serialized UTF-8 body before the first fetch. This also
+  // protects callers that bypass action-bucket preparation.
+  if (_serializedEnvelopeBytes(envelope) > MAX_ENVELOPE_BYTES) {
+    log.warn("[webhook-notifier] envelope exceeded 64KiB; skipped before send");
+    return;
+  }
   for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
     const result = await _sendSingle(
       config.url,
@@ -1747,9 +2240,10 @@ async function _onEvent(
   rawEvent: OpenCodeEvent,
   config: ResolvedConfig,
   log: DiagnosticLog,
+  options?: { idleClaim?: IdleClaim; statePrepared?: boolean },
 ): Promise<void> {
   try {
-    const envelope = await _processEvent(rawEvent, config);
+    const envelope = await _processEvent(rawEvent, config, options);
     if (!envelope) return;
 
     _diagnoseOutgoingEnvelope(
@@ -1799,6 +2293,17 @@ function _copyQuestionInputs(raw: unknown): QuestionInput[] | undefined {
     questions.push(question);
   }
   return questions;
+}
+
+function _questionOptionCount(raw: unknown): number {
+  if (!Array.isArray(raw)) return 0;
+  let count = 0;
+  for (const rawQuestion of raw) {
+    if (!rawQuestion || typeof rawQuestion !== "object" || Array.isArray(rawQuestion)) continue;
+    const options = (rawQuestion as Record<string, unknown>).options;
+    if (Array.isArray(options)) count = Math.min(MAX_COUNT, count + Math.min(options.length, MAX_ACTION_OPTIONS));
+  }
+  return count;
 }
 
 function _copyPermissionInput(props: Record<string, unknown>): OpenCodeEvent["permission"] {
@@ -1864,6 +2369,7 @@ function _normalizeWrappedEvent(wrapped: { event: Event }): OpenCodeEvent | null
     case "session.idle": {
       return {
         type,
+        eventId: wrapped.event.id,
         sessionId: typeof props.sessionID === "string" ? props.sessionID : undefined,
       };
     }
@@ -1871,6 +2377,7 @@ function _normalizeWrappedEvent(wrapped: { event: Event }): OpenCodeEvent | null
     case "session.error": {
       return {
         type,
+        eventId: wrapped.event.id,
         sessionId: typeof props.sessionID === "string" ? props.sessionID : undefined,
         error: props.error ? { ...(props.error as Record<string, unknown>) } as OpenCodeEvent["error"] : undefined,
       };
@@ -1881,8 +2388,19 @@ function _normalizeWrappedEvent(wrapped: { event: Event }): OpenCodeEvent | null
       // properties IS the Permission object. Copy only the explicit action allowlist.
       return {
         type: "permission.updated",
+        eventId: wrapped.event.id,
+        requestId: typeof props.id === "string" ? props.id : undefined,
         sessionId: typeof props.sessionID === "string" ? props.sessionID : undefined,
         permission: _copyPermissionInput(props),
+      };
+    }
+
+    case "permission.replied": {
+      return {
+        type,
+        eventId: wrapped.event.id,
+        requestId: typeof props.requestID === "string" ? props.requestID : undefined,
+        sessionId: typeof props.sessionID === "string" ? props.sessionID : undefined,
       };
     }
 
@@ -1891,8 +2409,22 @@ function _normalizeWrappedEvent(wrapped: { event: Event }): OpenCodeEvent | null
       // properties stay outside the internal event.
       return {
         type,
+        eventId: wrapped.event.id,
+        requestId: typeof props.id === "string" ? props.id : undefined,
         sessionId: typeof props.sessionID === "string" ? props.sessionID : undefined,
         questions: _copyQuestionInputs(props.questions),
+        questionCount: Array.isArray(props.questions) ? Math.min(props.questions.length, MAX_COUNT) : undefined,
+        questionOptionCount: _questionOptionCount(props.questions),
+      };
+    }
+
+    case "question.replied":
+    case "question.rejected": {
+      return {
+        type,
+        eventId: wrapped.event.id,
+        requestId: typeof props.requestID === "string" ? props.requestID : undefined,
+        sessionId: typeof props.sessionID === "string" ? props.sessionID : undefined,
       };
     }
 
@@ -2076,7 +2608,13 @@ async function _enrichEvent(
 
   // The SDK fallback is called at most once and only while assistant metadata
   // remains missing after event, cache, and session.get enrichment.
-  if (event.agent && event.model && event.taskStartedAt && event.endedAt) return;
+  // Cycle timing is intentionally not treated as Assistant metadata here:
+  // retain the existing messages fallback for modelVariant/agent/model
+  // enrichment even when busy→idle already supplied complete timing.
+  const hasCompleteAssistantTiming = event.cycleTimingReliable !== true
+    && event.taskStartedAt
+    && event.endedAt;
+  if (event.agent && event.model && hasCompleteAssistantTiming) return;
   const messages = input.client.session.messages;
   if (typeof messages !== "function") return;
 
@@ -2207,6 +2745,8 @@ const server: Plugin = async (input, options) => {
      * All errors caught and logged; no unhandled rejection.
      */
     async event(wrapped: { event: Event }): Promise<void> {
+      const receivedAtMs = _nowMs();
+      let idleClaim: IdleClaim | null = null;
       try {
         // v1.18.4 assistant updates are metadata-only and must be consumed
         // before normalisation so they never enter the state machine/HTTP path.
@@ -2214,14 +2754,66 @@ const server: Plugin = async (input, options) => {
 
         const normalized = _normalizeWrappedEvent(wrapped);
         if (!normalized) return;
+        normalized.receivedAtMs = receivedAtMs;
+
+        const actionKind: ActionKind | undefined = normalized.type === "permission.updated"
+          ? "permission"
+          : normalized.type === "question.asked"
+            ? "question"
+            : undefined;
+        if (actionKind) {
+          const enabled = actionKind === "permission"
+            ? config.events.has("permission_asked")
+            : config.events.has("question_asked");
+          if (enabled) {
+            await _queueActionEvent(normalized, input, config, diagnostics, actionKind);
+          }
+          return;
+        }
+
+        if (normalized.type === "permission.replied") {
+          _removeActionRequest(normalized, "permission");
+          return;
+        }
+        if (normalized.type === "question.replied" || normalized.type === "question.rejected") {
+          _removeActionRequest(normalized, "question");
+          return;
+        }
+
+        // Capture busy receipt time before any session.get/messages await.
+        // Keep the existing best-effort busy enrichment below because it
+        // populates scope/model caches used by later notifications.
+        const isBusy = normalized.type === "session.status" && normalized.status === "busy";
+        if (isBusy) {
+          await _onEvent(normalized, config, _log);
+        }
+
+        // Claim and freeze idle timing before enrichment. The claim remains
+        // valid even if a newer busy cycle starts while enrichment is pending.
+        const isIdle = normalized.type === "session.idle"
+          || (normalized.type === "session.status" && normalized.status === "idle");
+        if (isIdle) {
+          idleClaim = await _claimIdleEvent(normalized, config);
+          if (!idleClaim) return;
+        }
 
         // Attempt session metadata enrichment from runtime
         if (normalized.sessionId) {
           await _enrichEvent(normalized, input, diagnostics, config.auxiliarySessionNames);
         }
 
-        await _onEvent(normalized, config, _log);
+        await _onEvent(
+          normalized,
+          config,
+          _log,
+          isBusy
+            ? { statePrepared: true }
+            : idleClaim
+              ? { idleClaim }
+              : undefined,
+        );
       } catch {
+        if (idleClaim) _rollbackIdleClaim(idleClaim);
         _log.error("[webhook-notifier] unexpected internal error");
       }
     },
@@ -2262,6 +2854,7 @@ export type {
 
 export {
   _hashSessionRef,
+  _setClockForTests,
   _generateId,
   _sanitiseName,
   _projectNameFromPath,
@@ -2282,7 +2875,11 @@ export {
   _sessionScopes,
   _sessions,
   _cleanupSessions,
+  _claimIdleEvent,
+  _rollbackIdleClaim,
   _idleProcessing,
+  _actionBuckets,
+  _resetActionBuckets,
   _normalizeWrappedEvent,
   _consumeAssistantMetadata,
   _resetMetadataDiagnostics,

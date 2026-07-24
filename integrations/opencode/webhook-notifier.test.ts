@@ -21,6 +21,7 @@ import type {
 
 const {
   _hashSessionRef,
+  _setClockForTests,
   _sanitiseName,
   _projectNameFromPath,
   _projectNameFromInput,
@@ -40,7 +41,10 @@ const {
   _sessionScopes,
   _sessions,
   _cleanupSessions,
+  _claimIdleEvent,
+  _rollbackIdleClaim,
   _idleProcessing,
+  _resetActionBuckets,
   _normalizeWrappedEvent,
   _consumeAssistantMetadata,
   _resetMetadataDiagnostics,
@@ -76,12 +80,16 @@ function makeConfig(overrides?: Partial<RawPluginOptions>): RawPluginOptions {
   };
 }
 
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Global fetch mock helper — reassigns globalThis.fetch for a test body. */
 let _originalFetch: typeof globalThis.fetch;
 
 beforeEach(() => {
+  _setClockForTests();
   _originalFetch = globalThis.fetch;
   _idleProcessing.clear();
+  _resetActionBuckets();
   _sessionScopes.clear();
   _sessions.clear();
   _assistantMetadata.clear();
@@ -89,6 +97,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _setClockForTests();
   globalThis.fetch = _originalFetch;
 });
 
@@ -526,13 +535,12 @@ describe("_buildEnvelope", () => {
     expect(e!.session.name).toBeUndefined();
   });
 
-  it("includes permission.category for permission_asked", async () => {
+  it("uses the aggregate permission shape for permission_asked", async () => {
     const e = await _buildEnvelope(
       makeEvent({ type: "permission.updated", permission: { type: "file_write" } }),
       "evt-005",
     );
-    expect(e!.permission).toBeDefined();
-    expect(e!.permission!.category).toBe("file_write");
+    expect(e!.permission).toEqual({ count: 1, items: [{ category: "file_write" }] });
   });
 
   it("question.asked envelope keeps only safe common fields", async () => {
@@ -608,10 +616,10 @@ describe("_buildEnvelope", () => {
       "evt-summary",
       cfg,
     );
-    expect(e!.permission).toMatchObject({ category: "file_access", summary: "Read private file" });
-    expect(e!.permission!.title).toBeUndefined();
-    expect(e!.permission!.description).toBeUndefined();
-    expect(e!.permission!.target).toBeUndefined();
+    expect(e!.permission).toEqual({
+      count: 1,
+      items: [{ category: "file_access", summary: "Read private file" }],
+    });
     expect(JSON.stringify(e)).not.toContain("Full permission description");
   });
 
@@ -666,13 +674,17 @@ describe("_buildEnvelope", () => {
       "evt-full-permission",
       cfg,
     );
-    expect(permission!.permission).toMatchObject({
-      category: "command",
-      title: "Run command",
-      description: "Run the requested command",
-      action: "execute",
-      target: "/private/project",
-      patterns: ["git *", "npm *"],
+    expect(permission!.permission).toEqual({
+      count: 1,
+      items: [{
+        category: "command",
+        title: "Run command",
+        summary: "Run command",
+        description: "Run the requested command",
+        action: "execute",
+        target: "/private/project",
+        patterns: ["git *", "npm *"],
+      }],
     });
     const json = JSON.stringify(question);
     expect(json).not.toContain("/private/project");
@@ -746,6 +758,138 @@ describe("_processEvent — state machine", () => {
     expect(await _processEvent(idle, config)).toBeNull();
   });
 
+  it("rolls back an idle claim when envelope construction throws", async () => {
+    const sid = "idle-build-rollback";
+    await _processEvent(makeEvent({ type: "session.status", status: "busy", sessionId: sid }), config);
+
+    const brokenSession: Record<string, unknown> = {};
+    Object.defineProperty(brokenSession, "name", {
+      get: () => { throw new Error("synthetic envelope failure"); },
+    });
+    await expect(_processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid, session: brokenSession as any }),
+      config,
+    )).rejects.toThrow("synthetic envelope failure");
+
+    // The same cycle remains retryable after the failed build.
+    expect(await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid }),
+      config,
+    )).not.toBeNull();
+  });
+
+  it("does not let an old claim rollback mutate a newer busy cycle", async () => {
+    const sid = "idle-rollback-new-cycle";
+    await _processEvent(makeEvent({ type: "session.status", status: "busy", sessionId: sid }), config);
+    const oldClaim = await _claimIdleEvent(makeEvent({ type: "session.status", status: "idle", sessionId: sid }), config);
+    expect(oldClaim).not.toBeNull();
+
+    await _processEvent(makeEvent({ type: "session.status", status: "busy", sessionId: sid }), config);
+    _rollbackIdleClaim(oldClaim!);
+
+    expect(await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid }),
+      config,
+    )).not.toBeNull();
+  });
+
+  it("prefers complete busy→idle wall-clock timing over Assistant metadata", async () => {
+    const sid = "timing-priority";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid, receivedAtMs: 1_000 }),
+      config,
+    );
+    await _consumeAssistantMetadata({
+      event: {
+        id: "timing-priority-assistant",
+        type: "message.updated",
+        properties: {
+          info: {
+            sessionID: sid,
+            role: "assistant",
+            time: { created: 2_000, completed: 5_000 },
+          },
+        },
+      },
+    });
+
+    const idle = makeEvent({ type: "session.status", status: "idle", sessionId: sid, receivedAtMs: 15_000 });
+    await _enrichEvent(idle, { client: { session: { get: async () => ({ data: {} }) } } } as any);
+    const env = await _processEvent(idle, config);
+
+    expect(env).toMatchObject({
+      taskStartedAt: "1970-01-01T00:00:01.000Z",
+      endedAt: "1970-01-01T00:00:15.000Z",
+      durationMs: 14_000,
+    });
+  });
+
+  it("does not reset the cycle start on repeated busy events", async () => {
+    const sid = "timing-repeated-busy";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid, receivedAtMs: 1_000 }),
+      config,
+    );
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid, receivedAtMs: 5_000 }),
+      config,
+    );
+    const env = await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid, receivedAtMs: 10_000 }),
+      config,
+    );
+
+    expect(env!.taskStartedAt).toBe("1970-01-01T00:00:01.000Z");
+    expect(env!.endedAt).toBe("1970-01-01T00:00:10.000Z");
+    expect(env!.durationMs).toBe(9_000);
+  });
+
+  it("resets timing for a new busy cycle", async () => {
+    const sid = "timing-new-cycle";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid, receivedAtMs: 1_000 }),
+      config,
+    );
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid, receivedAtMs: 2_000 }),
+      config,
+    );
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid, receivedAtMs: 10_000 }),
+      config,
+    );
+    const env = await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid, receivedAtMs: 13_000 }),
+      config,
+    );
+
+    expect(env!.taskStartedAt).toBe("1970-01-01T00:00:10.000Z");
+    expect(env!.endedAt).toBe("1970-01-01T00:00:13.000Z");
+    expect(env!.durationMs).toBe(3_000);
+  });
+
+  it("keeps Permission and Question events independent of busy-cycle timing", async () => {
+    const sid = "timing-actions-independent";
+    await _processEvent(
+      makeEvent({ type: "session.status", status: "busy", sessionId: sid, receivedAtMs: 1_000 }),
+      config,
+    );
+    expect(await _processEvent(
+      makeEvent({ type: "permission.updated", sessionId: sid, permission: { type: "command" } }),
+      config,
+    )).not.toBeNull();
+    expect(await _processEvent(
+      makeEvent({ type: "question.asked", sessionId: sid, questions: [{ text: "Continue?" }] }),
+      config,
+    )).not.toBeNull();
+
+    const env = await _processEvent(
+      makeEvent({ type: "session.status", status: "idle", sessionId: sid, receivedAtMs: 10_000 }),
+      config,
+    );
+    expect(env!.durationMs).toBe(9_000);
+  });
+
   it("initial idle (no prior busy) is ignored", async () => {
     expect(await _processEvent(
       makeEvent({ type: "session.status", status: "idle", sessionId: "s2" }),
@@ -763,12 +907,15 @@ describe("_processEvent — state machine", () => {
   });
 
   it("status idle + legacy idle dedup within same cycle", async () => {
-    const busy = makeEvent({ type: "session.status", status: "busy", sessionId: "s4" });
-    const statusIdle = makeEvent({ type: "session.status", status: "idle", sessionId: "s4" });
-    const legacyIdle = makeEvent({ type: "session.idle", sessionId: "s4" });
+    const busy = makeEvent({ type: "session.status", status: "busy", sessionId: "s4", receivedAtMs: 1_000 });
+    const statusIdle = makeEvent({ type: "session.status", status: "idle", sessionId: "s4", receivedAtMs: 5_000 });
+    const legacyIdle = makeEvent({ type: "session.idle", sessionId: "s4", receivedAtMs: 5_000 });
 
     await _processEvent(busy, config);
-    expect(await _processEvent(statusIdle, config)).not.toBeNull();
+    const env = await _processEvent(statusIdle, config);
+    expect(env).not.toBeNull();
+    expect(env!.endedAt).toBe("1970-01-01T00:00:05.000Z");
+    expect(env!.durationMs).toBe(4_000);
     expect(await _processEvent(legacyIdle, config)).toBeNull();
   });
 
@@ -1158,6 +1305,21 @@ describe("_sendWithRetry — retry behaviour", () => {
     expect(callCount).toBe(1);
   });
 
+  it("skips an oversized UTF-8 body before the first fetch", async () => {
+    let callCount = 0;
+    globalThis.fetch = mock(async () => {
+      callCount++;
+      return new Response("should not send", { status: 200 });
+    });
+
+    await _sendWithRetry(
+      makeEnv({ question: { count: 1, optionCount: 1, summary: "界".repeat(40_000) } }),
+      config,
+      noopLog(),
+    );
+    expect(callCount).toBe(0);
+  });
+
   it("retries on 500 up to 3 total attempts", async () => {
     let callCount = 0;
     globalThis.fetch = mock(async () => {
@@ -1351,7 +1513,7 @@ describe("envelope structure — compatible with Python OpenCodeProviderAdapter"
       id: "evt-xb-2",
       event: "opencode.permission_asked",
       version: 1,
-      permission: { category: "file_access" },
+      permission: { count: 1, items: [{ category: "file_access" }] },
       session: { ref: expect.any(String) },
     });
   });
@@ -1557,10 +1719,12 @@ describe("Server — V1 loader integration path", () => {
       },
     });
 
+    await wait(200);
+
     expect((globalThis.fetch as any).mock.calls.length).toBe(1);
     const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
     expect(body.event).toBe("opencode.permission_asked");
-    expect(body.permission.category).toBe("file_access");
+    expect(body.permission).toEqual({ count: 1, items: [{ category: "file_access" }] });
   });
 
   it("question.asked sends question_asked without question data via official wrapper", async () => {
@@ -1585,6 +1749,8 @@ describe("Server — V1 loader integration path", () => {
       },
     });
 
+    await wait(200);
+
     expect((globalThis.fetch as any).mock.calls.length).toBe(1);
     const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
     expect(body.event).toBe("opencode.question_asked");
@@ -1594,6 +1760,308 @@ describe("Server — V1 loader integration path", () => {
     expect(json).not.toContain("secret option");
     expect(json).not.toContain("/private/project");
     expect(json).not.toContain("secret-token");
+  });
+
+  it("debounces same-session permissions, keeps sessions isolated, and deduplicates request IDs", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+    await hooks.event!({
+      event: { id: "outer-p1", type: "permission.asked", properties: { id: "p1", sessionID: "agg-A", type: "read" } },
+    });
+    await hooks.event!({
+      event: { id: "outer-p1-duplicate", type: "permission.updated", properties: { id: "p1", sessionID: "agg-A", type: "read" } },
+    });
+    await hooks.event!({
+      event: { id: "outer-p2", type: "permission.updated", properties: { id: "p2", sessionID: "agg-A", type: "write" } },
+    });
+    await hooks.event!({
+      event: { id: "outer-p3", type: "permission.updated", properties: { id: "p3", sessionID: "agg-B", type: "execute" } },
+    });
+    expect((globalThis.fetch as any).mock.calls.length).toBe(0);
+    await wait(220);
+
+    expect((globalThis.fetch as any).mock.calls.length).toBe(2);
+    const bodies = (globalThis.fetch as any).mock.calls.map((call: any[]) => JSON.parse(call[1].body));
+    expect(bodies.map((body: any) => body.permission.count).sort()).toEqual([1, 2]);
+    const aggregate = bodies.find((body: any) => body.permission.count === 2);
+    expect(aggregate.permission.items.map((item: any) => item.category)).toEqual(["read", "write"]);
+    expect(aggregate.session.ref).not.toBe(bodies.find((body: any) => body.permission.count === 1).session.ref);
+  });
+
+  it("uses a fixed 150ms action window without resetting on later events", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+    await hooks.event!({
+      event: { id: "fixed-window-1", type: "permission.asked", properties: { id: "fixed-p1", sessionID: "fixed-window", type: "read" } },
+    });
+    await wait(80);
+    await hooks.event!({
+      event: { id: "fixed-window-2", type: "permission.updated", properties: { id: "fixed-p2", sessionID: "fixed-window", type: "write" } },
+    });
+
+    // If the second event reset the timer, the bucket would not flush yet.
+    await wait(90);
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.permission.count).toBe(2);
+  });
+
+  it("withdraws a permission before flush and sends nothing for an empty bucket", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+    await hooks.event!({
+      event: { id: "outer-p1", type: "permission.asked", properties: { id: "p1", sessionID: "withdraw-perm", type: "read" } },
+    });
+    await hooks.event!({
+      event: { id: "reply-p1", type: "permission.replied", properties: { sessionID: "withdraw-perm", requestID: "p1", reply: "once" } },
+    });
+    await wait(220);
+    expect((globalThis.fetch as any).mock.calls.length).toBe(0);
+  });
+
+  it("keeps strict aggregated permissions to category-only items and caps details", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+    for (let index = 0; index < 20; index++) {
+      await hooks.event!({
+        event: {
+          id: `permission-outer-${index}`,
+          type: "permission.asked",
+          properties: {
+            id: `permission-${index}`,
+            sessionID: "permission-cap",
+            type: `type-${index}`,
+            title: "must not leave strict mode",
+          },
+        },
+      });
+    }
+    await wait(220);
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.permission.count).toBe(20);
+    expect(body.permission.items).toHaveLength(16);
+    expect(body.permission.items[0]).toEqual({ category: "type-0" });
+    expect(JSON.stringify(body)).not.toContain("must not leave strict mode");
+  });
+
+  it("aggregates questions and preserves stable numbering in full mode", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig({ actionContentMode: "full" }),
+    );
+    await hooks.event!({
+      event: {
+        id: "q-outer-1",
+        type: "question.asked",
+        properties: {
+          id: "q1",
+          sessionID: "agg-question",
+          questions: [{ question: "First" }, { question: "Second", options: [{ label: "A" }, { label: "B" }] }],
+        },
+      },
+    });
+    await hooks.event!({
+      event: {
+        id: "q-outer-2",
+        type: "question.asked",
+        properties: { id: "q2", sessionID: "agg-question", questions: [{ question: "Third", options: [{ label: "C" }] }] },
+      },
+    });
+    await wait(220);
+    expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+    const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(body.question).toMatchObject({ count: 3, optionCount: 3 });
+    expect(body.question.items.map((item: any) => item.text)).toEqual(["First", "Second", "Third"]);
+  });
+
+  it("checks UTF-8 bytes and sends one stable-ID question fallback without the original body", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig({ actionContentMode: "full" }),
+    );
+    const unicodeQuestion = "问题".repeat(256);
+    const unicodeOption = "选项".repeat(256);
+    for (let index = 0; index < 8; index++) {
+      await hooks.event!({
+        event: {
+          id: `oversized-question-${index}`,
+          type: "question.asked",
+          properties: {
+            id: `oversized-q-${index}`,
+            sessionID: "oversized-question-session",
+            questions: [{
+              question: unicodeQuestion,
+              options: Array.from({ length: 12 }, () => ({ label: unicodeOption, description: unicodeOption })),
+            }],
+          },
+        },
+      });
+    }
+    await wait(220);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.question).toEqual({ count: 8, optionCount: 96 });
+    expect(new TextEncoder().encode(JSON.stringify(bodies[0])).length).toBeLessThanOrEqual(64 * 1024);
+    expect(JSON.stringify(bodies[0])).not.toContain(unicodeQuestion);
+    expect(JSON.stringify(bodies[0])).not.toContain(unicodeOption);
+    expect(bodies[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("degrades oversized permission aggregates to count and safe categories", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig({ actionContentMode: "full" }),
+    );
+    const privateText = "路径内容".repeat(256);
+    for (let index = 0; index < 16; index++) {
+      await hooks.event!({
+        event: {
+          id: `oversized-permission-${index}`,
+          type: "permission.asked",
+          properties: {
+            id: `oversized-p-${index}`,
+            sessionID: "oversized-permission-session",
+            type: `category-${index}`,
+            title: privateText,
+            description: privateText,
+            action: privateText,
+            target: privateText,
+            patterns: Array.from({ length: 16 }, () => privateText),
+          },
+        },
+      });
+    }
+    await wait(220);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.permission.count).toBe(16);
+    expect(bodies[0]!.permission.items).toEqual(
+      Array.from({ length: 16 }, (_, index) => ({ category: `category-${index}` })),
+    );
+    expect(JSON.stringify(bodies[0])).not.toContain(privateText);
+  });
+
+  it("warns once for action members missing both IDs and keeps reply withdrawal fail-open", async () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+    try {
+      const hooks = await defaultModule.server(
+        { client: { session: { get: async () => ({}) } } } as any,
+        makeConfig(),
+      );
+      await hooks.event!({
+        event: { id: "", type: "permission.asked", properties: { sessionID: "missing-action-id", type: "read" } },
+      });
+      await hooks.event!({
+        event: { id: "outer-write", type: "permission.updated", properties: { id: "write-request", sessionID: "missing-action-id", type: "write" } },
+      });
+      await hooks.event!({
+        event: { id: "missing-reply-id", type: "permission.replied", properties: { sessionID: "missing-action-id" } },
+      });
+      await wait(220);
+
+      expect((globalThis.fetch as any).mock.calls.length).toBe(1);
+      const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+      expect(body.permission.count).toBe(2);
+      expect(body.permission.items.map((item: any) => item.category)).toEqual(["read", "write"]);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const missingIdWarnings = warnings.filter((line) => line.includes("no reliable request id"));
+    expect(missingIdWarnings).toHaveLength(1);
+    expect(missingIdWarnings[0]).not.toContain("missing-action-id");
+    expect(missingIdWarnings[0]).not.toContain("read");
+  });
+
+  it("withdraws replied and rejected questions independently", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+    await hooks.event!({
+      event: { id: "q-outer-1", type: "question.asked", properties: { id: "q1", sessionID: "withdraw-question", questions: [{ question: "First" }] } },
+    });
+    await hooks.event!({
+      event: { id: "q-outer-2", type: "question.asked", properties: { id: "q2", sessionID: "withdraw-question", questions: [{ question: "Second" }] } },
+    });
+    await hooks.event!({
+      event: { id: "q-reply", type: "question.replied", properties: { sessionID: "withdraw-question", requestID: "q1" } },
+    });
+    await hooks.event!({
+      event: { id: "q-reject", type: "question.rejected", properties: { sessionID: "withdraw-question", requestID: "q2" } },
+    });
+    await wait(220);
+    expect((globalThis.fetch as any).mock.calls.length).toBe(0);
+  });
+
+  it("keeps permission and question buckets separate and assigns a new ID after flush", async () => {
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+    await hooks.event!({
+      event: { id: "p-outer", type: "permission.asked", properties: { id: "p1", sessionID: "separate-kinds", type: "read" } },
+    });
+    await hooks.event!({
+      event: { id: "q-outer", type: "question.asked", properties: { id: "q1", sessionID: "separate-kinds", questions: [{ question: "Answer" }] } },
+    });
+    await wait(220);
+    expect((globalThis.fetch as any).mock.calls.length).toBe(2);
+    const firstBodies = (globalThis.fetch as any).mock.calls.map((call: any[]) => JSON.parse(call[1].body));
+    const firstIds = new Set(firstBodies.map((body: any) => body.id));
+    expect(firstIds.size).toBe(2);
+
+    await hooks.event!({
+      event: { id: "p-outer-2", type: "permission.asked", properties: { id: "p2", sessionID: "separate-kinds", type: "write" } },
+    });
+    await wait(220);
+    expect((globalThis.fetch as any).mock.calls.length).toBe(3);
+    const secondPermission = JSON.parse((globalThis.fetch as any).mock.calls[2][1].body);
+    expect(secondPermission.event).toBe("opencode.permission_asked");
+    expect(secondPermission.id).not.toBe(firstBodies.find((body: any) => body.event === "opencode.permission_asked").id);
+  });
+
+  it("keeps the aggregate ID stable across retries", async () => {
+    const bodies: any[] = [];
+    let attempts = 0;
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      attempts++;
+      return attempts < 3
+        ? new Response("retry", { status: 503, headers: { "Retry-After": "0" } })
+        : new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server(
+      { client: { session: { get: async () => ({}) } } } as any,
+      makeConfig(),
+    );
+    await hooks.event!({
+      event: { id: "retry-outer", type: "permission.asked", properties: { id: "retry-p1", sessionID: "retry-session", type: "read" } },
+    });
+    await wait(260);
+    expect(bodies).toHaveLength(3);
+    expect(new Set(bodies.map((body) => body.id)).size).toBe(1);
   });
 
   it("question.replied and question.rejected do not send via official wrapper", async () => {
@@ -1647,6 +2115,70 @@ describe("Server — V1 loader integration path", () => {
     expect(body.event).toBe("opencode.session_idle");
     // No session name since enrichment failed
     expect(body.session.name).toBeUndefined();
+  });
+
+  it("keeps an idle timing snapshot isolated when a new busy arrives during enrichment", async () => {
+    let now = 1_000;
+    _setClockForTests(() => now);
+    let getCalls = 0;
+    let releaseIdle!: (value: unknown) => void;
+    let idleGetStarted!: () => void;
+    const idleGetStartedPromise = new Promise<void>((resolve) => {
+      idleGetStarted = resolve;
+    });
+    const pendingIdleGet = new Promise<unknown>((resolve) => {
+      releaseIdle = resolve;
+    });
+    const input = {
+      client: {
+        session: {
+          get: async () => {
+            getCalls++;
+            if (getCalls === 2) {
+              idleGetStarted();
+              return pendingIdleGet;
+            }
+            return { data: {} };
+          },
+        },
+      },
+    };
+    const hooks = await defaultModule.server(input as any, makeConfig());
+    const sid = "server-timing-isolation";
+
+    await hooks.event!({
+      event: { id: "cycle-1-busy", type: "session.status", properties: { sessionID: sid, status: { type: "busy" } } },
+    });
+    now = 5_000;
+    const oldIdle = hooks.event!({
+      event: { id: "cycle-1-idle", type: "session.status", properties: { sessionID: sid, status: { type: "idle" } } },
+    });
+    await idleGetStartedPromise;
+
+    now = 9_000;
+    await hooks.event!({
+      event: { id: "cycle-2-busy", type: "session.status", properties: { sessionID: sid, status: { type: "busy" } } },
+    });
+    releaseIdle({ data: {} });
+    await oldIdle;
+
+    const firstBody = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+    expect(firstBody).toMatchObject({
+      taskStartedAt: "1970-01-01T00:00:01.000Z",
+      endedAt: "1970-01-01T00:00:05.000Z",
+      durationMs: 4_000,
+    });
+
+    now = 12_000;
+    await hooks.event!({
+      event: { id: "cycle-2-idle", type: "session.status", properties: { sessionID: sid, status: { type: "idle" } } },
+    });
+    const secondBody = JSON.parse((globalThis.fetch as any).mock.calls[1][1].body);
+    expect(secondBody).toMatchObject({
+      taskStartedAt: "1970-01-01T00:00:09.000Z",
+      endedAt: "1970-01-01T00:00:12.000Z",
+      durationMs: 3_000,
+    });
   });
 
   it("empty properties object is handled safely", async () => {
@@ -1801,13 +2333,13 @@ describe("_normalizeWrappedEvent — wrapper event mapping", () => {
     expect(result).not.toHaveProperty("cwd");
   });
 
-  it("question.replied and question.rejected are ignored", () => {
+  it("question.replied and question.rejected are normalized for bucket withdrawal", () => {
     expect(_normalizeWrappedEvent({
       event: { id: "e1", type: "question.replied", properties: { sessionID: "s-question" } },
-    })).toBeNull();
+    })).toMatchObject({ type: "question.replied", sessionId: "s-question" });
     expect(_normalizeWrappedEvent({
       event: { id: "e2", type: "question.rejected", properties: { sessionID: "s-question" } },
-    })).toBeNull();
+    })).toMatchObject({ type: "question.rejected", sessionId: "s-question" });
   });
 
   it("permission.asked compatibility event maps to permission.updated", () => {
@@ -2613,6 +3145,37 @@ describe("_enrichEvent — session metadata enrichment", () => {
     expect(envelope!.taskStartedAt).toBe("2025-06-15T15:06:40.000Z");
     expect(envelope!.endedAt).toBeUndefined();
     expect(envelope!.durationMs).toBeUndefined();
+  });
+
+  it("does not invent duration from incomplete, invalid, or negative Assistant timing", async () => {
+    const cases = [
+      { sessionId: "assistant-time-missing", time: { created: 1_000 } },
+      { sessionId: "assistant-time-invalid", time: { created: "not-a-time", completed: "also-not-a-time" } },
+      { sessionId: "assistant-time-negative", time: { created: 2_000, completed: 1_000 } },
+    ];
+
+    for (const item of cases) {
+      await _consumeAssistantMetadata({
+        event: {
+          id: item.sessionId,
+          type: "message.updated",
+          properties: {
+            info: {
+              sessionID: item.sessionId,
+              role: "assistant",
+              time: item.time,
+            },
+          },
+        },
+      });
+      const event = { type: "session.idle", sessionId: item.sessionId } as OpenCodeEvent;
+      await _enrichEvent(
+        event,
+        { client: { session: { get: async () => ({ data: {} }) } } } as any,
+      );
+      const envelope = await _buildEnvelope(event, item.sessionId);
+      expect(envelope!.durationMs).toBeUndefined();
+    }
   });
 
   it("fills session name from title when available", async () => {
