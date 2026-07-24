@@ -47,6 +47,7 @@ def test_opencode_docs_cover_required_smoke_and_contract_sections():
         "session_idle",
         "session_error",
         "permission_asked",
+        "question_asked",
         "匿名",
         "白名单",
         "at-least-once",

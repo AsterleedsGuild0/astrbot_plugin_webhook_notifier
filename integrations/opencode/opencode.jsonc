@@ -8,7 +8,7 @@
   // URL 与 Token 使用 {env:...} / {file:...} 插值，不在配置中
   // 硬编码敏感信息。
   //
-  // 插件加载后会自动读取配置，缺省 events 时启用所有三类事件。
+  // 插件加载后会自动读取配置，缺省 events 时启用所有四类事件。
   //
   // 参考文档：docs/opencode-integration.md
 
@@ -30,15 +30,28 @@
         // 可选：设为 false 可完全禁用此插件
         "enabled": true,
 
-        // 可选：要监听的事件子集，缺省为全部三类
+        // 可选：要监听的事件子集，缺省为全部四类
         "events": [
           "session_idle",
           "session_error",
-          "permission_asked"
+          "permission_asked",
+          "question_asked"
         ],
 
-        // 可选：项目显示名称（当前不发送到服务端，预留）
-        "projectDisplayName": "示例项目"
+        // 可选：项目显示名称，会进入通知 envelope/card
+        "projectDisplayName": "示例项目",
+
+        // 可选：Question/Permission 内容模式，默认 strict（安全）
+        // strict：仅类别和计数；summary：清洗截断的摘要；full：显式发送
+        // 白名单内的完整问题/权限内容。full 可能泄露业务文本和目标路径，
+        // 仅在明确接受该风险时启用。
+        // "actionContentMode": "full"
+        "actionContentMode": "strict",
+
+        // 可选：运行时元数据诊断：off（默认）、once 或 sample
+        // once：每阶段每进程最多一条；sample：每阶段最多 8 条并去重
+        // "metadataDiagnostics": "sample"
+        "metadataDiagnostics": "off"
       }
     ]
   ]

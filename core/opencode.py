@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import re
+import math
+import json
 from datetime import datetime, timezone
 from typing import Any
 
 from .models import NormalizedEvent
+from .notification_policy import SessionScope
 from .providers import ProviderAdapter, ProviderError
 
 _OPENCODE_KEY = "opencode"
@@ -16,13 +19,26 @@ _MAX_ID_REF = 128
 _MAX_NAME = 200  # Unicode chars
 _MAX_AGENT_MODEL = 128
 _MAX_CATEGORY_CODE = 64
+_MAX_ACTION_TEXT = 512
+_MAX_ACTION_SUMMARY = 256
+_MAX_ACTION_ITEMS = 8
+_MAX_ACTION_OPTIONS = 12
+_MAX_PERMISSION_PATTERNS = 16
+_MAX_ACTION_COUNT = 1_000_000
+_MAX_PAYLOAD_BYTES = 64 * 1024
 _MAX_DURATION_MS = 604800000  # 7 days
 _MIN_DURATION_MS = 0
 
 # ─── 允许字段 ──────────────────────────────────────────────
 
-_SESSION_ALLOW = frozenset({"ref", "name"})
-_PERMISSION_ALLOW = frozenset({"category"})
+_SESSION_ALLOW = frozenset({"ref", "name", "scope"})
+_COUNTS_ALLOW = frozenset({"messages", "tools", "changes"})
+_PERMISSION_ALLOW = frozenset(
+    {"category", "title", "summary", "description", "action", "target", "patterns"}
+)
+_QUESTION_ALLOW = frozenset({"count", "optionCount", "summary", "items"})
+_QUESTION_ITEM_ALLOW = frozenset({"text", "header", "recommended", "options"})
+_QUESTION_OPTION_ALLOW = frozenset({"label", "description", "recommended"})
 _ERROR_ALLOW = frozenset({"category", "code"})
 
 # ─── 敏感字段 — 白名单自然拒绝，但列出便于可读 ───────────
@@ -39,9 +55,26 @@ _MSG_SECURE: dict[str, str] = {
     "session": "无效的 session 字段",
     "session.ref": "无效的 session.ref 字段",
     "session.name": "无效的 session.name 字段",
+    "session.scope": "无效的 session.scope 字段",
     "agent": "无效的 agent 字段",
     "model": "无效的 model 字段",
     "durationMs": "无效的 durationMs 字段",
+    "projectDisplayName": "无效的 projectDisplayName 字段",
+    "startedAt": "无效的 startedAt 字段",
+    "taskStartedAt": "无效的 taskStartedAt 字段",
+    "endedAt": "无效的 endedAt 字段",
+    "counts": "无效的 counts 字段",
+    "question": "无效的 question 字段",
+    "question.count": "无效的 question.count 字段",
+    "question.optionCount": "无效的 question.optionCount 字段",
+    "question.summary": "无效的 question.summary 字段",
+    "question.items": "无效的 question.items 字段",
+    "permission.title": "无效的 permission.title 字段",
+    "permission.summary": "无效的 permission.summary 字段",
+    "permission.description": "无效的 permission.description 字段",
+    "permission.action": "无效的 permission.action 字段",
+    "permission.target": "无效的 permission.target 字段",
+    "permission.patterns": "无效的 permission.patterns 字段",
     "permission": "无效的 permission 字段",
     "permission.category": "无效的 permission.category 字段",
     "error": "无效的 error 字段",
@@ -133,6 +166,7 @@ def _check_event(val: Any) -> str:
             "opencode.session_idle",
             "opencode.session_error",
             "opencode.permission_asked",
+            "opencode.question_asked",
         }
     )
     if not _is_nonempty_str(val) or val not in allowed:
@@ -183,6 +217,18 @@ def _check_session_name(val: Any) -> str | None:
     return stripped if stripped else None
 
 
+def _check_session_scope(val: Any) -> SessionScope:
+    if not isinstance(val, str) or val not in {
+        SessionScope.ROOT.value,
+        SessionScope.SUBAGENT.value,
+        SessionScope.UNKNOWN.value,
+    }:
+        raise ProviderError(
+            "invalid_payload", _safe_msg("session.scope"), retryable=False
+        )
+    return SessionScope(val)
+
+
 def _check_agent_or_model(val: Any, field: str) -> str | None:
     if val is None:
         return None
@@ -211,6 +257,62 @@ def _check_category(val: Any, field: str) -> str:
     if not trimmed or len(trimmed) > _MAX_CATEGORY_CODE:
         raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
     return trimmed
+
+
+def _check_action_text(
+    val: Any, field: str, *, max_length: int = _MAX_ACTION_TEXT
+) -> str:
+    if not isinstance(val, str) or not val.strip() or len(val) > max_length:
+        raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+    cleaned = _strip_dangerous_unicode(val)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\r\n\t]", " ", cleaned)
+    cleaned = re.sub(r" {2,}", " ", cleaned).strip()
+    if not cleaned:
+        raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+    return cleaned
+
+
+def _check_optional_action_text(
+    val: Any,
+    field: str,
+    *,
+    max_length: int = _MAX_ACTION_TEXT,
+) -> str | None:
+    if val is None:
+        return None
+    return _check_action_text(val, field, max_length=max_length)
+
+
+def _check_action_scalar(val: Any, field: str) -> str | bool | int | float:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        if abs(val) > _MAX_ACTION_COUNT:
+            raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+        return val
+    if isinstance(val, float):
+        if not math.isfinite(val) or abs(val) > _MAX_ACTION_COUNT:
+            raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+        return val
+    return _check_action_text(val, field)
+
+
+def _check_action_count(val: Any, field: str) -> int | None:
+    if val is None:
+        return None
+    if not _is_strict_int(val) or val < 0 or val > _MAX_ACTION_COUNT:
+        raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+    return val
+
+
+def _check_optional_timestamp(val: Any, field: str) -> str | None:
+    if val is None:
+        return None
+    return _check_emitted_at(val) if isinstance(val, str) else _raise_invalid(field)
+
+
+def _raise_invalid(field: str) -> None:
+    raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
 
 
 # ─── Session Name 清洗 ─────────────────────────────────────
@@ -290,9 +392,157 @@ def _check_unknown_fields(
         if key not in allow:
             raise ProviderError(
                 "invalid_payload",
-                f"不允许的字段",
+                "不允许的字段",
                 retryable=False,
             )
+
+
+def _validate_counts(raw: Any) -> dict[str, int] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ProviderError("invalid_payload", _safe_msg("counts"), retryable=False)
+    _check_unknown_fields(raw, _COUNTS_ALLOW, "counts")
+    result: dict[str, int] = {}
+    for key in _COUNTS_ALLOW:
+        value = _check_action_count(raw.get(key), "counts")
+        if value is not None:
+            result[key] = value
+    return result or None
+
+
+def _validate_permission(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ProviderError("invalid_payload", _safe_msg("permission"), retryable=False)
+    _check_unknown_fields(raw, _PERMISSION_ALLOW, "permission")
+    result: dict[str, Any] = {
+        "category": _check_category(raw.get("category"), "permission.category")
+    }
+    for key in ("title", "description", "action", "target"):
+        value = _check_optional_action_text(raw.get(key), f"permission.{key}")
+        if value is not None:
+            result[key] = value
+    summary = _check_optional_action_text(
+        raw.get("summary"), "permission.summary", max_length=_MAX_ACTION_SUMMARY
+    )
+    if summary is not None:
+        result["summary"] = summary
+    patterns = raw.get("patterns")
+    if patterns is not None:
+        if not isinstance(patterns, list) or len(patterns) > _MAX_PERMISSION_PATTERNS:
+            raise ProviderError(
+                "invalid_payload", _safe_msg("permission.patterns"), retryable=False
+            )
+        clean_patterns = [
+            _check_action_text(pattern, "permission.patterns") for pattern in patterns
+        ]
+        if clean_patterns:
+            result["patterns"] = clean_patterns
+    return result
+
+
+def _validate_question(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ProviderError("invalid_payload", _safe_msg("question"), retryable=False)
+    _check_unknown_fields(raw, _QUESTION_ALLOW, "question")
+    result: dict[str, Any] = {}
+    for key in ("count", "optionCount"):
+        value = _check_action_count(raw.get(key), f"question.{key}")
+        if value is not None:
+            result[key] = value
+    summary = _check_optional_action_text(
+        raw.get("summary"), "question.summary", max_length=_MAX_ACTION_SUMMARY
+    )
+    if summary is not None:
+        result["summary"] = summary
+
+    items = raw.get("items")
+    if items is not None:
+        if not isinstance(items, list) or len(items) > _MAX_ACTION_ITEMS:
+            raise ProviderError(
+                "invalid_payload", _safe_msg("question.items"), retryable=False
+            )
+        clean_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ProviderError(
+                    "invalid_payload", _safe_msg("question.items"), retryable=False
+                )
+            _check_unknown_fields(item, _QUESTION_ITEM_ALLOW, "question.items")
+            clean_item: dict[str, Any] = {}
+            for key in ("text", "header"):
+                value = _check_optional_action_text(item.get(key), "question.items")
+                if value is not None:
+                    clean_item[key] = value
+            if "recommended" in item:
+                clean_item["recommended"] = _check_action_scalar(
+                    item["recommended"], "question.items"
+                )
+            options = item.get("options")
+            if options is not None:
+                if not isinstance(options, list) or len(options) > _MAX_ACTION_OPTIONS:
+                    raise ProviderError(
+                        "invalid_payload", _safe_msg("question.items"), retryable=False
+                    )
+                clean_options: list[dict[str, Any]] = []
+                for option in options:
+                    if not isinstance(option, dict):
+                        raise ProviderError(
+                            "invalid_payload",
+                            _safe_msg("question.items"),
+                            retryable=False,
+                        )
+                    _check_unknown_fields(
+                        option, _QUESTION_OPTION_ALLOW, "question.items"
+                    )
+                    clean_option: dict[str, Any] = {}
+                    for key in ("label", "description"):
+                        value = _check_optional_action_text(
+                            option.get(key), "question.items"
+                        )
+                        if value is not None:
+                            clean_option[key] = value
+                    if "recommended" in option:
+                        clean_option["recommended"] = _check_action_scalar(
+                            option["recommended"], "question.items"
+                        )
+                    if clean_option:
+                        clean_options.append(clean_option)
+                if clean_options:
+                    clean_item["options"] = clean_options
+            if clean_item:
+                clean_items.append(clean_item)
+        if clean_items:
+            result["items"] = clean_items
+    if not result:
+        raise ProviderError("invalid_payload", _safe_msg("question"), retryable=False)
+    return result
+
+
+def _format_duration_ms(duration_ms: int) -> str:
+    """将毫秒转换成稳定、适合标准化字段的可读时长。"""
+    if duration_ms < 1000:
+        return f"{duration_ms}ms"
+    total_seconds = duration_ms / 1000
+    if total_seconds < 60:
+        seconds_text = f"{total_seconds:.1f}".rstrip("0").rstrip(".")
+        return f"{seconds_text}s"
+    total_seconds_int = int(total_seconds)
+    minutes, seconds = divmod(total_seconds_int, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds}s" if seconds else f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
+def _format_timestamp_for_display(value: str) -> str:
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00", 1))
+    except (ValueError, TypeError):
+        return value
+    if dt.tzinfo is None:
+        return value
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 # ─── 主解析 ────────────────────────────────────────────────
@@ -316,6 +566,25 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         payload: dict[str, Any],
         received_at: str,
     ) -> NormalizedEvent:
+        if not isinstance(payload, dict):
+            raise ProviderError(
+                "invalid_payload", "请求体必须是 JSON 对象", retryable=False
+            )
+        try:
+            payload_size = len(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+        except (TypeError, ValueError, OverflowError):
+            raise ProviderError(
+                "invalid_payload", "请求体不是有效 JSON", retryable=False
+            ) from None
+        if payload_size > _MAX_PAYLOAD_BYTES:
+            raise ProviderError(
+                "invalid_payload", "请求体超过大小限制", retryable=False
+            )
+
         # 0. 拒绝异源 provider payload（OMP）
         headers_lower = {k.lower(): v for k, v in headers.items()}
         if "x-omp-event" in headers_lower:
@@ -349,7 +618,13 @@ class OpenCodeProviderAdapter(ProviderAdapter):
                     "agent",
                     "model",
                     "durationMs",
+                    "projectDisplayName",
+                    "startedAt",
+                    "taskStartedAt",
+                    "endedAt",
+                    "counts",
                     "permission",
+                    "question",
                     "error",
                 }
             ),
@@ -373,24 +648,38 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         _check_unknown_fields(session_raw, _SESSION_ALLOW, "session")
         session_ref = _check_session_ref(session_raw.get("ref"))
         session_name_raw = _check_session_name(session_raw.get("name"))
+        session_scope = (
+            _check_session_scope(session_raw["scope"])
+            if "scope" in session_raw
+            else SessionScope.UNKNOWN
+        )
 
         # 5. 可选标量
         agent = _check_agent_or_model(payload.get("agent"), "agent")
         model = _check_agent_or_model(payload.get("model"), "model")
         duration_ms = _check_duration_ms(payload.get("durationMs"))
+        project_display_name = _clean_session_name(
+            _check_session_name(payload.get("projectDisplayName"))
+        )
+        started_at = _check_optional_timestamp(payload.get("startedAt"), "startedAt")
+        task_started_at = _check_optional_timestamp(
+            payload.get("taskStartedAt"), "taskStartedAt"
+        )
+        ended_at = _check_optional_timestamp(payload.get("endedAt"), "endedAt")
+        counts = _validate_counts(payload.get("counts"))
 
         # 6. 事件特有校验
         permission_raw = payload.get("permission")
+        question_raw = payload.get("question")
         error_raw = payload.get("error")
 
         if event == "opencode.permission_asked":
-            if not isinstance(permission_raw, dict):
+            permission_raw = _validate_permission(permission_raw)
+            if "question" in payload:
                 raise ProviderError(
-                    "invalid_payload", _safe_msg("permission"), retryable=False
+                    "invalid_payload", _safe_msg("question"), retryable=False
                 )
-            _check_unknown_fields(permission_raw, _PERMISSION_ALLOW, "permission")
-            _check_category(permission_raw.get("category"), "permission.category")
-            if error_raw is not None:
+            if "error" in payload:
                 raise ProviderError(
                     "invalid_payload", _safe_msg("error"), retryable=False
                 )
@@ -409,20 +698,40 @@ class OpenCodeProviderAdapter(ProviderAdapter):
                     raise ProviderError(
                         "invalid_payload", _safe_msg("error.code"), retryable=False
                     )
-            if permission_raw is not None:
+            if "permission" in payload:
                 raise ProviderError(
                     "invalid_payload", _safe_msg("permission"), retryable=False
+                )
+            if "question" in payload:
+                raise ProviderError(
+                    "invalid_payload", _safe_msg("question"), retryable=False
                 )
 
         elif event == "opencode.session_idle":
-            if permission_raw is not None:
+            if "permission" in payload:
                 raise ProviderError(
                     "invalid_payload", _safe_msg("permission"), retryable=False
                 )
-            if error_raw is not None:
+            if "error" in payload:
                 raise ProviderError(
                     "invalid_payload", _safe_msg("error"), retryable=False
                 )
+            if "question" in payload:
+                raise ProviderError(
+                    "invalid_payload", _safe_msg("question"), retryable=False
+                )
+
+        elif event == "opencode.question_asked":
+            if "permission" in payload:
+                raise ProviderError(
+                    "invalid_payload", _safe_msg("permission"), retryable=False
+                )
+            if "error" in payload:
+                raise ProviderError(
+                    "invalid_payload", _safe_msg("error"), retryable=False
+                )
+            if "question" in payload:
+                question_raw = _validate_question(question_raw)
 
         # 7. 构建 NormalizedEvent
         return self._build_event(
@@ -431,10 +740,17 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             emitted_at=emitted_at,
             session_ref=session_ref,
             session_name_raw=session_name_raw,
+            session_scope=session_scope,
             agent=agent,
             model=model,
             duration_ms=duration_ms,
+            project_display_name=project_display_name,
+            started_at=started_at,
+            task_started_at=task_started_at,
+            ended_at=ended_at,
+            counts=counts,
             permission_raw=permission_raw,
+            question_raw=question_raw,
             error_raw=error_raw,
         )
 
@@ -446,10 +762,17 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         emitted_at: str,
         session_ref: str,
         session_name_raw: str | None,
+        session_scope: SessionScope,
         agent: str | None,
         model: str | None,
         duration_ms: int | None,
+        project_display_name: str | None,
+        started_at: str | None,
+        task_started_at: str | None,
+        ended_at: str | None,
+        counts: dict[str, int] | None,
         permission_raw: dict[str, Any] | None,
+        question_raw: dict[str, Any] | None,
         error_raw: dict[str, Any] | None,
     ) -> NormalizedEvent:
         # status
@@ -457,6 +780,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             "opencode.session_idle": "completed",
             "opencode.session_error": "failed",
             "opencode.permission_asked": "action_required",
+            "opencode.question_asked": "action_required",
         }
         status = status_map.get(event, "completed")
 
@@ -469,11 +793,13 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             "opencode.session_idle": "会话完成",
             "opencode.session_error": "会话出错",
             "opencode.permission_asked": "等待权限批准",
+            "opencode.question_asked": "等待问题回答",
         }
         summary = summary_map.get(event, "")
 
         # fields — 仅 allowlist，sessionRef 使用 ref12（全 ref 不进入 NormalizedEvent）
         fields: list[dict[str, Any]] = []
+        fields.append({"label": "sessionName", "value": display_name, "short": False})
         if agent:
             fields.append({"label": "agent", "value": agent, "short": True})
         if model:
@@ -482,11 +808,143 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             fields.append(
                 {"label": "durationMs", "value": str(duration_ms), "short": True}
             )
+            fields.append(
+                {
+                    "label": "duration",
+                    "value": _format_duration_ms(duration_ms),
+                    "short": True,
+                }
+            )
+        if started_at:
+            fields.append(
+                {
+                    "label": "startedAt",
+                    "value": started_at,
+                    "short": True,
+                }
+            )
+        if task_started_at:
+            fields.append(
+                {
+                    "label": "taskStartedAt",
+                    "value": task_started_at,
+                    "short": True,
+                }
+            )
+        if ended_at:
+            fields.append(
+                {
+                    "label": "endedAt",
+                    "value": ended_at,
+                    "short": True,
+                }
+            )
+        if counts:
+            count_labels = (
+                ("messages", "messageCount"),
+                ("tools", "toolCount"),
+                ("changes", "changeCount"),
+            )
+            for count_key, label in count_labels:
+                if count_key in counts:
+                    fields.append(
+                        {"label": label, "value": str(counts[count_key]), "short": True}
+                    )
         if ref12:
             fields.append({"label": "sessionRef", "value": ref12, "short": True})
         if permission_raw:
             cat = str(permission_raw.get("category", ""))
             fields.append({"label": "permission.category", "value": cat, "short": True})
+            for key in ("summary", "title", "description", "action", "target"):
+                value = permission_raw.get(key)
+                if value:
+                    fields.append(
+                        {
+                            "label": f"permission.{key}",
+                            "value": value,
+                            "short": key in {"summary", "title", "action"},
+                        }
+                    )
+            patterns = permission_raw.get("patterns")
+            if patterns:
+                fields.append(
+                    {
+                        "label": "permission.patterns",
+                        "value": ", ".join(patterns),
+                        "short": False,
+                    }
+                )
+        if question_raw:
+            question_count = question_raw.get("count")
+            if question_count is not None:
+                fields.append(
+                    {
+                        "label": "questionCount",
+                        "value": str(question_count),
+                        "short": True,
+                    }
+                )
+            option_count = question_raw.get("optionCount")
+            if option_count is not None:
+                fields.append(
+                    {"label": "optionCount", "value": str(option_count), "short": True}
+                )
+            question_summary = question_raw.get("summary")
+            if question_summary:
+                fields.append(
+                    {
+                        "label": "question.summary",
+                        "value": question_summary,
+                        "short": False,
+                    }
+                )
+            for index, item in enumerate(question_raw.get("items", []), start=1):
+                if item.get("header"):
+                    fields.append(
+                        {
+                            "label": f"question[{index}].header",
+                            "value": item["header"],
+                            "short": True,
+                        }
+                    )
+                if item.get("text"):
+                    fields.append(
+                        {
+                            "label": f"question[{index}]",
+                            "value": item["text"],
+                            "short": False,
+                        }
+                    )
+                if "recommended" in item:
+                    fields.append(
+                        {
+                            "label": f"question[{index}].recommended",
+                            "value": str(item["recommended"]),
+                            "short": True,
+                        }
+                    )
+                option_text: list[str] = []
+                for option in item.get("options", []):
+                    label = str(option.get("label", ""))
+                    description = option.get("description")
+                    recommendation = option.get("recommended")
+                    detail = label
+                    if description:
+                        detail = (
+                            f"{detail}: {description}" if detail else str(description)
+                        )
+                    if recommendation is not None:
+                        detail = f"{detail} (recommended={recommendation})"
+                    if detail:
+                        option_text.append(detail)
+                if option_text:
+                    fields.append(
+                        {
+                            "label": f"question[{index}].options",
+                            "value": " | ".join(option_text),
+                            "short": False,
+                        }
+                    )
         if error_raw:
             cat = str(error_raw.get("category", ""))
             fields.append({"label": "error.category", "value": cat, "short": True})
@@ -507,8 +965,9 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             emitted_at=emitted_at,
             title=display_name,
             status=status,
+            session_scope=session_scope,
             summary=summary,
-            source={"name": display_name, "url": None},
+            source={"name": project_display_name or "OpenCode", "url": None},
             actor={"name": actor_name, "url": None},
             fields=fields,
             links=[],

@@ -67,6 +67,14 @@ class TestEnvelopeSchemaCompatibility:
         "permission": {"category": "file_access"},
     }
 
+    QUESTION_EVENT = {
+        "id": "evt_question_001",
+        "event": "opencode.question_asked",
+        "version": 1,
+        "emittedAt": "2026-07-22T12:00:00.000Z",
+        "session": {"ref": "99887766554433221100ffeeddccbbaa"},
+    }
+
     @pytest.mark.parametrize(
         "label, payload, headers, expected_event",
         [
@@ -94,6 +102,12 @@ class TestEnvelopeSchemaCompatibility:
                 {"x-opencode-event": "opencode.permission_asked"},
                 "opencode.permission_asked",
             ),
+            (
+                "question",
+                QUESTION_EVENT,
+                {"x-opencode-event": "opencode.question_asked"},
+                "opencode.question_asked",
+            ),
         ],
     )
     def test_parseable(self, label, payload, headers, expected_event):
@@ -104,6 +118,9 @@ class TestEnvelopeSchemaCompatibility:
         assert event.event == expected_event, f"{label}: event mismatch"
         assert event.id == payload["id"], f"{label}: id mismatch"
         assert event.version == 1, f"{label}: version mismatch"
+        if label == "question":
+            assert event.status == "action_required"
+            assert event.summary == "等待问题回答"
 
     def test_session_name_cleaned(self):
         """TS plugin may send spaces/normal ascii; server cleans."""
@@ -149,6 +166,7 @@ class TestEnvelopeSchemaCompatibility:
             "tool",
             "diff",
             "raw",
+            "questions",
         ):
             with pytest.raises(ProviderError):
                 _adapter().parse(
@@ -156,6 +174,21 @@ class TestEnvelopeSchemaCompatibility:
                     payload={**self.MINIMAL_IDLE, bad: "xxx"},
                     received_at=_received_at(),
                 )
+
+    @pytest.mark.parametrize(
+        "event_name",
+        [
+            "opencode.question_replied",
+            "opencode.question_rejected",
+        ],
+    )
+    def test_question_completion_variants_rejected(self, event_name):
+        with pytest.raises(ProviderError):
+            _adapter().parse(
+                headers={"x-opencode-event": event_name},
+                payload={**self.MINIMAL_IDLE, "event": event_name},
+                received_at=_received_at(),
+            )
 
     def test_header_event_mismatch_rejected(self):
         """Header X-OpenCode-Event must match body.event."""

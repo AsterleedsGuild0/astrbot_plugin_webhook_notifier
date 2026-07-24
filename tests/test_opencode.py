@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
 import pytest
 
-from core.models import NormalizedEvent
 from core.opencode import (
     OpenCodeProviderAdapter,
     _build_display_name,
@@ -19,8 +17,10 @@ from core.opencode import (
     _check_version,
     _check_emitted_at,
     _check_session_ref,
+    _format_duration_ms,
 )
 from core.providers import ProviderError
+from core.renderer import render_html_data
 
 _VALID_PAYLOAD: dict = {
     "id": "evt_abc123",
@@ -111,6 +111,7 @@ class TestCheckEvent:
         _check_event("opencode.session_idle")
         _check_event("opencode.session_error")
         _check_event("opencode.permission_asked")
+        _check_event("opencode.question_asked")
 
     def test_unknown(self):
         with pytest.raises(ProviderError) as e:
@@ -359,11 +360,13 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert e.event == "opencode.session_idle"
         assert e.id == "evt_abc123"
         assert e.title.startswith("OpenCode Session")
-        assert e.source["name"].startswith("OpenCode Session")
+        assert e.source["name"] == "OpenCode"
         assert e.status == "completed"
         assert e.summary == "会话完成"
         assert e.raw == {}
         assert e.version == 1
+        fields = {f["label"]: f["value"] for f in e.fields}
+        assert fields["sessionName"] == e.title
 
     def test_session_idle_with_all_optionals(self):
         e = self._make(
@@ -376,10 +379,12 @@ class TestOpenCodeProviderAdapterParseSuccess:
                 "agent": "my-agent",
                 "model": "gpt-5",
                 "durationMs": 15000,
+                "taskStartedAt": "2026-07-22T12:00:00Z",
+                "endedAt": "2026-07-22T12:00:15Z",
             }
         )
         assert e.title == "My Task"
-        assert e.source["name"] == "My Task"
+        assert e.source["name"] == "OpenCode"
         assert e.status == "completed"
         labels = {f["label"] for f in e.fields}
         assert "agent" in labels
@@ -424,6 +429,190 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert e.summary == "等待权限批准"
         labels = {f["label"] for f in e.fields}
         assert "permission.category" in labels
+
+    def test_question_asked(self):
+        e = self._make(
+            payload={
+                "id": "evt_question",
+                "event": "opencode.question_asked",
+                "version": 1,
+                "emittedAt": "2026-07-22T12:00:00.000Z",
+                "session": {"ref": "s_ref"},
+            },
+            headers={"x-opencode-event": "opencode.question_asked"},
+        )
+        assert e.event == "opencode.question_asked"
+        assert e.status == "action_required"
+        assert e.summary == "等待问题回答"
+        assert e.raw == {}
+        labels = {f["label"] for f in e.fields}
+        assert "sessionRef" in labels
+        assert "permission.category" not in labels
+        assert "error.category" not in labels
+
+    def test_rich_fields_reach_final_event_fields(self):
+        e = self._make(
+            payload={
+                "id": "evt_rich",
+                "event": "opencode.question_asked",
+                "version": 1,
+                "emittedAt": "2026-07-22T12:00:00.000Z",
+                "session": {"ref": "s_ref", "name": "Session One"},
+                "projectDisplayName": "Demo Project",
+                "agent": "build-agent",
+                "model": "openai/gpt-5",
+                "durationMs": 65000,
+                "startedAt": "2026-07-22T12:00:00Z",
+                "taskStartedAt": "2026-07-22T12:00:00Z",
+                "endedAt": "2026-07-22T12:01:05Z",
+                "counts": {"messages": 3, "tools": 2, "changes": 1},
+                "question": {
+                    "count": 1,
+                    "optionCount": 2,
+                    "summary": "Choose an environment",
+                    "items": [
+                        {
+                            "text": "Choose an environment",
+                            "header": "Environment",
+                            "recommended": "staging",
+                            "options": [
+                                {
+                                    "label": "Production",
+                                    "description": "Deploy to production",
+                                    "recommended": False,
+                                },
+                                {
+                                    "label": "Staging",
+                                    "description": "Deploy to staging",
+                                    "recommended": True,
+                                },
+                            ],
+                        }
+                    ],
+                },
+            },
+            headers={"x-opencode-event": "opencode.question_asked"},
+        )
+        fields = {f["label"]: f["value"] for f in e.fields}
+        assert e.source["name"] == "Demo Project"
+        assert "projectDisplayName" not in fields
+        assert fields["sessionName"] == "Session One"
+        assert fields["model"] == "openai/gpt-5"
+        assert fields["duration"] == "1m 5s"
+        assert fields["startedAt"] == "2026-07-22T12:00:00+00:00"
+        assert fields["taskStartedAt"] == "2026-07-22T12:00:00+00:00"
+        assert fields["endedAt"] == "2026-07-22T12:01:05+00:00"
+        assert fields["messageCount"] == "3"
+        assert fields["toolCount"] == "2"
+        assert fields["changeCount"] == "1"
+        assert fields["questionCount"] == "1"
+        assert fields["optionCount"] == "2"
+        assert "Deploy to production" in fields["question[1].options"]
+
+    def test_rich_permission_fields_are_allowlisted(self):
+        e = self._make(
+            payload={
+                "id": "evt_perm_rich",
+                "event": "opencode.permission_asked",
+                "version": 1,
+                "emittedAt": "2026-07-22T12:00:00.000Z",
+                "session": {"ref": "s_ref"},
+                "permission": {
+                    "category": "file_access",
+                    "title": "Read file",
+                    "summary": "Read requested file",
+                    "description": "Allow the requested file read",
+                    "action": "read",
+                    "target": "/private/project/file.txt",
+                    "patterns": ["/private/project/**"],
+                },
+            },
+            headers={"x-opencode-event": "opencode.permission_asked"},
+        )
+        fields = {f["label"]: f["value"] for f in e.fields}
+        assert fields["permission.category"] == "file_access"
+        assert fields["permission.title"] == "Read file"
+        assert fields["permission.description"] == "Allow the requested file read"
+        assert fields["permission.action"] == "read"
+        assert fields["permission.target"] == "/private/project/file.txt"
+        assert fields["permission.patterns"] == "/private/project/**"
+        assert e.raw == {}
+
+    def test_card_display_localizes_fields_without_changing_envelope_keys(self):
+        e = self._make(
+            payload={
+                "id": "evt_display",
+                "event": "opencode.question_asked",
+                "version": 1,
+                "emittedAt": "2026-07-23T17:45:35+08:00",
+                "session": {"ref": "s_ref", "name": "Session One"},
+                "durationMs": 211_020_000,
+                "startedAt": "2026-07-23T17:44:35+08:00",
+                "taskStartedAt": "2026-07-23T17:44:35+08:00",
+                "endedAt": "2026-07-26T04:21:35+08:00",
+                "question": {
+                    "count": 1,
+                    "items": [
+                        {
+                            "header": "确认",
+                            "text": "继续吗？",
+                            "options": [
+                                {"label": "继续", "recommended": True},
+                                {"label": "取消", "recommended": False},
+                            ],
+                        }
+                    ],
+                },
+            },
+            headers={"x-opencode-event": "opencode.question_asked"},
+        )
+        raw_fields = {field["label"]: field["value"] for field in e.fields}
+        assert raw_fields["durationMs"] == "211020000"
+        assert raw_fields["startedAt"] == "2026-07-23T17:44:35+08:00"
+
+        display = render_html_data(e)["event"]
+        display_fields = {field["label"]: field["value"] for field in display["fields"]}
+        assert display["status_display"] == "待处理"
+        assert display_fields["当前任务耗时"] == "2 天 10 小时 37 分钟"
+        assert display_fields["会话开始时间"] == "2026-07-23 17:44:35 CST (UTC+08:00)"
+        assert all(field["label"] != "durationMs" for field in display["fields"])
+        assert display_fields["问题 1 选项"] == "1. 继续（推荐）\n2. 取消"
+
+    @pytest.mark.parametrize(
+        "session_name, project_name, expected_title, expected_source",
+        [
+            ("Task", "Project", "Task", "Project"),
+            (None, "Project", "OpenCode Session s_ref", "Project"),
+            ("Task", None, "Task", "OpenCode"),
+        ],
+    )
+    def test_title_source_and_session_name_contract(
+        self, session_name, project_name, expected_title, expected_source
+    ):
+        payload = {
+            **_VALID_PAYLOAD,
+            "session": {"ref": "s_ref"},
+        }
+        if session_name is not None:
+            payload["session"]["name"] = session_name
+        if project_name is not None:
+            payload["projectDisplayName"] = project_name
+
+        event = self._make(payload=payload)
+        fields = {f["label"]: f["value"] for f in event.fields}
+        assert event.title == expected_title
+        assert event.source["name"] == expected_source
+        assert fields["sessionName"] == expected_title
+        assert "projectDisplayName" not in fields
+
+
+class TestOpenCodeFormatting:
+    @pytest.mark.parametrize(
+        "duration_ms, expected",
+        [(0, "0ms"), (999, "999ms"), (1000, "1s"), (65000, "1m 5s"), (3600000, "1h")],
+    )
+    def test_duration_is_readable(self, duration_ms, expected):
+        assert _format_duration_ms(duration_ms) == expected
 
 
 def labels_index(label: str, fields: list) -> int:
@@ -470,6 +659,17 @@ class TestOpenCodeProviderAdapterParseErrors:
             self._parse(
                 headers={"x-opencode-event": "opencode.unknown"},
                 payload={**_VALID_PAYLOAD, "event": "opencode.unknown"},
+            )
+        assert e.value.code == "unsupported_event"
+
+    @pytest.mark.parametrize(
+        "event_name", ["opencode.question_replied", "opencode.question_rejected"]
+    )
+    def test_question_completion_variants_rejected(self, event_name):
+        with pytest.raises(ProviderError) as e:
+            self._parse(
+                headers={"x-opencode-event": event_name},
+                payload={**_VALID_PAYLOAD, "event": event_name},
             )
         assert e.value.code == "unsupported_event"
 
@@ -572,6 +772,22 @@ class TestOpenCodeProviderAdapterParseErrors:
         with pytest.raises(ProviderError):
             self._parse(payload={**_VALID_PAYLOAD, "durationMs": 604800001})
 
+    @pytest.mark.parametrize("value", [123, "not-a-timestamp", "2026-07-22T12:00:00"])
+    def test_task_started_at_requires_timezone_timestamp(self, value):
+        with pytest.raises(ProviderError) as exc:
+            self._parse(payload={**_VALID_PAYLOAD, "taskStartedAt": value})
+        assert exc.value.code == "invalid_payload"
+
+    def test_task_started_at_is_allowlisted_and_normalized(self):
+        event = self._parse(
+            payload={
+                **_VALID_PAYLOAD,
+                "taskStartedAt": "2026-07-22T20:00:00+08:00",
+            }
+        )
+        fields = {f["label"]: f["value"] for f in event.fields}
+        assert fields["taskStartedAt"] == "2026-07-22T20:00:00+08:00"
+
     def test_emitted_at_no_tz(self):
         with pytest.raises(ProviderError):
             self._parse(payload={**_VALID_PAYLOAD, "emittedAt": "2026-07-22T12:00:00"})
@@ -602,11 +818,42 @@ class TestOpenCodeProviderAdapterParseErrors:
             "token",
             "stack",
             "raw",
+            "questions",
         ],
     )
     def test_sensitive_fields_rejected(self, bad_field):
         with pytest.raises(ProviderError):
             self._parse(payload={**_VALID_PAYLOAD, bad_field: "dummy"})
+
+    def test_unknown_action_field_rejected(self):
+        payload = {
+            **_VALID_PAYLOAD,
+            "event": "opencode.question_asked",
+            "question": {"count": 1, "unknown": "must-not-pass"},
+        }
+        with pytest.raises(ProviderError):
+            self._parse(
+                payload=payload,
+                headers={"x-opencode-event": "opencode.question_asked"},
+            )
+
+    def test_unknown_permission_field_rejected(self):
+        payload = {
+            **_VALID_PAYLOAD,
+            "event": "opencode.permission_asked",
+            "permission": {"category": "file_access", "raw": "no"},
+        }
+        with pytest.raises(ProviderError):
+            self._parse(
+                payload=payload,
+                headers={"x-opencode-event": "opencode.permission_asked"},
+            )
+
+    def test_oversized_payload_rejected(self):
+        with pytest.raises(ProviderError):
+            self._parse(
+                payload={**_VALID_PAYLOAD, "projectDisplayName": "x" * (65 * 1024)}
+            )
 
 
 # ─── Name 清洗集成 ────────────────────────────────────────

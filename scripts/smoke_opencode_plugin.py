@@ -71,6 +71,7 @@ def build_config_content(wrapper_uri: str, token_file: Path) -> str:
                         "session_idle",
                         "session_error",
                         "permission_asked",
+                        "question_asked",
                     ],
                 },
             ]
