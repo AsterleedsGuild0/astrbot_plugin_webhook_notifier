@@ -4,6 +4,8 @@
 
 ## v1.1.0-rc.1 - 2026-07-23
 
+- 冻结多 Provider 通知降噪：新增全局 `notification_mode`，默认 `focused` 只抑制成功完成的 OpenCode `subagent`；`all` 保持全部通知，unknown scope/status fail-open。`actionContentMode` 与该策略正交。
+- OpenCode V1 新增 `session.scope`（缺失兼容为 `unknown`），Client 通过既有 `session.get()` 判断 root/subagent，永不发送 `parentID`；服务端升级必须先于 Client 重启。
 - #18：引入 Provider Adapter / Registry 与依赖注入边界，支持 `omp` 与 `opencode` provider，并保持 Endpoint provider 在创建后不可变。
 - #19：增加 OpenCode Server Adapter，接收 V1 envelope，覆盖 `session_idle`、`session_error` 与 `permission_asked` 三类事件。
 - #20：增加 OpenCode V1 Client Plugin，使用正确的 `default { id, server }` 与 `plugin` tuple，支持 env/file URL/Token 配置、状态机、timeout 和有限 retry。

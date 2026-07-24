@@ -2,6 +2,8 @@
 
 本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。`v1.0.0` 是现有稳定版；当前源码准备的是尚未发布的 `v1.1.0-rc.1` 候选。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。Workflow 使用 `setup-python`、pip 与 `python` 命令；本地推荐另用 uv 锁定环境验证，两者现阶段不是同一套依赖安装路径。
 
+通知降噪候选发布还必须遵循兼容部署顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `session.scope`。
+
 ---
 
 ## 发布前检查

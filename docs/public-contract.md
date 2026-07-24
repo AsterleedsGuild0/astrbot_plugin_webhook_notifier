@@ -30,9 +30,14 @@
 以下是当前源码候选新增、尚未进入已发布 `v1.0.0` 资产的范围：
 
 - #18：Provider Adapter / Registry 与依赖注入边界，`omp` / `opencode` provider 选择及 Endpoint provider 不可变。
-- #19：OpenCode Server Adapter 与三类 V1 envelope。
+- #19：OpenCode Server Adapter 与四类 V1 envelope。
 - #20：OpenCode V1 Client Plugin、正确 `plugin` tuple、env/file 凭据、状态机、timeout/retry 和 at-least-once 语义。
 - #21：严格白名单、匿名 session ref/name fallback、Bun/Python/CLI smoke 和集成文档。
+- OpenCode 丰富通知字段：`projectDisplayName`、会话名、agent、`provider/model`、会话开始时间、Assistant 任务时间与可读耗时/低敏计数，以及默认 strict、显式 opt-in 的 `actionContentMode`。NormalizedEvent 的 title 使用会话名或匿名 fallback，source 使用项目名或固定 `OpenCode`，`sessionName` 始终存在且不重复展示 `projectDisplayName`。
+- OpenCode V1 `session.scope`（`root|subagent|unknown`）与 Client scope 判断；`parentID` 不是公共字段，绝不发送。
+- 全局 `notification_mode` 仅允许 `focused`（默认）和 `all`；`focused` 只抑制 `subagent` 的 `completed`，unknown scope/status fail-open。策略过滤返回 HTTP 200、`message=skipped`、`skip_reason=notification_mode_filtered`、`rendered=false`、`delivered=false`、`retryable=false`，且不进入 renderer、T2I 或 sender。
+
+`actionContentMode` 与 `notification_mode` 正交：前者只控制 Question/Permission 内容隐私，后者只控制通知是否发送。
 
 这些候选能力在 RC 包完成 AstrBot WebUI 手动安装、Bot Endpoint 和 Desktop 端到端 smoke 前，不得写成已验证发布能力。
 

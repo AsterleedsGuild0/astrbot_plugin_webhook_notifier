@@ -19,6 +19,8 @@ OMP 原生提供 extension、Hook 加载机制，以及 `session_stop` 生命周
 
 本插件的 `omp` provider 名称为既有服务端兼容标识。它当前兼容并标准化上述社区 Hook 输出的 `omp.session_stop` version 1 payload，不表示 OMP 官方承诺该 HTTP 契约。
 
+OMP adapter 显式将 `session_scope` 标记为 `unknown`；在服务端 `notification_mode=focused` 下 OMP 行为不变，不会因缺少可靠 scope 而被抑制。
+
 ---
 
 ## 前提与获取方式
@@ -182,7 +184,9 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 | `round.lastAssistant` | provider、model、stopReason、timestamp、durationMs 等 | 最后 assistant 状态和模型回退 |
 | `metadata` | `version`、`eventName` | 兼容诊断与 raw 保留 |
 
-字段可能缺失；本插件按可选字段进行标准化。Header 与 Body 事件同时存在但不一致时，请求会被拒绝。
+字段可能缺失；本插件按可选字段进行标准化。Header 与 Body 事件同时存在但不一致时，请求会被拒绝。OpenCode 的 `session.scope` 属于另一条 provider 契约；OMP 不发送该字段，也不发送 `parentID`。
+
+时间字段在 OMP adapter 中保持客户端发送的 canonical ISO 值，不会提前按 AstrBot 主机本地时区格式化。通知展示时，服务端统一按全局 `display_timezone` 转换 `emittedAt`、`startedAt`、`endedAt` 和 HTML 页脚时间；默认值为 `Asia/Shanghai`，输出示例为 `2026-07-24 09:44:35 CST (UTC+08:00)`。这只影响文本和 HTML 展示，不改变 OMP payload、`NormalizedEvent` 或其他 Provider 的 transport 时间约定。
 
 ---
 
