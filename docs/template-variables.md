@@ -26,7 +26,7 @@ HTML 模板只提供一个根变量：`event`。不要使用顶层 `title`、`fi
 
 当前 `render_html_data()` 返回 `{"event": data}`，其中 `data` 会保留 `event.subagent_timeline`，并在适用时增加 `event.subagent_timeline_view`。自定义模板如果直接访问 `event.subagent_timeline`，**不得渲染其中的 `ref` 或 `parentRef`**；推荐只使用 `event.subagent_timeline_view` 的展示字段。该 view 会过滤 auxiliary item（包括 `smartfetch-secondary`），并提供 `mode`（`simple`、`complex` 或 `degraded`）、摘要、状态/时间展示数据和有界的主卡/甘特图数据。
 
-默认模板只读取安全派生的 `event.subagent_timeline_view`：简单流程最多展示 8 项阶段卡；复杂流程主卡展示摘要，并由服务端在同一 MessageChain 中追加独立横向甘特图，最多 24 行。缺失 start/end 比例超过 25% 时不生成甘特图；`partial` 或 `clamped` 不显示假精确 duration，未定位任务不绘制假 bar。
+默认模板只读取安全派生的 `event.subagent_timeline_view`：简单流程最多展示 8 项阶段卡；复杂流程主卡展示摘要，并由服务端在同一 MessageChain 中追加独立横向甘特图。附图在 1440～2400px 内按任务数、名称与跨度动态布局，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算。缺失 start/end 比例超过 25% 时不生成甘特图；`partial` 或 `clamped` 不显示假精确 duration，未定位任务不绘制假 bar。
 
 Subagent timeline 是 root `opencode.session_idle` 的可选数据；其他 event/scope 不应假定该字段存在。没有 timeline、没有可展示 item 或不是 root completion 时，模板不会获得 timeline view。
 

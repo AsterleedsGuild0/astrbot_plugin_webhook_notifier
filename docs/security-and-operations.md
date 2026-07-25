@@ -141,7 +141,7 @@ Plugin 只发送 `opencode.session_idle`、`opencode.session_error`、`opencode.
 
 ### Timeline 渲染与模板风险
 
-默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 主卡摘要加同一 MessageChain 的独立横向甘特图，最多 24 行。start/end 缺失比例超过 25% 不画甘特图；partial/clamped 不展示假精确 duration；未定位任务不画假 bar。
+默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 主卡摘要加同一 MessageChain 的独立横向甘特图。附图按任务数、名称与跨度在 1440～2400px 内动态布局，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算，极端长名称允许继续增高。附图不继承自定义 `full_page=false` 或固定 1200px 高度，而是强制完整页面并使用 renderer 计算的有界动态 viewport 高度；主卡仍遵守原 render options。start/end 缺失比例超过 25% 不画甘特图；partial/clamped 不展示假精确 duration；未定位任务不画假 bar。
 
 Sender 最多发 1～2 张图。附图生成、校验或构造失败只发主卡；实际发送失败后不自动重试主卡，避免造成重复通知。自定义模板如直接访问 `event.subagent_timeline`，不得渲染 `ref`、`parentRef` 或依赖其作为用户可见 ID；应使用 `render_html_data()` 生成的安全派生 `event.subagent_timeline_view`。该 view 与 built-in renderer 一样不暴露 raw Session ID、path、tool args 或 raw JSON。模板作者仍须遵守最小披露原则，不能通过自定义模板绕过服务端 allowlist。
 

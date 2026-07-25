@@ -2,29 +2,11 @@
 
 from __future__ import annotations
 
+from html.parser import HTMLParser
+from itertools import pairwise
+
 import pytest
 
-from core.models import NormalizedEvent
-from core.notification_policy import SessionScope
-from core.renderer import (
-    DEFAULT_HTML_TEMPLATE,
-    DEFAULT_TEXT_TEMPLATE,
-    SUBAGENT_TIMELINE_GANTT_ROW_LIMIT,
-    SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT,
-    _build_subagent_timeline_view,
-    _expected_canvas_right,
-    _scaled_right_crop_padding,
-    render_html,
-    render_html_data,
-    render_html_default,
-    render_preview,
-    render_subagent_timeline_html,
-    render_text,
-    render_text_default,
-    trim_viewport_whitespace,
-    validate_html_template,
-    validate_image_result,
-)
 from core.display import (
     INVALID_DISPLAY_TIMEZONE_WARNING,
     MISSING_DEFAULT_TIMEZONE_WARNING,
@@ -34,6 +16,102 @@ from core.display import (
     prepare_display_fields,
     status_label,
 )
+from core.models import NormalizedEvent
+from core.notification_policy import SessionScope
+from core.renderer import (
+    _TIMELINE_TICK_SAFETY_GAP_PX,
+    _build_subagent_timeline_view,
+    _expected_canvas_right,
+    _scaled_right_crop_padding,
+    DEFAULT_HTML_TEMPLATE,
+    DEFAULT_TEXT_TEMPLATE,
+    SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT,
+    SUBAGENT_TIMELINE_MAX_ITEMS,
+    SUBAGENT_TIMELINE_MAX_VIEWPORT_WIDTH,
+    SUBAGENT_TIMELINE_MIN_BAR_WIDTH,
+    SUBAGENT_TIMELINE_MIN_VIEWPORT_WIDTH,
+    prepare_subagent_timeline,
+    render_html,
+    render_html_data,
+    render_html_default,
+    render_preview,
+    render_subagent_timeline,
+    render_subagent_timeline_html,
+    render_text,
+    render_text_default,
+    trim_viewport_whitespace,
+    validate_html_template,
+    validate_image_result,
+)
+
+
+class _TimelineDOMProbe(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.row_min_heights: list[int] = []
+        self.task_names: list[str] = []
+        self._task_depth = 0
+        self._task_parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if tag == "div" and "timeline-row" in classes:
+            style = attributes.get("style") or ""
+            declaration = next(
+                part for part in style.split(";") if "min-height:" in part
+            )
+            self.row_min_heights.append(
+                int(declaration.split(":", 1)[1].strip().removesuffix("px"))
+            )
+        if tag == "div" and "task-name" in classes:
+            self._task_depth = 1
+            self._task_parts = []
+        elif self._task_depth:
+            self._task_depth += 1
+
+    def handle_endtag(self, tag):
+        if not self._task_depth:
+            return
+        self._task_depth -= 1
+        if self._task_depth == 0:
+            self.task_names.append("".join(self._task_parts))
+
+    def handle_data(self, data):
+        if self._task_depth:
+            self._task_parts.append(data)
+
+
+def _assert_tick_layout(view: dict) -> None:
+    ticks = view["axis_ticks"]
+    labels = [tick["label"] for tick in ticks]
+    positions = [float(tick["left_px"]) for tick in ticks]
+    widths = [float(tick["label_width_px"]) for tick in ticks]
+    assert 5 <= len(ticks) <= 10
+    assert len(labels) == len(set(labels))
+    assert all(right > left for left, right in pairwise(positions))
+    for index, (left, right) in enumerate(pairwise(positions)):
+        required = (
+            widths[index] + widths[index + 1]
+        ) / 2 + _TIMELINE_TICK_SAFETY_GAP_PX
+        assert right - left + 0.03 >= required
+
+    plot_width = float(view["layout"]["plot_width"])
+    tail = plot_width - positions[-1]
+    segments = [right - left for left, right in pairwise(positions)]
+    if tail > 0.03:
+        segments.append(tail)
+    assert max(segments) / min(segments) < 1.75
+
+
+def _parse_short_tick_label_ms(label: str) -> float:
+    if label == "0":
+        return 0.0
+    assert label.startswith("+")
+    if label.endswith("毫秒"):
+        return float(label[1:-2])
+    assert label.endswith("秒")
+    return float(label[1:-1]) * 1000
 
 
 def _make_event(
@@ -706,7 +784,14 @@ class TestSubagentTimelineVisuals:
         assert boundary_view["mode"] == "complex"
         gantt = render_subagent_timeline_html(boundary)
         assert gantt is not None
-        assert "left: 25%; width: 25%;" in gantt
+        failed_item = next(
+            item
+            for item in boundary_view["gantt_items"]
+            if item["status_class"] == "failed"
+        )
+        assert float(failed_item["left_px"]) > 0
+        assert float(failed_item["width_px"]) > SUBAGENT_TIMELINE_MIN_BAR_WIDTH
+        assert f"left: {failed_item['left_px']}px;" in gantt
         assert "bar failed" in gantt
         assert "峰值并发" in gantt
         assert "未定位任务" in gantt
@@ -730,7 +815,7 @@ class TestSubagentTimelineVisuals:
         assert html.count('<li class="subagent-item') == 8
         assert "另有 2 项未展开" in html
 
-    def test_gantt_has_adaptive_axis_status_bars_and_twenty_four_row_limit(self):
+    def test_gantt_shows_all_payload_items_without_twenty_four_row_truncation(self):
         items = [
             _timeline_item(index, start=index * 10, end=10_000) for index in range(29)
         ]
@@ -744,20 +829,390 @@ class TestSubagentTimelineVisuals:
         )
         view = _build_subagent_timeline_view(event)
         assert view is not None and view["mode"] == "complex"
-        assert len(view["gantt_items"]) + len(view["unlocated_items"]) == (
-            SUBAGENT_TIMELINE_GANTT_ROW_LIMIT
-        )
-        assert view["remaining_count"] == 12
+        assert SUBAGENT_TIMELINE_MAX_ITEMS == 64
+        assert len(view["gantt_items"]) + len(view["unlocated_items"]) == 30
+        assert view["layout"]["density"] == "compact"
 
         html = render_subagent_timeline_html(event)
         assert html is not None
-        assert html.count('<div class="row timeline-row">') == 23
+        assert html.count('<div class="row timeline-row"') == 29
         assert "unlocated-child" in html
-        assert "其余 12 项未展开" in html
+        assert "其余 12 项未展开" not in html
+        assert "观测 36 个 · 本图展示 30 个" in html
         assert "记录已截断" in html
         assert "10秒" in html
         assert "bar completed" in html
         assert "最大" not in html
+
+    @pytest.mark.parametrize(
+        ("item_count", "density"),
+        [
+            (1, "comfortable"),
+            (24, "comfortable"),
+            (25, "compact"),
+            (48, "compact"),
+            (49, "dense"),
+            (64, "dense"),
+        ],
+    )
+    def test_gantt_density_boundaries(self, item_count, density):
+        event = _timeline_event(
+            [
+                _timeline_item(index, start=index * 1000, end=(index + 1) * 1000)
+                for index in range(item_count)
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["layout"]["density"] == density
+        assert len(view["gantt_items"]) == item_count
+
+    def test_gantt_dynamic_width_reaches_both_bounds(self):
+        minimum = _timeline_event([_timeline_item(0, start=0, end=1000, name="短任务")])
+        minimum_view = _build_subagent_timeline_view(minimum)
+        assert minimum_view is not None
+        assert (
+            minimum_view["layout"]["viewport_width"]
+            == SUBAGENT_TIMELINE_MIN_VIEWPORT_WIDTH
+        )
+
+        long_name = "相同前缀任务" * 30
+        maximum = _timeline_event(
+            [
+                _timeline_item(
+                    index,
+                    start=index * 60_000,
+                    end=5_400_000,
+                    name=f"{long_name}-{index:02d}",
+                )
+                for index in range(64)
+            ]
+        )
+        maximum_view = _build_subagent_timeline_view(maximum)
+        assert maximum_view is not None
+        assert (
+            maximum_view["layout"]["viewport_width"]
+            == SUBAGENT_TIMELINE_MAX_VIEWPORT_WIDTH
+        )
+        assert maximum_view["layout"]["name_column_width"] == 560
+        assert maximum_view["layout"]["plot_width"] > 1500
+        assert maximum_view["layout"]["estimated_height"] > 3000
+        assert maximum_view["layout"]["soft_height_exceeded"] is True
+        assert (
+            maximum_view["layout"]["viewport_height"]
+            >= maximum_view["layout"]["estimated_height"]
+        )
+        assert len(maximum_view["gantt_items"]) == 64
+
+    def test_twenty_four_to_twenty_five_keeps_every_item_and_stable_order(self):
+        for item_count, expected_density in ((24, "comfortable"), (25, "compact")):
+            event = _timeline_event(
+                [
+                    _timeline_item(
+                        index,
+                        start=index * 1000,
+                        end=(index + 1) * 1000,
+                        name=f"ordered-{index:02d}",
+                    )
+                    for index in range(item_count)
+                ]
+            )
+            view = _build_subagent_timeline_view(event)
+            assert view is not None
+            assert view["layout"]["density"] == expected_density
+            assert [item["name"] for item in view["gantt_items"]] == [
+                f"ordered-{index:02d}" for index in range(item_count)
+            ]
+
+    def test_sixty_four_items_all_render_in_stable_order(self):
+        event = _timeline_event(
+            [
+                _timeline_item(
+                    index,
+                    start=index * 1000,
+                    end=(index + 1) * 1000,
+                    name=f"all-items-{index:02d}",
+                )
+                for index in range(64)
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        html = render_subagent_timeline_html(event)
+        assert view is not None and html is not None
+        assert len(view["gantt_items"]) == 64
+        assert html.count('<div class="row timeline-row"') == 64
+        positions = [html.index(f"all-items-{index:02d}") for index in range(64)]
+        assert positions == sorted(positions)
+
+    def test_long_names_wrap_fully_without_ellipsis_and_escape_dangerous_text(self):
+        chinese = "多个相同前缀的中文子任务需要显示完整差异" * 5
+        english = "UnbrokenEnglishTaskName" * 8
+        dangerous = '<script>alert("x")</script>&final'
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=3000, name=chinese),
+                _timeline_item(1, start=0, end=2000, name=english),
+                _timeline_item(2, start=1000, end=3000, depth=3, name=dangerous),
+            ]
+        )
+        html = render_subagent_timeline_html(event)
+        assert html is not None
+        assert chinese in html
+        assert english in html
+        assert "&lt;script&gt;alert" in html
+        assert '<script>alert("x")</script>' not in html
+        assert "overflow-wrap: anywhere" in html
+        assert ".task-name {\n      white-space: normal;" in html
+        assert ".task-name, .task-agent" not in html
+
+    def test_extremely_short_nonzero_bar_is_at_least_eight_pixels(self):
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=1, name="one-millisecond"),
+                _timeline_item(1, start=0, end=3_600_000, depth=3, name="one-hour"),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        short = next(
+            item for item in view["gantt_items"] if item["name"] == "one-millisecond"
+        )
+        assert float(short["width_px"]) == SUBAGENT_TIMELINE_MIN_BAR_WIDTH
+        assert short["minimum_width_applied"] is True
+
+    def test_tick_count_and_labels_follow_plot_width_and_duration(self):
+        short = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=600_000),
+                _timeline_item(1, start=0, end=300_000, depth=3),
+            ]
+        )
+        long = _timeline_event(
+            [
+                _timeline_item(index, start=0, end=5_400_000, name="宽布局任务" * 20)
+                for index in range(49)
+            ]
+        )
+        short_view = _build_subagent_timeline_view(short)
+        long_view = _build_subagent_timeline_view(long)
+        assert short_view is not None and long_view is not None
+        _assert_tick_layout(short_view)
+        _assert_tick_layout(long_view)
+        assert short_view["axis_ticks"] != long_view["axis_ticks"]
+        assert all("left_px" in tick for tick in long_view["axis_ticks"])
+        assert long_view["axis_ticks"][0]["label"] == "0"
+        assert long_view["axis_ticks"][-1]["label"].startswith("+")
+
+    def test_one_hour_plus_one_millisecond_ticks_are_unique_and_separated(self):
+        span = 3_600_001
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=span),
+                _timeline_item(1, start=0, end=span // 2, depth=3),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        _assert_tick_layout(view)
+        ticks = view["axis_ticks"]
+        assert ticks[-1]["label"] == "+1小时"
+        assert span - ticks[-1]["value_ms"] <= 1
+
+    def test_thirty_day_ticks_cover_the_whole_span_evenly(self):
+        span = 30 * 24 * 60 * 60 * 1000
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=span),
+                _timeline_item(1, start=0, end=span // 2, depth=3),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        _assert_tick_layout(view)
+        ticks = view["axis_ticks"]
+        values = [float(tick["value_ms"]) for tick in ticks]
+        positions = [float(tick["left_px"]) for tick in ticks]
+        assert values[0] == 0
+        assert values[-1] >= 25 * 86_400_000
+        assert view["layout"]["plot_width"] - positions[-1] < 300
+
+    @pytest.mark.parametrize(
+        "span",
+        [
+            1,
+            2,
+            3,
+            999,
+            1000,
+            1001,
+            10_000,
+            59_999,
+            60_000,
+            60_001,
+            3_599_999,
+            3_600_000,
+            3_600_001,
+            86_399_999,
+            86_400_000,
+            86_400_001,
+            26 * 86_400_000 + 2 * 3_600_000 + 56 * 60_000,
+            30 * 86_400_000,
+        ],
+    )
+    def test_tick_algorithm_handles_short_normal_and_long_spans(self, span):
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=span),
+                _timeline_item(1, start=0, end=max(1, span // 2), depth=3),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        _assert_tick_layout(view)
+        ticks = view["axis_ticks"]
+        assert ticks[0]["value_ms"] == 0
+        assert ticks[-1]["value_ms"] <= span
+
+    @pytest.mark.parametrize("span", [2, 3])
+    def test_millisecond_ticks_preserve_fractional_precision(self, span):
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=span),
+                _timeline_item(1, start=0, end=max(1, span // 2), depth=3),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        _assert_tick_layout(view)
+        labels = [tick["label"] for tick in view["axis_ticks"]]
+        assert any("." in label for label in labels)
+
+    @pytest.mark.parametrize("span", [1, 10, 10_000, 10_001])
+    def test_short_tick_labels_preserve_their_exact_numeric_values(self, span):
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=span),
+                _timeline_item(1, start=0, end=max(1, span // 2), depth=3),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        _assert_tick_layout(view)
+        ticks = view["axis_ticks"]
+        for tick in ticks:
+            assert _parse_short_tick_label_ms(tick["label"]) == pytest.approx(
+                float(tick["value_ms"]), abs=1e-9
+            )
+
+        labels = {tick["label"] for tick in ticks}
+        if span == 1:
+            assert {"+0.25毫秒", "+0.75毫秒"} <= labels
+        elif span == 10:
+            assert {"+2.5毫秒", "+7.5毫秒"} <= labels
+        elif span == 10_000:
+            assert {"+2.5秒", "+7.5秒"} <= labels
+        else:
+            assert ticks[-1]["value_ms"] == span
+            assert ticks[-1]["label"] == "+10.001秒"
+
+    def test_twenty_six_day_boundary_avoids_long_terminal_label_overlap(self):
+        span = 26 * 86_400_000 + 2 * 3_600_000 + 56 * 60_000
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=span),
+                _timeline_item(1, start=0, end=span // 2, depth=3),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        _assert_tick_layout(view)
+        ticks = view["axis_ticks"]
+        assert ticks[-1]["value_ms"] <= span
+        assert span - ticks[-1]["value_ms"] <= 5 * 86_400_000
+
+    def test_tick_geometry_across_nice_step_boundaries(self):
+        for unit in (1, 1000, 60_000, 3_600_000, 86_400_000):
+            for factor in (1, 2, 2.5, 5, 10):
+                base = unit * factor
+                for delta in (-1, 0, 1):
+                    span = max(1, int(base + delta))
+                    event = _timeline_event(
+                        [
+                            _timeline_item(0, start=0, end=span),
+                            _timeline_item(
+                                1,
+                                start=0,
+                                end=max(1, span // 2),
+                                depth=3,
+                            ),
+                        ]
+                    )
+                    view = _build_subagent_timeline_view(event)
+                    assert view is not None
+                    _assert_tick_layout(view)
+
+    def test_dom_rows_use_dynamic_heights_and_keep_complete_wrapped_names(self):
+        names = [
+            "长中文任务名称需要完整折行并保留末尾差异" * 12 + "甲",
+            "Long English task name with spaces must remain complete " * 12 + "beta",
+            "NoSpaceUnbrokenTaskIdentifier" * 24 + "omega",
+        ]
+        event = _timeline_event(
+            [
+                _timeline_item(
+                    index,
+                    start=0,
+                    end=3000 - index * 500,
+                    depth=3 if index == 2 else 1,
+                    name=name,
+                )
+                for index, name in enumerate(names)
+            ]
+        )
+        rendered = render_subagent_timeline(event)
+        assert rendered is not None
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        probe = _TimelineDOMProbe()
+        probe.feed(rendered.html)
+
+        expected_heights = [
+            item["estimated_row_height"] for item in view["gantt_items"]
+        ]
+        assert probe.task_names == names
+        assert probe.row_min_heights == expected_heights
+        assert all(item["estimated_name_lines"] > 1 for item in view["gantt_items"])
+        assert all(
+            height > rendered.layout.row_min_height for height in expected_heights
+        )
+        assert rendered.layout.estimated_height == (
+            rendered.layout.vertical_chrome_height + rendered.layout.located_rows_height
+        )
+        assert rendered.layout.viewport_height >= rendered.layout.estimated_height
+
+    def test_prepared_timeline_reuses_one_view_for_main_and_attachment(
+        self, monkeypatch
+    ):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+        from core import renderer
+
+        original = renderer._build_subagent_timeline_view
+        calls = 0
+
+        def counted(current_event):
+            nonlocal calls
+            calls += 1
+            return original(current_event)
+
+        monkeypatch.setattr(renderer, "_build_subagent_timeline_view", counted)
+        prepared = prepare_subagent_timeline(event)
+        main = render_html_data(event, prepared_timeline=prepared)
+        attachment = render_subagent_timeline(event, prepared)
+        assert main["event"]["subagent_timeline_view"]["mode"] == "complex"
+        assert attachment is not None
+        assert calls == 1
 
     def test_partial_clamped_interval_uses_pattern_without_exact_duration(self):
         items = [

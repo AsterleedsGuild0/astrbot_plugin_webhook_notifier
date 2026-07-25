@@ -21,9 +21,12 @@ from .providers import ProviderError, ProviderRegistry, ProviderRegistryError
 from .registry import EndpointRegistry
 from .renderer import (
     DEFAULT_HTML_TEMPLATE,
+    PreparedSubagentTimeline,
+    SUBAGENT_TIMELINE_MAX_TIMEOUT_MS,
+    prepare_subagent_timeline,
     render_html_data,
     render_html_template,
-    render_subagent_timeline_html,
+    render_subagent_timeline,
     render_text_default,
     trim_viewport_whitespace,
     validate_image_result,
@@ -723,10 +726,11 @@ class WebhookServer:
         image_result: Any = None
         render_options: dict[str, Any] = {}
         failure_reason = "render_failed"
+        prepared_timeline = prepare_subagent_timeline(event)
         for template in attempts:
             try:
                 image_result, render_options = await self._render_image_attempt(
-                    event, template, request_id
+                    event, template, request_id, prepared_timeline
                 )
                 break
             except Exception as exc:
@@ -756,7 +760,7 @@ class WebhookServer:
         timeline_image: Any = None
         try:
             timeline_image = await self._render_timeline_image_attempt(
-                event, request_id
+                event, request_id, prepared_timeline
             )
         except Exception as exc:
             failure_reason = _safe_failure_reason(exc, "timeline_render_failed")
@@ -882,23 +886,44 @@ class WebhookServer:
         self,
         event: NormalizedEvent,
         request_id: str,
+        prepared_timeline: PreparedSubagentTimeline | None = None,
     ) -> Any:
         """生成复杂时间线附图；失败由调用方安全降级为主卡。"""
         if not self._html_render:
             _raise_render_failure("html_render_not_available", "HTML 渲染不可用")
 
         try:
-            rendered_html = render_subagent_timeline_html(event)
+            rendered_timeline = render_subagent_timeline(event, prepared_timeline)
         except Exception as exc:
             _raise_render_failure(
                 "timeline_template_render_failed", "时间线模板渲染失败", exc
             )
 
-        if rendered_html is None:
+        if rendered_timeline is None:
             return None
 
+        rendered_html = rendered_timeline.html
+        layout = rendered_timeline.layout
         render_options = self._get_render_options()
-        render_options["viewport_width"] = 812
+        render_options["full_page"] = True
+        render_options["viewport_width"] = layout.viewport_width
+        render_options["viewport_height"] = layout.viewport_height
+        configured_timeout = render_options.get(
+            "timeout", DEFAULT_RENDER_OPTIONS["timeout"]
+        )
+        try:
+            configured_timeout_ms = int(configured_timeout)
+        except (TypeError, ValueError):
+            configured_timeout_ms = int(DEFAULT_RENDER_OPTIONS["timeout"])
+        render_options["timeout"] = min(
+            SUBAGENT_TIMELINE_MAX_TIMEOUT_MS,
+            max(configured_timeout_ms, layout.render_timeout_ms),
+        )
+        configured_scale = str(
+            render_options.get("device_scale_factor_level", "high")
+        ).lower()
+        if layout.prefer_normal_scale and configured_scale in {"high", "ultra"}:
+            render_options["device_scale_factor_level"] = "normal"
         try:
             image_result = await self._html_render(
                 "{{ rendered_html | safe }}",
@@ -919,7 +944,12 @@ class WebhookServer:
             )
 
         try:
-            trimmed_image = trim_viewport_whitespace(image_result, canvas_width=812)
+            trimmed_image = trim_viewport_whitespace(
+                image_result,
+                canvas_width=layout.viewport_width,
+                card_width=layout.card_width,
+                body_padding=layout.body_padding,
+            )
             if trimmed_image is None:
                 _raise_render_failure(
                     "timeline_image_trim_failed", "时间线图片裁切失败"
@@ -937,12 +967,15 @@ class WebhookServer:
         event: NormalizedEvent,
         template: ActiveTemplate,
         request_id: str,
+        prepared_timeline: PreparedSubagentTimeline | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         """完成单个模板的生成、截图、校验与 trim，不发送。"""
         if not self._html_render:
             _raise_render_failure("html_render_not_available", "HTML 渲染不可用")
         try:
-            event_data = render_html_data(event, self._display_context)["event"]
+            event_data = render_html_data(
+                event, self._display_context, prepared_timeline
+            )["event"]
             rendered_html = render_html_template(template.content, event_data)
         except Exception as exc:
             _raise_render_failure("template_render_failed", "HTML 模板渲染失败", exc)

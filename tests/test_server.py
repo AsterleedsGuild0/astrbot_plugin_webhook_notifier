@@ -15,6 +15,7 @@ from core.omp import OmpProviderAdapter
 from core.opencode import OpenCodeProviderAdapter
 from core.providers import ProviderRegistry
 from core.registry import EndpointRegistry
+from core.renderer import render_subagent_timeline
 from core.sender import Sender
 from core.server import DEFAULT_RENDER_OPTIONS, WebhookServer
 from core.template_registry import TemplateRegistry
@@ -50,22 +51,28 @@ def _make_event() -> NormalizedEvent:
     )
 
 
-def _make_complex_event() -> NormalizedEvent:
+def _make_complex_event(
+    item_count: int = 6, *, long_names: bool = False
+) -> NormalizedEvent:
     """构造经过 provider 约束的复杂 root timeline fixture。"""
     root_ref = "a" * 32
     items = []
-    for index in range(6):
+    for index in range(item_count):
         start = index * 1000
         end = start + 1800 if index < 2 else start + 800
         items.append(
             {
                 "ref": f"{index + 1:032x}",
                 "parentRef": root_ref,
-                "status": "completed" if index != 5 else "failed",
+                "status": "completed" if index != item_count - 1 else "failed",
                 "timingQuality": "observed",
-                "depth": 3 if index == 5 else 1,
+                "depth": 3 if index == item_count - 1 else 1,
                 "attempt": 1,
-                "name": f"worker-{index + 1}",
+                "name": (
+                    f"worker-{index + 1}-" + "long-unbroken-name" * 8
+                    if long_names
+                    else f"worker-{index + 1}"
+                ),
                 "agent": "gpt-5.5",
                 "startOffsetMs": start,
                 "endOffsetMs": end,
@@ -1175,6 +1182,167 @@ class TestHandleHtmlImage:
         ]
         assert sender.sent_texts == []
 
+    async def test_timeline_viewport_timeout_scale_and_trim_share_renderer_layout(
+        self, monkeypatch
+    ):
+        event = _make_complex_event(49, long_names=True)
+        rendered = render_subagent_timeline(event)
+        assert rendered is not None
+        captured_options = None
+        trim_calls = []
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            nonlocal captured_options
+            captured_options = dict(options)
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        def capture_trim(result, *, canvas_width, card_width, body_padding):
+            trim_calls.append((canvas_width, card_width, body_padding))
+            return result
+
+        monkeypatch.setattr("core.server.trim_viewport_whitespace", capture_trim)
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            FakeSender(),
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+        )
+        result = await server._render_timeline_image_attempt(event, "req-layout")
+
+        assert result == b"\x89PNG\r\n\x1a\nimage"
+        assert captured_options is not None
+        assert captured_options["viewport_width"] == rendered.layout.viewport_width
+        assert captured_options["timeout"] == rendered.layout.render_timeout_ms
+        assert captured_options["device_scale_factor_level"] == "normal"
+        assert trim_calls == [
+            (
+                rendered.layout.viewport_width,
+                rendered.layout.card_width,
+                rendered.layout.body_padding,
+            )
+        ]
+
+    @pytest.mark.parametrize("item_count", [48, 64])
+    async def test_timeline_forces_full_page_and_dynamic_height_over_plugin_config(
+        self, item_count
+    ):
+        event = _make_complex_event(item_count, long_names=item_count == 64)
+        rendered = render_subagent_timeline(event)
+        assert rendered is not None
+        captured = []
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            captured.append((dict(options), data["rendered_html"]))
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            FakeSender(),
+            capture_render,
+            {
+                "render_mode": "html_image",
+                "render_options": {
+                    "full_page": False,
+                    "viewport_height": 1200,
+                    "timeout": 5000,
+                },
+            },
+        )
+        result = await server._render_timeline_image_attempt(event, "req-full-page")
+
+        assert result == b"\x89PNG\r\n\x1a\nimage"
+        options, html = captured[0]
+        assert options["full_page"] is True
+        assert options["viewport_height"] == rendered.layout.viewport_height
+        assert options["viewport_height"] >= rendered.layout.estimated_height
+        assert options["viewport_height"] > 1200
+        assert html.count('<div class="row timeline-row"') == item_count
+
+    async def test_strict_fake_renderer_png_matches_timeline_canvas(self, tmp_path):
+        from PIL import Image, ImageDraw
+
+        event = _make_complex_event(64, long_names=True)
+        rendered = render_subagent_timeline(event)
+        assert rendered is not None
+        png_path = tmp_path / "timeline-canvas.png"
+        captured_options = None
+
+        async def strict_png_render(tmpl, data, return_url=True, options=None):
+            nonlocal captured_options
+            captured_options = dict(options)
+            width = int(options["viewport_width"])
+            height = int(options["viewport_height"])
+            image = Image.new("RGB", (width, height), (255, 255, 255))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((16, 16, width - 16, height - 16), fill=(17, 25, 37))
+            image.save(png_path, format="PNG")
+            return str(png_path)
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            FakeSender(),
+            strict_png_render,
+            {"render_mode": "html_image", "render_options": {"full_page": False}},
+        )
+        result = await server._render_timeline_image_attempt(event, "req-png-canvas")
+
+        assert result == str(png_path)
+        assert captured_options is not None
+        with Image.open(png_path) as image:
+            assert image.size == (
+                rendered.layout.viewport_width,
+                rendered.layout.viewport_height,
+            )
+        expected_content_height = (
+            rendered.layout.vertical_chrome_height
+            + rendered.layout.located_rows_height
+            + (
+                60 + rendered.layout.unlocated_rows_height
+                if rendered.layout.unlocated_rows_height
+                else 0
+            )
+        )
+        assert expected_content_height == rendered.layout.estimated_height
+        assert captured_options["viewport_height"] >= expected_content_height
+        assert captured_options["full_page"] is True
+
+    async def test_production_double_image_path_builds_timeline_layout_once(
+        self, monkeypatch
+    ):
+        from core import renderer
+
+        event = _make_complex_event(25)
+        original = renderer._build_subagent_timeline_view
+        build_calls = 0
+
+        def counted(current_event):
+            nonlocal build_calls
+            build_calls += 1
+            return original(current_event)
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        monkeypatch.setattr(renderer, "_build_subagent_timeline_view", counted)
+        sender = FakeSender()
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+        )
+        response = await server._handle_html_image(
+            event, _make_endpoint(), None, "req-prepared-layout", True
+        )
+
+        assert response.status == 200
+        assert sender.send_images_calls == 1
+        assert build_calls == 1
+
     async def test_custom_main_and_builtin_timeline_render_in_order(self, tmp_path):
         registry = TemplateRegistry(tmp_path)
         registry.save(
@@ -1203,8 +1371,10 @@ class TestHandleHtmlImage:
             _make_complex_event(), _make_endpoint(), None, "req-custom-complex", True
         )
 
+        timeline = render_subagent_timeline(_make_complex_event())
+        assert timeline is not None
         assert json.loads(response.body)["data"]["render_mode"] == "html_image"
-        assert widths == [1000, 812]
+        assert widths == [1000, timeline.layout.viewport_width]
         assert sender.send_images_calls == 1
         assert sender.sent_image_batches == [
             [b"\x89PNG\r\n\x1a\nimage", b"\x89PNG\r\n\x1a\nimage"]
@@ -1238,7 +1408,7 @@ class TestHandleHtmlImage:
 
         if failure_stage == "helper":
             monkeypatch.setattr(
-                "core.server.render_subagent_timeline_html", failing_timeline
+                "core.server.render_subagent_timeline", failing_timeline
             )
         elif failure_stage == "validate":
             original_validate = __import__(
@@ -1259,7 +1429,9 @@ class TestHandleHtmlImage:
         elif failure_stage == "trim":
             trim_calls = 0
 
-            def fail_timeline_trim(result, canvas_width=812):
+            def fail_timeline_trim(
+                result, canvas_width=812, card_width=780, body_padding=16
+            ):
                 nonlocal trim_calls
                 trim_calls += 1
                 if trim_calls == 2:

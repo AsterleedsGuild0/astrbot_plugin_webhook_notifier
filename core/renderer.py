@@ -4,6 +4,8 @@ import os
 import json
 import math
 import re
+import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
@@ -33,8 +35,22 @@ SUBAGENT_TIMELINE_SIMPLE_MAX_DEPTH = 2
 SUBAGENT_TIMELINE_SIMPLE_MAX_CONCURRENCY = 2
 SUBAGENT_TIMELINE_COMPLEXITY_THRESHOLD = 4
 SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT = 8
-SUBAGENT_TIMELINE_GANTT_ROW_LIMIT = 24
-SUBAGENT_TIMELINE_UNLOCATED_RESERVE = 4
+SUBAGENT_TIMELINE_MAX_ITEMS = 64
+SUBAGENT_TIMELINE_MIN_VIEWPORT_WIDTH = 1440
+SUBAGENT_TIMELINE_MAX_VIEWPORT_WIDTH = 2400
+SUBAGENT_TIMELINE_MIN_VIEWPORT_HEIGHT = 1200
+SUBAGENT_TIMELINE_MAX_VIEWPORT_HEIGHT = 8192
+SUBAGENT_TIMELINE_BODY_PADDING = 16
+SUBAGENT_TIMELINE_INNER_PADDING = 32
+SUBAGENT_TIMELINE_BORDER_WIDTH = 1
+SUBAGENT_TIMELINE_STATE_COLUMN_WIDTH = 136
+SUBAGENT_TIMELINE_MIN_NAME_COLUMN_WIDTH = 320
+SUBAGENT_TIMELINE_MAX_NAME_COLUMN_WIDTH = 560
+SUBAGENT_TIMELINE_MIN_PLOT_WIDTH = 880
+SUBAGENT_TIMELINE_MAX_PLOT_WIDTH = 1680
+SUBAGENT_TIMELINE_MIN_BAR_WIDTH = 8
+SUBAGENT_TIMELINE_SOFT_HEIGHT = 3000
+SUBAGENT_TIMELINE_MAX_TIMEOUT_MS = 15000
 CSP_META = (
     '<meta http-equiv="Content-Security-Policy" '
     "content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:\">"
@@ -62,6 +78,121 @@ _TIMELINE_STATUS_VIEW = {
     "cancelled": ("已取消", "×"),
     "unknown": ("状态未知", "?"),
 }
+_TIMELINE_DENSITY_VIEW = {
+    "comfortable": {
+        "row_min_height": 54,
+        "task_font_size": 15,
+        "task_line_height": 1.36,
+        "task_padding_y": 8,
+        "bar_height": 20,
+        "axis_height": 48,
+        "agent_font_size": 11,
+        "show_agent": True,
+        "base_timeout_ms": 8000,
+    },
+    "compact": {
+        "row_min_height": 42,
+        "task_font_size": 14,
+        "task_line_height": 1.33,
+        "task_padding_y": 6,
+        "bar_height": 18,
+        "axis_height": 44,
+        "agent_font_size": 10,
+        "show_agent": True,
+        "base_timeout_ms": 10000,
+    },
+    "dense": {
+        "row_min_height": 36,
+        "task_font_size": 13,
+        "task_line_height": 1.30,
+        "task_padding_y": 4,
+        "bar_height": 16,
+        "axis_height": 42,
+        "agent_font_size": 10,
+        "show_agent": False,
+        "base_timeout_ms": 12000,
+    },
+}
+
+
+@dataclass(frozen=True)
+class SubagentTimelineLayout:
+    """Deterministic render metadata shared by the template and T2I caller."""
+
+    viewport_width: int
+    card_width: int
+    name_column_width: int
+    plot_width: int
+    state_column_width: int
+    density: str
+    row_min_height: int
+    task_font_size: int
+    task_line_height: float
+    task_padding_y: int
+    bar_height: int
+    axis_height: int
+    tick_target_count: int
+    located_rows_height: int
+    unlocated_rows_height: int
+    vertical_chrome_height: int
+    estimated_height: int
+    viewport_height: int
+    soft_height_exceeded: bool
+    render_timeout_ms: int
+    prefer_normal_scale: bool
+    body_padding: int = SUBAGENT_TIMELINE_BODY_PADDING
+
+    def to_view(self) -> dict[str, Any]:
+        return {
+            "viewport_width": self.viewport_width,
+            "card_width": self.card_width,
+            "name_column_width": self.name_column_width,
+            "plot_width": self.plot_width,
+            "state_column_width": self.state_column_width,
+            "density": self.density,
+            "row_min_height": self.row_min_height,
+            "task_font_size": self.task_font_size,
+            "task_line_height": self.task_line_height,
+            "task_padding_y": self.task_padding_y,
+            "bar_height": self.bar_height,
+            "axis_height": self.axis_height,
+            "tick_target_count": self.tick_target_count,
+            "located_rows_height": self.located_rows_height,
+            "unlocated_rows_height": self.unlocated_rows_height,
+            "vertical_chrome_height": self.vertical_chrome_height,
+            "estimated_height": self.estimated_height,
+            "viewport_height": self.viewport_height,
+            "soft_height_exceeded": self.soft_height_exceeded,
+            "render_timeout_ms": self.render_timeout_ms,
+            "prefer_normal_scale": self.prefer_normal_scale,
+            "body_padding": self.body_padding,
+        }
+
+    @classmethod
+    def from_view(cls, value: dict[str, Any]) -> SubagentTimelineLayout:
+        return cls(**value)
+
+
+@dataclass(frozen=True)
+class RenderedSubagentTimeline:
+    html: str
+    layout: SubagentTimelineLayout
+
+
+class PreparedSubagentTimeline:
+    """Request-local lazy cache so main and attachment rendering share one view."""
+
+    def __init__(self, event: NormalizedEvent) -> None:
+        self._event = event
+        self._resolved = False
+        self._view: dict[str, Any] | None = None
+
+    @property
+    def view(self) -> dict[str, Any] | None:
+        if not self._resolved:
+            self._view = _build_subagent_timeline_view(self._event)
+            self._resolved = True
+        return self._view
 
 
 # 默认文本模板（与 FSD 一致）
@@ -751,8 +882,8 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     body { padding: 16px; overflow-x: hidden; }
     .card {
       position: relative;
-      width: 780px;
-      max-width: 780px;
+      width: var(--card-width);
+      max-width: var(--card-width);
       overflow: hidden;
       border: 1px solid rgba(0, 0, 0, 0.10);
       border-radius: 22px;
@@ -766,7 +897,7 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       height: 1px;
       background: rgba(255,255,255,.9);
     }
-    .inner { padding: 27px 30px 23px; }
+    .inner { padding: 27px 32px 23px; }
     .topbar { display: table; width: 100%; margin-bottom: 16px; }
     .eyebrow-wrap, .status-wrap { display: table-cell; vertical-align: top; }
     .status-wrap { text-align: right; }
@@ -823,19 +954,20 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     .section-label { margin: 20px 0 8px; color: #8a8a8e; font-size: 13px; font-weight: 750; letter-spacing: .12em; }
     .timeline {
       overflow: hidden;
-      border: 1px solid rgba(0,0,0,.08);
+      border: 1px solid #273548;
       border-radius: 16px;
-      background: rgba(255,255,255,.8);
+      background: #111925;
+      box-shadow: 0 14px 34px rgba(15,23,34,.16);
     }
     .axis, .row {
       display: grid;
-      grid-template-columns: 174px minmax(0,1fr) 104px;
+      grid-template-columns: var(--name-column) var(--plot-column) var(--state-column);
     }
     .axis {
-      min-height: 44px;
-      color: #8a8a8e;
-      background: rgba(245,245,247,.72);
-      font-size: 11px;
+      min-height: var(--axis-height);
+      color: #b7c2d0;
+      background: #0d1420;
+      font-size: 12px;
       font-weight: 700;
       font-variant-numeric: tabular-nums;
     }
@@ -843,39 +975,62 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     .axis-state { justify-content: flex-end; }
     .axis-track, .track {
       position: relative;
-      border-right: 1px solid rgba(60,60,67,.12);
-      border-left: 1px solid rgba(60,60,67,.12);
-      background-image: linear-gradient(to right, transparent calc(25% - 1px), rgba(60,60,67,.11) 25%, transparent calc(25% + 1px)), linear-gradient(to right, transparent calc(50% - 1px), rgba(60,60,67,.11) 50%, transparent calc(50% + 1px)), linear-gradient(to right, transparent calc(75% - 1px), rgba(60,60,67,.11) 75%, transparent calc(75% + 1px));
+      border-right: 1px solid #314055;
+      border-left: 1px solid #314055;
+      background: linear-gradient(180deg, rgba(31,44,61,.72), rgba(18,27,40,.78));
     }
     .track { overflow: hidden; }
-    .tick { position: absolute; bottom: 8px; transform: translateX(-50%); white-space: nowrap; }
+    .tick { position: absolute; bottom: 9px; transform: translateX(-50%); white-space: nowrap; }
     .tick.first { transform: none; }
     .tick.last { transform: translateX(-100%); }
-    .row { min-height: 54px; border-top: 1px solid rgba(60,60,67,.12); }
+    .gridline {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: rgba(184,198,216,.13);
+    }
+    .row {
+      min-height: var(--row-min-height);
+      border-top: 1px solid rgba(184,198,216,.10);
+    }
+    .timeline-row:nth-child(odd) .task,
+    .timeline-row:nth-child(odd) .state { background: #151f2c; }
+    .timeline-row:nth-child(even) .task,
+    .timeline-row:nth-child(even) .state { background: #121b27; }
     .task {
       min-width: 0;
-      padding: 8px 11px;
+      padding: var(--task-padding-y) 12px;
       border-left: 3px solid transparent;
+      color: #f4f7fb;
     }
     .task.depth-2 { padding-left: 21px; border-left-color: rgba(65,108,157,.26); }
     .task.depth-3 { padding-left: 31px; border-left-color: rgba(65,108,157,.34); }
     .task.depth-4 { padding-left: 41px; border-left-color: rgba(65,108,157,.42); }
-    .task-name, .task-agent {
+    .task-name {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: normal;
+      hyphens: auto;
+    }
+    .task-agent {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .task-name { font-size: 14px; font-weight: 730; line-height: 1.3; }
-    .task-agent { margin-top: 3px; color: #8a8a8e; font-size: 11px; line-height: 1.25; }
+    .task-name { font-size: var(--task-font-size); font-weight: 730; line-height: var(--task-line-height); }
+    .task-agent { margin-top: 3px; color: #98a7b9; font-size: var(--agent-font-size); line-height: 1.25; }
+    .density-dense .task-agent { display: none; }
     .bar {
       position: absolute;
-      top: 13px;
-      bottom: 13px;
-      min-width: 5px;
+      top: 50%;
+      height: var(--bar-height);
+      min-width: 0;
+      transform: translateY(-50%);
       border: 1px solid rgba(65,108,157,.42);
       border-radius: 7px;
       background: #dce9f7;
-      box-shadow: 0 2px 7px rgba(50,72,96,.09);
+      box-shadow: 0 3px 10px rgba(0,0,0,.24);
     }
     .bar.completed { border-color: rgba(40,116,71,.42); background: #dff2e6; }
     .bar.failed { border-color: rgba(190,48,53,.48); background: #f8dddd; }
@@ -892,33 +1047,36 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       justify-content: center;
       align-items: flex-end;
       min-width: 0;
-      padding: 7px 10px;
+      padding: var(--task-padding-y) 11px;
       text-align: right;
     }
-    .state-label { font-size: 12px; font-weight: 750; white-space: nowrap; }
-    .state-label.completed { color: #24663f; }
-    .state-label.failed { color: #9f2d2f; }
-    .state-label.running { color: #8a5a00; }
-    .state-time { margin-top: 3px; color: #8a8a8e; font-size: 11px; white-space: nowrap; }
+    .state-label { color: #d7dee8; font-size: 12px; font-weight: 750; white-space: nowrap; }
+    .state-label.completed { color: #8ed5aa; }
+    .state-label.failed { color: #ff9b9e; }
+    .state-label.running { color: #ffd476; }
+    .state-time { margin-top: 3px; color: #98a7b9; font-size: 11px; white-space: nowrap; }
     .unlocated {
       margin-top: 12px;
       padding: 12px;
-      border: 1px dashed rgba(142,142,147,.34);
+      border: 1px dashed #40516a;
       border-radius: 13px;
-      background: rgba(245,245,247,.52);
+      background: #121b27;
     }
-    .unlocated-title { color: #5f6065; font-size: 14px; font-weight: 750; }
+    .unlocated-title { color: #d7dee8; font-size: 14px; font-weight: 750; }
     .unlocated-list { margin: 8px 0 0; padding: 0; list-style: none; }
     .unlocated-item {
-      display: table;
+      display: grid;
+      grid-template-columns: minmax(0,1fr) auto;
+      gap: 14px;
       width: 100%;
-      padding: 7px 0;
-      border-top: 1px solid rgba(60,60,67,.10);
+      min-height: var(--row-min-height);
+      padding: var(--task-padding-y) 0;
+      border-top: 1px solid rgba(184,198,216,.10);
     }
     .unlocated-item:first-child { border-top: 0; }
-    .unlocated-name, .unlocated-state { display: table-cell; vertical-align: middle; font-size: 13px; }
-    .unlocated-name { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 680; }
-    .unlocated-state { width: 1%; padding-left: 12px; color: #6e6e73; white-space: nowrap; text-align: right; }
+    .unlocated-name, .unlocated-state { align-self: center; font-size: 13px; }
+    .unlocated-name { color: #f4f7fb; font-weight: 680; white-space: normal; overflow-wrap: anywhere; word-break: normal; }
+    .unlocated-state { color: #aab6c5; white-space: nowrap; text-align: right; }
     .legend {
       margin-top: 12px;
       color: #6e6e73;
@@ -933,19 +1091,10 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     .legend-mark.cancelled { background: #e8e8eb; border: 1px solid rgba(110,110,115,.40); }
     .legend-mark.unknown { background: #dce9f7; border: 1px solid rgba(65,108,157,.42); }
     .legend-mark.partial { background: #f7f7f8; border: 1px dashed rgba(110,110,115,.55); }
-    .remaining {
-      margin-top: 10px;
-      padding: 9px 11px;
-      border-radius: 10px;
-      color: #6e6e73;
-      background: rgba(245,245,247,.65);
-      font-size: 12px;
-      line-height: 1.45;
-    }
   </style>
 </head>
 <body>
-  <main class="card">
+  <main class="card density-{{ event.layout.density }}" style="--card-width: {{ event.layout.card_width }}px; --name-column: {{ event.layout.name_column_width }}px; --plot-column: {{ event.layout.plot_width }}px; --state-column: {{ event.layout.state_column_width }}px; --row-min-height: {{ event.layout.row_min_height }}px; --task-font-size: {{ event.layout.task_font_size }}px; --task-line-height: {{ event.layout.task_line_height }}; --task-padding-y: {{ event.layout.task_padding_y }}px; --bar-height: {{ event.layout.bar_height }}px; --axis-height: {{ event.layout.axis_height }}px; --agent-font-size: {% if event.layout.density == 'comfortable' %}11{% else %}10{% endif %}px;">
     <div class="inner">
       <div class="topbar">
         <div class="eyebrow-wrap"><span class="eyebrow">根任务 · 相对时间</span></div>
@@ -962,13 +1111,13 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       <section class="timeline">
         <div class="axis">
           <div class="axis-name">子任务</div>
-          <div class="axis-track">{% for tick in event.axis_ticks %}<span class="tick {{ tick.edge_class }}" style="left: {{ tick.left }}%;">{{ tick.label|e }}</span>{% endfor %}</div>
+          <div class="axis-track">{% for tick in event.axis_ticks %}<span class="tick {{ tick.edge_class }}" style="left: {{ tick.left_px }}px;">{{ tick.label|e }}</span>{% endfor %}</div>
           <div class="axis-state">状态 / 耗时</div>
         </div>
         {% for item in event.gantt_items %}
-        <div class="row timeline-row">
+        <div class="row timeline-row" style="min-height: {{ item.estimated_row_height }}px;">
           <div class="task depth-{{ item.depth_class }}"><div class="task-name">{{ item.name|e }}</div>{% if item.agent %}<div class="task-agent">{{ item.agent|e }}</div>{% endif %}</div>
-          <div class="track"><span class="bar {{ item.status_class }}{% if item.partial_interval %} partial{% endif %}" style="left: {{ item.left_pct }}%; width: {{ item.width_pct }}%;"></span></div>
+          <div class="track">{% for line in event.grid_lines %}<span class="gridline" style="left: {{ line.left_px }}px;"></span>{% endfor %}<span class="bar {{ item.status_class }}{% if item.partial_interval %} partial{% endif %}{% if item.minimum_width_applied %} minimum-width{% endif %}" style="left: {{ item.left_px }}px; width: {{ item.width_px }}px;"></span></div>
           <div class="state"><span class="state-label {{ item.status_class }}">{{ item.status_symbol|e }} {{ item.status_label|e }}</span><span class="state-time">{{ item.timing_label|e }}</span></div>
         </div>
         {% endfor %}
@@ -978,7 +1127,7 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       <section class="unlocated">
         <div class="unlocated-title">未定位任务 · 缺少完整起止时间</div>
         <ul class="unlocated-list">
-          {% for item in event.unlocated_items %}<li class="unlocated-item"><span class="unlocated-name">{{ item.name|e }}{% if item.agent %} · {{ item.agent|e }}{% endif %}</span><span class="unlocated-state">{{ item.status_symbol|e }} {{ item.status_label|e }} · 区间不完整</span></li>{% endfor %}
+          {% for item in event.unlocated_items %}<li class="unlocated-item" style="min-height: {{ item.estimated_row_height }}px;"><span class="unlocated-name">{{ item.name|e }}{% if item.agent %} · {{ item.agent|e }}{% endif %}</span><span class="unlocated-state">{{ item.status_symbol|e }} {{ item.status_label|e }} · 区间不完整</span></li>{% endfor %}
         </ul>
       </section>
       {% endif %}
@@ -991,7 +1140,6 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
         <span class="legend-item"><span class="legend-mark unknown"></span>状态未知</span>
         <span class="legend-item"><span class="legend-mark partial"></span>区间不完整</span>
       </div>
-      {% if event.remaining_count > 0 %}<div class="remaining">其余 {{ event.remaining_count }} 项未展开；汇总数字仍包含已观测任务。</div>{% endif %}
     </div>
   </main>
 </body>
@@ -1117,6 +1265,9 @@ def _timeline_overlap_data(
 
 def _format_timeline_scale(value_ms: float) -> str:
     value = max(0.0, value_ms)
+    if value < 1:
+        text = f"{value:.2f}".rstrip("0").rstrip(".")
+        return f"{text}毫秒"
     if value < 1000:
         return f"{int(round(value))}毫秒"
     seconds = value / 1000
@@ -1129,8 +1280,420 @@ def _format_timeline_scale(value_ms: float) -> str:
         return (
             f"{minutes}分{remaining_seconds}秒" if remaining_seconds else f"{minutes}分"
         )
+    if minutes >= 24 * 60:
+        days, remaining_day_minutes = divmod(minutes, 24 * 60)
+        remaining_hours, remaining_minutes = divmod(remaining_day_minutes, 60)
+        if remaining_hours or remaining_minutes:
+            suffix = f"{remaining_hours}小时" if remaining_hours else ""
+            if remaining_minutes:
+                suffix += f"{remaining_minutes}分"
+            return f"{days}天{suffix}"
+        return f"{days}天"
     hours, remaining_minutes = divmod(minutes, 60)
     return f"{hours}小时{remaining_minutes}分" if remaining_minutes else f"{hours}小时"
+
+
+def _timeline_visual_units(value: str) -> float:
+    """Approximate rendered width while keeping layout independent from a browser pass."""
+
+    units = 0.0
+    for char in value:
+        if char.isspace():
+            units += 0.35
+        elif unicodedata.east_asian_width(char) in {"W", "F", "A"}:
+            units += 1.0
+        else:
+            units += 0.55
+    return max(1.0, units)
+
+
+def _timeline_percentile(values: list[float], ratio: float) -> float:
+    if not values:
+        return 1.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * ratio) - 1))
+    return ordered[index]
+
+
+def _timeline_density(item_count: int) -> str:
+    if item_count <= 24:
+        return "comfortable"
+    if item_count <= 48:
+        return "compact"
+    return "dense"
+
+
+def _timeline_estimated_lines(
+    text: str,
+    *,
+    column_width: int,
+    font_size: int,
+    depth_class: int = 1,
+) -> int:
+    depth_padding = 22 + max(0, min(depth_class, 4) - 1) * 10
+    available_width = max(120, column_width - depth_padding)
+    estimated_width = _timeline_visual_units(text) * font_size
+    return max(1, math.ceil(estimated_width / available_width))
+
+
+def _build_subagent_timeline_layout(
+    item_views: list[dict[str, Any]],
+    *,
+    timeline_end_ms: float,
+    max_depth: int,
+) -> SubagentTimelineLayout:
+    item_count = len(item_views)
+    density = _timeline_density(item_count)
+    density_view = _TIMELINE_DENSITY_VIEW[density]
+    name_units = [_timeline_visual_units(str(item["name"])) for item in item_views]
+    p90_name_units = _timeline_percentile(name_units, 0.90)
+    max_name_units = max(name_units, default=1.0)
+    depth_indent = max(0, min(max_depth, 4) - 1) * 10
+    name_width_target = max(
+        56 + 7.2 * p90_name_units + depth_indent,
+        56 + 4.8 * max_name_units + depth_indent,
+    )
+    name_column_width = int(
+        min(
+            SUBAGENT_TIMELINE_MAX_NAME_COLUMN_WIDTH,
+            max(
+                SUBAGENT_TIMELINE_MIN_NAME_COLUMN_WIDTH,
+                math.ceil(name_width_target),
+            ),
+        )
+    )
+
+    span_minutes = timeline_end_ms / 60_000
+    plot_target = int(
+        min(
+            SUBAGENT_TIMELINE_MAX_PLOT_WIDTH,
+            max(
+                SUBAGENT_TIMELINE_MIN_PLOT_WIDTH,
+                880 + 8 * min(span_minutes, 90) + 10 * max(item_count - 8, 0),
+            ),
+        )
+    )
+    horizontal_chrome = (
+        SUBAGENT_TIMELINE_BODY_PADDING * 2
+        + SUBAGENT_TIMELINE_INNER_PADDING * 2
+        + SUBAGENT_TIMELINE_STATE_COLUMN_WIDTH
+    )
+    desired_viewport = name_column_width + plot_target + horizontal_chrome
+    viewport_width = min(
+        SUBAGENT_TIMELINE_MAX_VIEWPORT_WIDTH,
+        max(
+            SUBAGENT_TIMELINE_MIN_VIEWPORT_WIDTH,
+            int(math.ceil(desired_viewport / 32) * 32),
+        ),
+    )
+    card_width = viewport_width - SUBAGENT_TIMELINE_BODY_PADDING * 2
+    plot_width = (
+        card_width
+        - SUBAGENT_TIMELINE_INNER_PADDING * 2
+        - SUBAGENT_TIMELINE_BORDER_WIDTH * 4
+        - name_column_width
+        - SUBAGENT_TIMELINE_STATE_COLUMN_WIDTH
+    )
+
+    font_size = int(density_view["task_font_size"])
+    line_height = float(density_view["task_line_height"])
+    padding_y = int(density_view["task_padding_y"])
+    row_min_height = int(density_view["row_min_height"])
+    agent_font_size = int(density_view["agent_font_size"])
+    show_agent = bool(density_view["show_agent"])
+    located_height = 0
+    unlocated_height = 0
+    for item in item_views:
+        name_lines = _timeline_estimated_lines(
+            str(item["name"]),
+            column_width=name_column_width,
+            font_size=font_size,
+            depth_class=int(item["depth_class"]),
+        )
+        agent_height = (
+            math.ceil(agent_font_size * 1.25) + 3
+            if show_agent and item.get("agent")
+            else 0
+        )
+        estimated_row_height = max(
+            row_min_height,
+            math.ceil(name_lines * font_size * line_height)
+            + padding_y * 2
+            + agent_height,
+        )
+        item["estimated_name_lines"] = name_lines
+        item["estimated_row_height"] = estimated_row_height
+        if item["located"]:
+            located_height += estimated_row_height
+        else:
+            unlocated_height += estimated_row_height
+
+    vertical_chrome_height = 470 + int(density_view["axis_height"])
+    estimated_height = vertical_chrome_height + located_height
+    if unlocated_height:
+        estimated_height += 60 + unlocated_height
+    soft_height_exceeded = estimated_height > SUBAGENT_TIMELINE_SOFT_HEIGHT
+    viewport_height = min(
+        SUBAGENT_TIMELINE_MAX_VIEWPORT_HEIGHT,
+        max(SUBAGENT_TIMELINE_MIN_VIEWPORT_HEIGHT, estimated_height),
+    )
+    overflow_timeout = (
+        math.ceil((estimated_height - SUBAGENT_TIMELINE_SOFT_HEIGHT) / 750) * 1000
+        if soft_height_exceeded
+        else 0
+    )
+    render_timeout_ms = min(
+        SUBAGENT_TIMELINE_MAX_TIMEOUT_MS,
+        int(density_view["base_timeout_ms"]) + overflow_timeout,
+    )
+    tick_target_count = max(5, min(10, plot_width // 180 + 1))
+
+    return SubagentTimelineLayout(
+        viewport_width=viewport_width,
+        card_width=card_width,
+        name_column_width=name_column_width,
+        plot_width=plot_width,
+        state_column_width=SUBAGENT_TIMELINE_STATE_COLUMN_WIDTH,
+        density=density,
+        row_min_height=row_min_height,
+        task_font_size=font_size,
+        task_line_height=line_height,
+        task_padding_y=padding_y,
+        bar_height=int(density_view["bar_height"]),
+        axis_height=int(density_view["axis_height"]),
+        tick_target_count=tick_target_count,
+        located_rows_height=located_height,
+        unlocated_rows_height=unlocated_height,
+        vertical_chrome_height=vertical_chrome_height,
+        estimated_height=estimated_height,
+        viewport_height=viewport_height,
+        soft_height_exceeded=soft_height_exceeded,
+        render_timeout_ms=render_timeout_ms,
+        prefer_normal_scale=viewport_width > 1920 or soft_height_exceeded,
+    )
+
+
+_TIMELINE_NICE_STEP_FACTORS = (1.0, 2.0, 2.5, 5.0)
+_TIMELINE_TICK_SAFETY_GAP_PX = 12.0
+
+
+def _timeline_decimal_places(value: float, *, maximum: int = 6) -> int:
+    if not math.isfinite(value) or value <= 0:
+        return 0
+    tolerance = max(1e-12, abs(value) * 1e-12)
+    for decimal_places in range(maximum + 1):
+        if math.isclose(
+            value,
+            round(value, decimal_places),
+            rel_tol=0,
+            abs_tol=tolerance,
+        ):
+            return decimal_places
+    return maximum
+
+
+def _format_timeline_decimal(value: float, decimals: int) -> str:
+    text = f"{value:.{decimals}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _format_timeline_tick(value_ms: float, step_ms: float) -> str:
+    value = max(0.0, value_ms)
+    if value == 0:
+        return "0"
+    if value < 1000:
+        decimals = max(
+            _timeline_decimal_places(step_ms),
+            _timeline_decimal_places(value),
+        )
+        text = _format_timeline_decimal(value, decimals)
+        return f"+{text}毫秒"
+    if value < 60_000:
+        step_seconds = step_ms / 1000
+        value_seconds = value / 1000
+        decimals = max(
+            _timeline_decimal_places(step_seconds),
+            _timeline_decimal_places(value_seconds),
+        )
+        text = _format_timeline_decimal(value_seconds, decimals)
+        return f"+{text}秒"
+    return f"+{_format_timeline_scale(value)}"
+
+
+def _timeline_tick_label_width(label: str) -> float:
+    return max(16.0, _timeline_visual_units(label) * 11.5 + 8.0)
+
+
+def _timeline_tick_geometry(
+    values: list[float],
+    *,
+    timeline_end_ms: float,
+    plot_width: int,
+    step_ms: float,
+) -> tuple[list[str], list[float], int, float, float]:
+    labels = [_format_timeline_tick(value, step_ms) for value in values]
+    positions = [value / timeline_end_ms * plot_width for value in values]
+    overlap_count = 0
+    minimum_slack = math.inf
+    gaps: list[float] = []
+    for index in range(len(values) - 1):
+        gap = positions[index + 1] - positions[index]
+        required = (
+            _timeline_tick_label_width(labels[index])
+            + _timeline_tick_label_width(labels[index + 1])
+        ) / 2 + _TIMELINE_TICK_SAFETY_GAP_PX
+        slack = gap - required
+        minimum_slack = min(minimum_slack, slack)
+        if slack < 0:
+            overlap_count += 1
+        gaps.append(gap)
+    imbalance = max(gaps) / min(gaps) if gaps and min(gaps) > 0 else 1.0
+    tail_px = plot_width - positions[-1]
+    return (
+        labels,
+        positions,
+        overlap_count,
+        minimum_slack,
+        max(1.0, imbalance) + tail_px / plot_width,
+    )
+
+
+def _timeline_tick_values_for_step(
+    timeline_end_ms: float,
+    *,
+    step_ms: float,
+    plot_width: int,
+) -> list[float]:
+    interval_count = int(math.floor(timeline_end_ms / step_ms))
+    if interval_count > 32:
+        return []
+    values = [index * step_ms for index in range(interval_count + 1)]
+    last = values[-1]
+    if math.isclose(last, timeline_end_ms, rel_tol=1e-12, abs_tol=1e-9):
+        values[-1] = timeline_end_ms
+        return values
+
+    appended = [*values, timeline_end_ms]
+    appended_labels, _, appended_overlaps, _, _ = _timeline_tick_geometry(
+        appended,
+        timeline_end_ms=timeline_end_ms,
+        plot_width=plot_width,
+        step_ms=step_ms,
+    )
+    appended_is_valid = appended_overlaps == 0 and len(appended_labels) == len(
+        set(appended_labels)
+    )
+    remainder = timeline_end_ms - last
+    if appended_is_valid and remainder >= step_ms / 1.75:
+        return appended
+
+    if len(values) > 1:
+        replaced = [*values[:-1], timeline_end_ms]
+        replaced_labels, _, replaced_overlaps, _, _ = _timeline_tick_geometry(
+            replaced,
+            timeline_end_ms=timeline_end_ms,
+            plot_width=plot_width,
+            step_ms=step_ms,
+        )
+        if replaced_overlaps == 0 and len(replaced_labels) == len(set(replaced_labels)):
+            return replaced
+    if appended_is_valid:
+        return appended
+    return values
+
+
+def _timeline_nice_tick_values(
+    timeline_end_ms: float, layout: SubagentTimelineLayout
+) -> tuple[list[float], float]:
+    target_count = layout.tick_target_count
+    raw_step = timeline_end_ms / max(1, target_count - 1)
+    if raw_step >= 86_400_000:
+        unit_ms = 86_400_000.0
+    elif raw_step >= 3_600_000:
+        unit_ms = 3_600_000.0
+    elif raw_step >= 60_000:
+        unit_ms = 60_000.0
+    elif raw_step >= 1000:
+        unit_ms = 1000.0
+    else:
+        unit_ms = 1.0
+    scaled_raw_step = raw_step / unit_ms
+    exponent = math.floor(math.log10(scaled_raw_step)) if raw_step > 0 else 0
+    candidates: list[tuple[tuple[float, ...], list[float], float]] = []
+    for power in range(exponent - 2, exponent + 3):
+        magnitude = 10.0**power * unit_ms
+        for factor in _TIMELINE_NICE_STEP_FACTORS:
+            step = factor * magnitude
+            values = _timeline_tick_values_for_step(
+                timeline_end_ms,
+                step_ms=step,
+                plot_width=layout.plot_width,
+            )
+            if not values:
+                continue
+            count = len(values)
+            labels, positions, overlap_count, minimum_slack, balance_penalty = (
+                _timeline_tick_geometry(
+                    values,
+                    timeline_end_ms=timeline_end_ms,
+                    plot_width=layout.plot_width,
+                    step_ms=step,
+                )
+            )
+            duplicate_count = len(labels) - len(set(labels))
+            non_monotonic_count = sum(
+                right <= left for left, right in zip(positions, positions[1:])
+            )
+            range_penalty = float(max(0, 5 - count) + max(0, count - 10))
+            target_penalty = abs(count - target_count)
+            step_penalty = abs(math.log10(step / raw_step)) if raw_step > 0 else 0.0
+            candidates.append(
+                (
+                    (
+                        float(overlap_count + duplicate_count + non_monotonic_count),
+                        range_penalty,
+                        max(0.0, -minimum_slack),
+                        balance_penalty,
+                        float(target_penalty),
+                        step_penalty,
+                    ),
+                    values,
+                    step,
+                )
+            )
+    if not candidates:
+        return [0.0, timeline_end_ms], timeline_end_ms
+    selected = min(candidates, key=lambda candidate: candidate[0])
+    return selected[1], selected[2]
+
+
+def _build_timeline_ticks(
+    timeline_end_ms: float, layout: SubagentTimelineLayout
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    values, step_ms = _timeline_nice_tick_values(timeline_end_ms, layout)
+
+    ticks: list[dict[str, Any]] = []
+    grid_lines: list[dict[str, Any]] = []
+    for index, value in enumerate(values):
+        left_px = min(
+            layout.plot_width, max(0.0, value / timeline_end_ms * layout.plot_width)
+        )
+        edge_class = (
+            "first" if index == 0 else "last" if index == len(values) - 1 else ""
+        )
+        tick = {
+            "value_ms": value,
+            "left_px": f"{left_px:.2f}".rstrip("0").rstrip("."),
+            "edge_class": edge_class,
+            "label": _format_timeline_tick(value, step_ms),
+            "label_width_px": _timeline_tick_label_width(
+                _format_timeline_tick(value, step_ms)
+            ),
+        }
+        ticks.append(tick)
+        if index not in {0, len(values) - 1}:
+            grid_lines.append({"left_px": tick["left_px"]})
+    return ticks, grid_lines
 
 
 def _timeline_status_view(status: Any) -> tuple[str, str, str]:
@@ -1157,6 +1720,8 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     raw_items = timeline.get("items")
     if not isinstance(raw_items, list):
         return None
+    if len(raw_items) > SUBAGENT_TIMELINE_MAX_ITEMS:
+        raise ValueError("subagent timeline items exceed renderer wire limit")
     indexed_items = [
         (index, item)
         for index, item in enumerate(raw_items)
@@ -1273,14 +1838,6 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         else:
             meta_labels.append("时间未定位")
 
-        left_pct = 0.0
-        width_pct = 0.0
-        if interval is not None:
-            left_pct = min(100.0, max(0.0, interval[0] / timeline_end_ms * 100))
-            width_pct = min(
-                100.0 - left_pct,
-                max(0.8, (interval[1] - interval[0]) / timeline_end_ms * 100),
-            )
         timing_label = (
             duration_label
             if duration_label
@@ -1302,15 +1859,49 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
                 "located": interval is not None,
                 "partial_interval": interval is not None
                 and item.get("timingQuality") == "partial",
-                "left_pct": f"{left_pct:.3f}".rstrip("0").rstrip("."),
-                "width_pct": f"{width_pct:.3f}".rstrip("0").rstrip("."),
+                "interval_start": interval[0] if interval is not None else None,
+                "interval_end": interval[1] if interval is not None else None,
                 "timing_label": timing_label,
                 "sort_start": interval[0] if interval is not None else math.inf,
             }
         )
 
     item_views.sort(key=lambda item: (item["sort_start"], item["source_index"]))
+    layout = _build_subagent_timeline_layout(
+        item_views,
+        timeline_end_ms=timeline_end_ms,
+        max_depth=max_depth,
+    )
+    px_per_ms = layout.plot_width / timeline_end_ms
     for item in item_views:
+        interval_start = item.pop("interval_start", None)
+        interval_end = item.pop("interval_end", None)
+        if isinstance(interval_start, (int, float)) and isinstance(
+            interval_end, (int, float)
+        ):
+            actual_left_px = min(
+                float(layout.plot_width), max(0.0, interval_start * px_per_ms)
+            )
+            duration_ms = max(0.0, interval_end - interval_start)
+            actual_width_px = duration_ms * px_per_ms
+            visual_width_px = (
+                max(float(SUBAGENT_TIMELINE_MIN_BAR_WIDTH), actual_width_px)
+                if duration_ms > 0
+                else 2.0
+            )
+            visual_width_px = min(float(layout.plot_width), visual_width_px)
+            visual_left_px = min(
+                actual_left_px, max(0.0, layout.plot_width - visual_width_px)
+            )
+            item["left_px"] = f"{visual_left_px:.2f}".rstrip("0").rstrip(".")
+            item["width_px"] = f"{visual_width_px:.2f}".rstrip("0").rstrip(".")
+            item["minimum_width_applied"] = (
+                duration_ms > 0 and actual_width_px < SUBAGENT_TIMELINE_MIN_BAR_WIDTH
+            )
+        else:
+            item["left_px"] = "0"
+            item["width_px"] = "0"
+            item["minimum_width_applied"] = False
         item.pop("sort_start", None)
         item.pop("source_index", None)
 
@@ -1377,28 +1968,9 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
 
     located_items = [item for item in item_views if item["located"]]
     unlocated_items = [item for item in item_views if not item["located"]]
-    reserve = min(len(unlocated_items), SUBAGENT_TIMELINE_UNLOCATED_RESERVE)
-    located_limit = SUBAGENT_TIMELINE_GANTT_ROW_LIMIT - reserve
-    gantt_items = located_items[:located_limit]
-    displayed_unlocated = unlocated_items[
-        : SUBAGENT_TIMELINE_GANTT_ROW_LIMIT - len(gantt_items)
-    ]
-    remaining_count = max(
-        0, observed_count - len(gantt_items) - len(displayed_unlocated)
-    )
-    gantt_displayed_count = len(gantt_items) + len(displayed_unlocated)
+    gantt_displayed_count = len(item_views)
     observation_subtitle = " · 指标按已观测范围计算" if observation_limited else ""
-    axis_ticks = []
-    for index in range(5):
-        left = index * 25
-        edge_class = "first" if index == 0 else "last" if index == 4 else ""
-        axis_ticks.append(
-            {
-                "left": left,
-                "edge_class": edge_class,
-                "label": _format_timeline_scale(timeline_end_ms * index / 4),
-            }
-        )
+    axis_ticks, grid_lines = _build_timeline_ticks(timeline_end_ms, layout)
 
     return {
         "mode": mode,
@@ -1422,10 +1994,13 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             f"观测 {observed_count} 个 · 本图展示 {gantt_displayed_count} 个"
             f" · 时间相对根任务起点{observation_subtitle}"
         ),
+        "layout": layout.to_view(),
+        "timeline_end_ms": timeline_end_ms,
+        "px_per_ms": px_per_ms,
         "axis_ticks": axis_ticks,
-        "gantt_items": gantt_items,
-        "unlocated_items": displayed_unlocated,
-        "remaining_count": remaining_count,
+        "grid_lines": grid_lines,
+        "gantt_items": located_items,
+        "unlocated_items": unlocated_items,
     }
 
 
@@ -1717,8 +2292,16 @@ def _append_subagent_timeline_text(
         lines.append(f"另有 {observed - displayed} 个任务未展示")
 
 
+def prepare_subagent_timeline(event: NormalizedEvent) -> PreparedSubagentTimeline:
+    """Create a request-local lazy timeline preparation shared by both images."""
+
+    return PreparedSubagentTimeline(event)
+
+
 def render_html_data(
-    event: NormalizedEvent, display_context: DisplayContext | None = None
+    event: NormalizedEvent,
+    display_context: DisplayContext | None = None,
+    prepared_timeline: PreparedSubagentTimeline | None = None,
 ) -> dict[str, Any]:
     """为 HTML 模板准备数据 dict。
 
@@ -1743,7 +2326,11 @@ def render_html_data(
         datetime.now(timezone.utc).isoformat(), display_context
     )
     data["event_time"] = format_timestamp(data.get("emitted_at", ""), display_context)
-    timeline_view = _build_subagent_timeline_view(event)
+    timeline_view = (
+        prepared_timeline.view
+        if prepared_timeline is not None
+        else _build_subagent_timeline_view(event)
+    )
     if timeline_view is not None:
         data["subagent_timeline_view"] = timeline_view
 
@@ -1784,13 +2371,34 @@ def render_html_default(
     return render_html(event, DEFAULT_HTML_TEMPLATE, display_context)
 
 
-def render_subagent_timeline_html(event: NormalizedEvent) -> str | None:
-    """Render the bounded second-image timeline for a complex root completion."""
+def render_subagent_timeline(
+    event: NormalizedEvent,
+    prepared_timeline: PreparedSubagentTimeline | None = None,
+) -> RenderedSubagentTimeline | None:
+    """Render a complex timeline together with its deterministic screenshot layout."""
 
-    view = _build_subagent_timeline_view(event)
+    view = (
+        prepared_timeline.view
+        if prepared_timeline is not None
+        else _build_subagent_timeline_view(event)
+    )
     if view is None or view["mode"] != "complex":
         return None
-    return render_html_template(SUBAGENT_TIMELINE_HTML_TEMPLATE, view)
+    layout = SubagentTimelineLayout.from_view(view["layout"])
+    return RenderedSubagentTimeline(
+        html=render_html_template(SUBAGENT_TIMELINE_HTML_TEMPLATE, view),
+        layout=layout,
+    )
+
+
+def render_subagent_timeline_html(
+    event: NormalizedEvent,
+    prepared_timeline: PreparedSubagentTimeline | None = None,
+) -> str | None:
+    """Compatibility wrapper returning only the complex timeline HTML."""
+
+    rendered = render_subagent_timeline(event, prepared_timeline)
+    return rendered.html if rendered is not None else None
 
 
 def validate_image_result(result: Any) -> bool:
