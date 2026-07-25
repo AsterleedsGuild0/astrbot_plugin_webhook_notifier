@@ -222,7 +222,7 @@ timeline 限制为最多 64 个 item、24 KiB JSON、depth 不超过 8，并受�
 默认图片渲染按 item 数量、depth、峰值并发/重叠以及 partial/truncated 综合判断复杂度，而不是只按 item 数：
 
 - simple：主卡最多 8 项阶段卡。
-- complex：主卡保留摘要，并在同一 MessageChain 追加独立横向甘特图；附图在 1440～2400px 内动态布局，完整展示 payload 中最多 64 项，名称自然折行，并按 1～24、25～48、49～64 项切换显示密度。附图强制完整页面截图并使用 renderer 计算的动态 viewport 高度，不继承可能裁切内容的主卡 `full_page=false` 或固定高度。
+- complex：主卡保留摘要，并在同一 MessageChain 追加独立横向甘特图；附图在 1440～2400px 内动态布局，完整展示 payload 中最多 64 项，名称自然折行，并按 1～24、25～48、49～64 项切换显示密度。独立甘特图默认使用与白色通知报告协调的浅蓝灰视觉；附图强制完整页面截图并使用 renderer 计算的动态 viewport 高度，不继承可能裁切内容的主卡 `full_page=false` 或固定高度。
 - start/end 缺失比例超过 25%：不画甘特图；`partial`/`clamped` 不展示假精确 duration，未定位任务不画假 bar。
 
 Sender 最多发送 1～2 张图。附图生成、校验或构造失败时只发送主卡；实际发送失败后不自动重试主卡，以避免重复通知。部署顺序仍是服务端先升级并重载、再部署新版 Client 并完全重启 OpenCode。

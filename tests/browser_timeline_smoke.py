@@ -130,10 +130,23 @@ async def _capture_with_cdp(
                   bottom: value.bottom, width: value.width, height: value.height
                 };
               };
+              const visualStyle = (node) => {
+                const value = getComputedStyle(node);
+                return {
+                  backgroundColor: value.backgroundColor,
+                  backgroundImage: value.backgroundImage,
+                  borderTopColor: value.borderTopColor,
+                  borderRightColor: value.borderRightColor,
+                  color: value.color,
+                  boxShadow: value.boxShadow
+                };
+              };
               const body = document.body;
               const root = document.documentElement;
               const card = document.querySelector('.card');
               const timeline = document.querySelector('.timeline');
+              const axis = document.querySelector('.axis');
+              const axisTrack = document.querySelector('.axis-track');
               const rows = [...document.querySelectorAll('.timeline-row')];
               return {
                 document: {
@@ -150,16 +163,37 @@ async def _capture_with_cdp(
                 },
                 card: rect(card),
                 timeline: rect(timeline),
+                styles: {
+                  body: visualStyle(body),
+                  card: visualStyle(card),
+                  timeline: visualStyle(timeline),
+                  axis: visualStyle(axis),
+                  axisTrack: visualStyle(axisTrack)
+                },
                 rows: rows.map((row) => {
                   const name = row.querySelector('.task-name');
+                  const agent = row.querySelector('.task-agent');
                   const task = row.querySelector('.task');
                   const plot = row.querySelector('.track');
                   const state = row.querySelector('.state');
+                  const stateLabel = row.querySelector('.state-label');
+                  const bar = row.querySelector('.bar');
                   const style = getComputedStyle(name);
                   return {
                     row: rect(row), task: rect(task), name: rect(name),
                     plot: rect(plot), state: rect(state),
                     text: name.textContent,
+                    styles: {
+                      task: visualStyle(task),
+                      name: visualStyle(name),
+                      agent: agent ? visualStyle(agent) : null,
+                      plot: visualStyle(plot),
+                      state: visualStyle(state),
+                      stateLabel: visualStyle(stateLabel),
+                      bar: bar ? visualStyle(bar) : null
+                    },
+                    bar: bar ? rect(bar) : null,
+                    barClass: bar ? bar.className : "",
                     nameMetrics: {
                       scrollWidth: name.scrollWidth,
                       scrollHeight: name.scrollHeight,

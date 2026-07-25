@@ -25,6 +25,7 @@ from core.renderer import (
     _scaled_right_crop_padding,
     DEFAULT_HTML_TEMPLATE,
     DEFAULT_TEXT_TEMPLATE,
+    SUBAGENT_TIMELINE_HTML_TEMPLATE,
     SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT,
     SUBAGENT_TIMELINE_MAX_ITEMS,
     SUBAGENT_TIMELINE_MAX_VIEWPORT_WIDTH,
@@ -866,6 +867,36 @@ class TestSubagentTimelineVisuals:
         assert view is not None
         assert view["layout"]["density"] == density
         assert len(view["gantt_items"]) == item_count
+
+    def test_gantt_template_uses_light_palette_tokens_and_semantic_status_styles(self):
+        palette = {
+            "timeline-page": "#eef2f6",
+            "timeline-shell": "#f8fafc",
+            "timeline-axis": "#e9eff6",
+            "timeline-row-odd": "#ffffff",
+            "timeline-row-even": "#f4f7fa",
+            "timeline-border": "#cbd5e1",
+            "timeline-text": "#243247",
+            "timeline-muted": "#607086",
+            "timeline-completed": "#6fae88",
+            "timeline-failed": "#d9878d",
+            "timeline-running": "#d8ad55",
+            "timeline-unknown": "#7f9dbe",
+        }
+        for token, value in palette.items():
+            assert f"--{token}: {value};" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+
+        assert "background: var(--timeline-page);" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert "background: var(--timeline-shell);" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert ".timeline-row:nth-child(odd) .track" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert ".timeline-row:nth-child(even) .track" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert ".bar.completed" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert ".bar.failed" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert ".bar.running" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert ".bar.unknown" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert ".bar.partial" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert "#0d1420" not in SUBAGENT_TIMELINE_HTML_TEMPLATE.lower()
+        assert "#111925" not in SUBAGENT_TIMELINE_HTML_TEMPLATE.lower()
 
     def test_gantt_dynamic_width_reaches_both_bounds(self):
         minimum = _timeline_event([_timeline_item(0, start=0, end=1000, name="短任务")])
