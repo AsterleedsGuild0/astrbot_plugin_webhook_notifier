@@ -18,6 +18,7 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 
 - 兼容社区 onebot post hook 产生的 `omp.session_stop` payload，展示会话、工作目录、模型、耗时与输入规模等常用信息。
 - `v1.1.0-rc.1` 候选支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
+- root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。
 - 支持纯文本与 HTML 图片卡片两种全局渲染模式。
 - HTML 渲染或图片发送异常时，可自动降级为纯文本通知。
 - 通过聊天命令为个人私聊或普通 QQ 群创建、轮换、撤销和删除 endpoint。
@@ -194,6 +195,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 - 私聊主动通知默认关闭；开启前核对 QQ 官方规则或 OneBot 实现的风控边界。
 - 社区 hook 可能发送截断 prompt、cwd、session 文件、模型和消息计数等元数据；部署前评估数据外发边界，提交 Issue、日志或截图时一并脱敏。
 - OpenCode 通知默认只发送 action 类别/计数；`full` 内容模式是显式 opt-in，虽有字段白名单和大小上限，仍可能外发问题、权限描述或目标路径。
+- Subagent timeline 只在 root `session_idle` 中可选发送，时间是相对 root busy→idle cycle 的观测偏移；卡片不展示匿名图引用、原始 Session ID、路径或工具参数，部分数据不会伪装成精确耗时。
 - `actionContentMode` 只控制 OpenCode Question/Permission 内容隐私，与服务端 `notification_mode` 正交；`focused` 只抑制成功完成的 subagent/auxiliary，unknown 会 fail-open 放行。
 - OpenCode Client 只发送匿名 `session.ref` 与 `session.scope`，不发送 `parentID`；部署必须服务端先升级、OpenCode Client 后重启。
 - adapter 实例的 `platform_id` 发生变化时，不要直接编辑数据文件，按 [rebind runbook](docs/platform-id-rebind-runbook.md) 离线处理。

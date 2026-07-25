@@ -51,6 +51,10 @@ const {
   _metadataDiagnosticSamples,
   _metadataSampleSessions,
   _assistantMetadata,
+  _timelineRuns,
+  _timelineParents,
+  _timelineCapacityDrops,
+  _buildSubagentTimeline,
   _cacheAssistantMetadata,
   _cachedAssistantMetadata,
   _enrichEvent,
@@ -93,6 +97,9 @@ beforeEach(() => {
   _sessionScopes.clear();
   _sessions.clear();
   _assistantMetadata.clear();
+  _timelineRuns.clear();
+  _timelineParents.clear();
+  _timelineCapacityDrops.clear();
   _resetMetadataDiagnostics();
 });
 
@@ -360,8 +367,8 @@ describe("_deriveSessionScope", () => {
     expect(_deriveSessionScope({ title: "foo-secondary" })).toBe("root");
   });
 
-  it("prioritises a non-empty parentID over an auxiliary-looking name", () => {
-    expect(_deriveSessionScope({ title: "smartfetch-secondary", parentID: "parent-1" })).toBe("subagent");
+  it("keeps explicit auxiliary names independent of parentID", () => {
+    expect(_deriveSessionScope({ title: "smartfetch-secondary", parentID: "parent-1" })).toBe("auxiliary");
   });
 });
 
@@ -3494,7 +3501,7 @@ describe("session scope contract", () => {
       child,
       { client: { session: { get: async () => ({ data: { title: "smartfetch-secondary", parentID: "parent" } }) } } } as any,
     );
-    expect(child.sessionScope).toBe("subagent");
+    expect(child.sessionScope).toBe("auxiliary");
   });
 
   it("uses unknown for API failure, non-object data, empty and invalid parentID", async () => {
@@ -3520,5 +3527,722 @@ describe("session scope contract", () => {
     _cleanupSessions();
     expect(_sessions.size).toBeLessThanOrEqual(500);
     expect(_sessionScopes.size).toBeLessThanOrEqual(500);
+  });
+});
+
+describe("subagent timeline collector/state/envelope", () => {
+  type SessionInfo = { title: string; parentID?: string | null; agent?: string };
+
+  async function makeTimelineServer(sessions: Record<string, SessionInfo>) {
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async ({ path: { id } }: any) => ({ data: sessions[id] ?? { title: "unknown" } }),
+        },
+      },
+    } as any, makeConfig());
+    return { hooks, bodies };
+  }
+
+  async function emit(
+    hooks: Hooks,
+    id: string,
+    type: "busy" | "idle" | "error",
+    sessionId: string,
+    at: number,
+  ): Promise<void> {
+    _setClockForTests(() => at);
+    if (type === "error") {
+      await hooks.event!({
+        event: { id, type: "session.error", properties: { sessionID: sessionId, error: { name: "ChildError" } } },
+      });
+      return;
+    }
+    await hooks.event!({
+      event: {
+        id,
+        type: "session.status",
+        properties: { sessionID: sessionId, status: { type } },
+      },
+    });
+  }
+
+  function rootBody(bodies: any[]): any {
+    return bodies.find((body) => body.event === "opencode.session_idle" && body.subagentTimeline);
+  }
+
+  function putRun(
+    ref: string,
+    cycle: number,
+    parentRef: string | undefined,
+    overrides: Partial<Record<string, unknown>> = {},
+  ): void {
+    const key = `${ref}:${cycle}`;
+    _timelineRuns.set(key, {
+      key,
+      ref,
+      parentRef,
+      scope: "subagent",
+      status: "completed",
+      startMs: 0,
+      endMs: 1,
+      startQuality: "observed",
+      endQuality: "observed",
+      cycle,
+      attempt: cycle,
+      lastAccessMs: 1,
+      ...overrides,
+    } as any);
+  }
+
+  function ownership(rootRef: string, rootCycle: number): { rootRef: string; rootCycle: number; rootRunKey: string } {
+    return { rootRef, rootCycle, rootRunKey: `${rootRef}:${rootCycle}` };
+  }
+
+  it("collects one direct child and keeps the child envelope independent", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      child: { title: "Child", parentID: "root", agent: "child-agent" },
+    });
+    await emit(hooks, "root-busy", "busy", "root", 1_000);
+    await emit(hooks, "child-busy", "busy", "child", 1_200);
+    await emit(hooks, "child-idle", "idle", "child", 1_500);
+    await emit(hooks, "root-idle", "idle", "root", 2_000);
+
+    const root = rootBody(bodies);
+    expect(root).toBeDefined();
+    expect(root.subagentTimeline).toMatchObject({
+      version: 1,
+      partial: false,
+      timeBasis: "root_cycle",
+      observedItemCount: 1,
+      displayedItemCount: 1,
+      truncated: false,
+    });
+    expect(root.subagentTimeline.items[0]).toMatchObject({
+      ref: await _hashSessionRef("child"),
+      parentRef: await _hashSessionRef("root"),
+      name: "Child",
+      agent: "child-agent",
+      status: "completed",
+      startOffsetMs: 200,
+      endOffsetMs: 500,
+      durationMs: 300,
+      timingQuality: "observed",
+      depth: 1,
+      attempt: 1,
+    });
+    const childRef = await _hashSessionRef("child");
+    const childBody = bodies.find((body) => body.session.ref === childRef);
+    expect(childBody).toBeDefined();
+    expect(childBody.subagentTimeline).toBeUndefined();
+  });
+
+  it("retains serial and overlapping children in stable start order", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      first: { title: "same", parentID: "root" },
+      second: { title: "same", parentID: "root" },
+    });
+    await emit(hooks, "r-busy", "busy", "root", 1_000);
+    await emit(hooks, "a-busy", "busy", "first", 1_100);
+    await emit(hooks, "a-idle", "idle", "first", 1_300);
+    await emit(hooks, "b-busy", "busy", "second", 1_200);
+    await emit(hooks, "b-idle", "idle", "second", 1_500);
+    await emit(hooks, "r-idle", "idle", "root", 2_000);
+
+    const items = rootBody(bodies).subagentTimeline.items;
+    expect(items.map((item: any) => item.name)).toEqual(["same", "same"]);
+    expect(items.map((item: any) => item.startOffsetMs)).toEqual([100, 200]);
+    expect(items[0].endOffsetMs).toBe(300);
+    expect(items[1].endOffsetMs).toBe(500);
+    expect(items[0].ref).not.toBe(items[1].ref);
+  });
+
+  it("resolves nested parents when the child arrives first and isolates a later root cycle", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      parent: { title: "Parent", parentID: "root" },
+      grandchild: { title: "Grandchild", parentID: "parent" },
+    });
+    await emit(hooks, "root-busy-1", "busy", "root", 1_000);
+    await emit(hooks, "grand-busy", "busy", "grandchild", 1_200);
+    await emit(hooks, "parent-busy", "busy", "parent", 1_300);
+    await emit(hooks, "grand-idle", "idle", "grandchild", 1_600);
+    await emit(hooks, "parent-idle", "idle", "parent", 1_700);
+    await emit(hooks, "root-idle-1", "idle", "root", 2_000);
+
+    const first = rootBody(bodies);
+    expect(first.subagentTimeline.items.map((item: any) => item.depth)).toEqual([2, 1]);
+    expect(first.subagentTimeline.items.map((item: any) => item.name)).toEqual(["Grandchild", "Parent"]);
+
+    await emit(hooks, "root-busy-2", "busy", "root", 3_000);
+    await emit(hooks, "root-idle-2", "idle", "root", 3_500);
+    const roots = bodies.filter((body) => body.subagentTimeline);
+    expect(roots).toHaveLength(2);
+    expect(roots[1].subagentTimeline.items).toEqual([]);
+    expect(roots[1].subagentTimeline.observedItemCount).toBe(0);
+  });
+
+  it("keeps a delayed old parent out of a child-before-parent later cycle and rebinds descendants", async () => {
+    let parentGetCount = 0;
+    let releaseOldParentIdle!: () => void;
+    const oldParentIdleGate = new Promise<void>((resolve) => { releaseOldParentIdle = resolve; });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async ({ path: { id } }: any) => {
+            if (id === "parent") {
+              parentGetCount++;
+              if (parentGetCount === 2) await oldParentIdleGate;
+              return { data: { title: "Parent", parentID: "root" } };
+            }
+            if (id === "grandchild") {
+              return { data: { title: "Grandchild", parentID: "parent" } };
+            }
+            return { data: { title: "Root", parentID: null } };
+          },
+        },
+      },
+    } as any, makeConfig());
+
+    await emit(hooks, "root-busy-1", "busy", "root", 1_000);
+    await emit(hooks, "parent-busy-1", "busy", "parent", 1_100);
+    const delayedOldParentIdle = emit(hooks, "parent-idle-1", "idle", "parent", 1_200);
+    await wait(0);
+    await emit(hooks, "root-idle-1", "idle", "root", 2_000);
+
+    await emit(hooks, "root-busy-2", "busy", "root", 3_000);
+    await emit(hooks, "grandchild-busy-2", "busy", "grandchild", 3_100);
+    await emit(hooks, "parent-busy-2", "busy", "parent", 3_150);
+    await emit(hooks, "grandchild-idle-2", "idle", "grandchild", 3_200);
+
+    releaseOldParentIdle();
+    await delayedOldParentIdle;
+    await emit(hooks, "parent-idle-2", "idle", "parent", 3_300);
+    await emit(hooks, "root-idle-2", "idle", "root", 4_000);
+
+    const roots = bodies.filter((body) => body.subagentTimeline);
+    expect(roots).toHaveLength(2);
+    const secondRoot = roots[1];
+    expect(secondRoot.subagentTimeline).toMatchObject({
+      partial: false,
+      partialReasons: [],
+      observedItemCount: 2,
+      displayedItemCount: 2,
+    });
+    expect(secondRoot.subagentTimeline.items.map((item: any) => item.name)).toEqual([
+      "Grandchild",
+      "Parent",
+    ]);
+    expect(secondRoot.subagentTimeline.items.map((item: any) => item.depth)).toEqual([2, 1]);
+    expect(secondRoot.subagentTimeline.items.map((item: any) => item.parentRef)).toEqual([
+      await _hashSessionRef("parent"),
+      await _hashSessionRef("root"),
+    ]);
+    expect(roots[0].subagentTimeline.items.map((item: any) => item.name)).toEqual(["Parent"]);
+    expect(roots[0].subagentTimeline.items.map((item: any) => item.name)).not.toContain("Grandchild");
+  });
+
+  it("keeps adjacent same-root cycles separated", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      first: { title: "first-cycle", parentID: "root" },
+      second: { title: "second-cycle", parentID: "root" },
+    });
+    await emit(hooks, "r1-busy", "busy", "root", 1_000);
+    await emit(hooks, "c1-busy", "busy", "first", 1_100);
+    await emit(hooks, "c1-idle", "idle", "first", 1_200);
+    await emit(hooks, "r1-idle", "idle", "root", 2_000);
+    await emit(hooks, "r2-busy", "busy", "root", 3_000);
+    await emit(hooks, "c2-busy", "busy", "second", 3_100);
+    await emit(hooks, "c2-idle", "idle", "second", 3_200);
+    await emit(hooks, "r2-idle", "idle", "root", 4_000);
+
+    const roots = bodies.filter((body) => body.subagentTimeline);
+    expect(roots).toHaveLength(2);
+    expect(roots[0].subagentTimeline.items.map((item: any) => item.name)).toEqual(["first-cycle"]);
+    expect(roots[1].subagentTimeline.items.map((item: any) => item.name)).toEqual(["second-cycle"]);
+  });
+
+  it("uses the frozen root claim when a new cycle starts during enrichment", async () => {
+    let rootGetCount = 0;
+    let releaseIdle!: () => void;
+    const idleGate = new Promise<void>((resolve) => { releaseIdle = resolve; });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async ({ path: { id } }: any) => {
+            if (id === "root") {
+              rootGetCount++;
+              if (rootGetCount === 2) await idleGate;
+              return { data: { title: "Root", parentID: null } };
+            }
+            return { data: { title: id, parentID: "root" } };
+          },
+        },
+      },
+    } as any, makeConfig());
+
+    await emit(hooks, "r1-busy", "busy", "root", 1_000);
+    await emit(hooks, "c1-busy", "busy", "child-old", 1_100);
+    await emit(hooks, "c1-idle", "idle", "child-old", 1_200);
+    const oldIdle = emit(hooks, "r1-idle", "idle", "root", 2_000);
+    await wait(0);
+    await emit(hooks, "r2-busy", "busy", "root", 3_000);
+    await emit(hooks, "c2-busy", "busy", "child-new", 3_100);
+    await emit(hooks, "c2-idle", "idle", "child-new", 3_200);
+    releaseIdle();
+    await oldIdle;
+    await emit(hooks, "r2-idle", "idle", "root", 4_000);
+
+    const roots = bodies.filter((body) => body.subagentTimeline);
+    expect(roots).toHaveLength(2);
+    expect(roots[0].subagentTimeline.items.map((item: any) => item.name)).toEqual(["child-old"]);
+    expect(roots[1].subagentTimeline.items.map((item: any) => item.name)).toEqual(["child-new"]);
+  });
+
+  it("does not let an enriched old error fail a newer cycle", async () => {
+    let rootGetCount = 0;
+    let releaseError!: () => void;
+    const errorGate = new Promise<void>((resolve) => { releaseError = resolve; });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async ({ path: { id } }: any) => {
+            if (id === "root") {
+              rootGetCount++;
+              if (rootGetCount === 2) await errorGate;
+              return { data: { title: "Root", parentID: null } };
+            }
+            return { data: { title: id, parentID: "root" } };
+          },
+        },
+      },
+    } as any, makeConfig());
+
+    await emit(hooks, "r1-busy", "busy", "root", 1_000);
+    const oldError = emit(hooks, "r1-error", "error", "root", 2_000);
+    await wait(0);
+    await emit(hooks, "r2-busy", "busy", "root", 3_000);
+    releaseError();
+    await oldError;
+    await emit(hooks, "r2-idle", "idle", "root", 4_000);
+    expect(bodies.filter((body) => body.event === "opencode.session_idle")).toHaveLength(1);
+    expect(bodies.filter((body) => body.event === "opencode.session_error")).toHaveLength(1);
+  });
+
+  it("excludes auxiliary sessions and preserves same-name refs", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      auxiliary: { title: "smartfetch-secondary", parentID: "root" },
+      sameA: { title: "Duplicate", parentID: "root" },
+      sameB: { title: "Duplicate", parentID: "root" },
+    });
+    await emit(hooks, "root-busy", "busy", "root", 1_000);
+    await emit(hooks, "aux-busy", "busy", "auxiliary", 1_100);
+    await emit(hooks, "aux-idle", "idle", "auxiliary", 1_200);
+    await emit(hooks, "a-busy", "busy", "sameA", 1_300);
+    await emit(hooks, "a-idle", "idle", "sameA", 1_400);
+    await emit(hooks, "b-busy", "busy", "sameB", 1_500);
+    await emit(hooks, "b-idle", "idle", "sameB", 1_600);
+    await emit(hooks, "root-idle", "idle", "root", 2_000);
+
+    const items = rootBody(bodies).subagentTimeline.items;
+    expect(items).toHaveLength(2);
+    expect(items.map((item: any) => item.name)).toEqual(["Duplicate", "Duplicate"]);
+    expect(JSON.stringify(items)).not.toContain("smartfetch-secondary");
+  });
+
+  it("isolates interleaved descendant graphs for two roots", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      rootA: { title: "Root A", parentID: null },
+      rootB: { title: "Root B", parentID: null },
+      childA: { title: "child-a", parentID: "rootA" },
+      childB: { title: "child-b", parentID: "rootB" },
+    });
+    await emit(hooks, "a-busy", "busy", "rootA", 1_000);
+    await emit(hooks, "b-busy", "busy", "rootB", 1_050);
+    await emit(hooks, "ca-busy", "busy", "childA", 1_100);
+    await emit(hooks, "cb-busy", "busy", "childB", 1_150);
+    await emit(hooks, "ca-idle", "idle", "childA", 1_300);
+    await emit(hooks, "b-idle", "idle", "rootB", 1_400);
+    await emit(hooks, "cb-idle", "idle", "childB", 1_450);
+    await emit(hooks, "a-idle", "idle", "rootA", 1_500);
+
+    const roots = bodies.filter((body) => body.subagentTimeline);
+    expect(roots).toHaveLength(2);
+    const rootARef = await _hashSessionRef("rootA");
+    const rootBRef = await _hashSessionRef("rootB");
+    const rootA = roots.find((body) => body.session.ref === rootARef);
+    const rootB = roots.find((body) => body.session.ref === rootBRef);
+    expect(rootA?.subagentTimeline.items.map((item: any) => item.name)).toEqual(["child-a"]);
+    expect(rootB?.subagentTimeline.items.map((item: any) => item.name)).toEqual(["child-b"]);
+  });
+
+  it("does not let an unanchored broken chain pollute an overlapping root", async () => {
+    const rootARef = await _hashSessionRef("probe-root-a");
+    const rootBRef = await _hashSessionRef("probe-root-b");
+    const parentBRef = await _hashSessionRef("probe-parent-b");
+    const descendantBRef = await _hashSessionRef("probe-descendant-b");
+
+    putRun(rootARef, 1, undefined, { scope: "root", startMs: 1_000, endMs: 2_000 });
+    putRun(rootBRef, 1, undefined, { scope: "root", startMs: 1_100, endMs: 2_100 });
+    putRun(parentBRef, 1, rootBRef, {
+      startMs: 1_200,
+      endMs: 1_400,
+      rootOwnership: ownership(rootBRef, 1),
+    });
+    putRun(descendantBRef, 1, parentBRef, {
+      status: "running",
+      startMs: 1_300,
+      endMs: undefined,
+      endQuality: undefined,
+      rootOwnership: ownership(rootBRef, 1),
+    });
+
+    _timelineRuns.delete(`${parentBRef}:1`);
+    _timelineParents.delete(`${parentBRef}:1`);
+
+    const rootATimeline = _buildSubagentTimeline(rootARef, 1, 1_000, 2_000);
+    expect(rootATimeline.partial).toBeFalse();
+    expect(rootATimeline.partialReasons).toEqual([]);
+    expect(rootATimeline.items).toEqual([]);
+
+    const rootBTimeline = _buildSubagentTimeline(rootBRef, 1, 1_100, 2_100);
+    expect(rootBTimeline.partial).toBeTrue();
+    expect(rootBTimeline.partialReasons).toContain("missing_parent");
+  });
+
+  it("silently skips an orphan whose root ownership is completely unknown", async () => {
+    const rootRef = await _hashSessionRef("unknown-root");
+    const orphanRef = await _hashSessionRef("unknown-orphan");
+    putRun(rootRef, 1, undefined, { scope: "root", startMs: 1_000, endMs: 2_000 });
+    putRun(orphanRef, 1, undefined, { startMs: 1_100, endMs: 1_900 });
+
+    const timeline = _buildSubagentTimeline(rootRef, 1, 1_000, 2_000);
+    expect(timeline.partial).toBeFalse();
+    expect(timeline.partialReasons).toEqual([]);
+    expect(timeline.items).toEqual([]);
+  });
+
+  it("reports completed, failed, running and unknown states with partial timing", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      completed: { title: "completed", parentID: "root" },
+      failed: { title: "failed", parentID: "root" },
+      running: { title: "running", parentID: "root" },
+      unknown: { title: "unknown", parentID: "root" },
+      missingStart: { title: "missing-start", parentID: "root" },
+    });
+    await emit(hooks, "r-busy", "busy", "root", 1_000);
+    await emit(hooks, "c-busy", "busy", "completed", 1_100);
+    await emit(hooks, "c-idle", "idle", "completed", 1_200);
+    await emit(hooks, "f-busy", "busy", "failed", 1_300);
+    await emit(hooks, "f-error", "error", "failed", 1_400);
+    await emit(hooks, "running-busy", "busy", "running", 1_500);
+    await emit(hooks, "unknown-busy", "busy", "unknown", 1_600);
+    const unknownRef = await _hashSessionRef("unknown");
+    const unknownRun = [..._timelineRuns.values()].find((run: any) => run.ref === unknownRef)! as any;
+    unknownRun.status = "unknown";
+    await emit(hooks, "missing-busy", "busy", "missingStart", 1_700);
+    await emit(hooks, "missing-idle", "idle", "missingStart", 1_800);
+    const missingRef = await _hashSessionRef("missingStart");
+    const missingRun = [..._timelineRuns.values()].find((run: any) => run.ref === missingRef)! as any;
+    missingRun.startMs = undefined;
+    missingRun.startQuality = undefined;
+    await emit(hooks, "r-idle", "idle", "root", 2_000);
+
+    const items = rootBody(bodies).subagentTimeline.items;
+    expect(items.map((item: any) => item.status).sort()).toEqual([
+      "completed",
+      "completed",
+      "failed",
+      "running",
+      "unknown",
+    ]);
+    const partial = items.find((item: any) => item.status === "running");
+    expect(partial.timingQuality).toBe("partial");
+    expect(rootBody(bodies).subagentTimeline.partialReasons).toContain("missing_end");
+    expect(rootBody(bodies).subagentTimeline.partialReasons).toContain("missing_start");
+  });
+
+  it("uses fallback timing only when explicitly available and does not replace observed endpoints", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      child: { title: "fallback-child", parentID: "root" },
+    });
+    await emit(hooks, "r-busy", "busy", "root", 1_000);
+    await emit(hooks, "c-busy", "busy", "child", 1_100);
+    await emit(hooks, "c-idle", "idle", "child", 1_500);
+    const childRef = await _hashSessionRef("child");
+    const childRun = [..._timelineRuns.values()].find((run: any) => run.ref === childRef)! as any;
+    childRun.startMs = 1_250;
+    childRun.startQuality = "fallback";
+    childRun.endMs = 1_500;
+    childRun.endQuality = "observed";
+    await emit(hooks, "r-idle", "idle", "root", 2_000);
+
+    const item = rootBody(bodies).subagentTimeline.items[0];
+    expect(item).toMatchObject({ startOffsetMs: 250, endOffsetMs: 500, timingQuality: "fallback" });
+  });
+
+  it("uses strict overlap for complete intervals and omits clamped duration", async () => {
+    const rootRef = await _hashSessionRef("root-manual");
+    putRun(rootRef, 1, undefined, { scope: "root", startMs: 1_000, endMs: 2_000 });
+    const clampedRef = await _hashSessionRef("clamped");
+    putRun(clampedRef, 1, rootRef, { startMs: 900, endMs: 2_100 });
+    const boundaryRef = await _hashSessionRef("boundary");
+    putRun(boundaryRef, 1, rootRef, { startMs: 500, endMs: 1_000 });
+    const outsideRef = await _hashSessionRef("outside");
+    putRun(outsideRef, 1, rootRef, { startMs: 300, endMs: 899 });
+
+    const timeline = _buildSubagentTimeline(rootRef, 1, 1_000, 2_000);
+    expect(timeline.items.map((item: any) => item.ref)).toContain(clampedRef);
+    expect(timeline.items.map((item: any) => item.ref)).not.toContain(boundaryRef);
+    expect(timeline.items.map((item: any) => item.ref)).not.toContain(outsideRef);
+    expect(timeline.partialReasons).toContain("clamped");
+    expect(timeline.items.find((item: any) => item.ref === clampedRef)).toMatchObject({
+      startOffsetMs: 0,
+      endOffsetMs: 1_000,
+      timingQuality: "partial",
+    });
+    expect(timeline.items.find((item: any) => item.ref === clampedRef).durationMs).toBeUndefined();
+
+    const nextRootRef = await _hashSessionRef("next-root-manual");
+    putRun(nextRootRef, 2, undefined, { scope: "root", startMs: 3_000, endMs: 4_000 });
+    const previousCycleChild = await _hashSessionRef("previous-cycle-child");
+    putRun(previousCycleChild, 1, nextRootRef, { startMs: 2_000, endMs: 3_000 });
+    const nextTimeline = _buildSubagentTimeline(nextRootRef, 2, 3_000, 4_000);
+    expect(nextTimeline.items.map((item: any) => item.ref)).not.toContain(previousCycleChild);
+  });
+
+  it("marks missing parents, cycles, and depth over eight as invalid without leaking IDs", async () => {
+    const rootRef = await _hashSessionRef("graph-root");
+    putRun(rootRef, 1, undefined, { scope: "root" });
+    const missingRef = await _hashSessionRef("missing-parent");
+    putRun(missingRef, 1, undefined, { startMs: 100, endMs: 200, rootOwnership: ownership(rootRef, 1) });
+    const cycleA = await _hashSessionRef("cycle-a");
+    const cycleB = await _hashSessionRef("cycle-b");
+    putRun(cycleA, 1, cycleB, { rootOwnership: ownership(rootRef, 1) });
+    putRun(cycleB, 1, cycleA, { rootOwnership: ownership(rootRef, 1) });
+    let previous = rootRef;
+    for (let index = 1; index <= 9; index++) {
+      const ref = await _hashSessionRef(`deep-${index}`);
+      putRun(ref, 1, previous, {
+        startMs: 100 + index,
+        endMs: 200 + index,
+        rootOwnership: ownership(rootRef, 1),
+      });
+      previous = ref;
+    }
+
+    const timeline = _buildSubagentTimeline(rootRef, 1, 0, 1_000);
+    expect(timeline.items).toHaveLength(8);
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toContain("missing_parent");
+    expect(timeline.partialReasons).toContain("invalid_parent_graph");
+    expect(JSON.stringify(timeline)).not.toContain("graph-root");
+    expect(JSON.stringify(timeline)).not.toContain("cycle-a");
+  });
+
+  it("stably truncates at 64 items and the 24KiB UTF-8 timeline budget", async () => {
+    const rootRef = await _hashSessionRef("cap-root");
+    putRun(rootRef, 1, undefined, { scope: "root", startMs: 0, endMs: 10_000 });
+    for (let index = 0; index < 70; index++) {
+      const ref = await _hashSessionRef(`cap-child-${index}`);
+      putRun(ref, 1, rootRef, {
+        startMs: index * 10,
+        endMs: index * 10 + 5,
+        name: "x".repeat(200),
+        agent: "a".repeat(128),
+      });
+    }
+    const timeline = _buildSubagentTimeline(rootRef, 1, 0, 10_000);
+    expect(timeline.observedItemCount).toBe(70);
+    expect(timeline.displayedItemCount).toBeLessThanOrEqual(64);
+    expect(timeline.truncated).toBeTrue();
+    expect(timeline.partialReasons).toContain("truncated");
+    expect(new TextEncoder().encode(JSON.stringify(timeline)).length).toBeLessThanOrEqual(24 * 1024);
+    expect(timeline.items.map((item: any) => item.startOffsetMs)).toEqual(
+      [...timeline.items].map((item: any) => item.startOffsetMs).sort((a, b) => a - b),
+    );
+  });
+
+  it("consumes exact-cycle capacity markers, excludes root markers, and isolates roots", async () => {
+    const rootARef = await _hashSessionRef("marker-root-a");
+    const rootBRef = await _hashSessionRef("marker-root-b");
+    const ownerA = ownership(rootARef, 1);
+    const ownerB = ownership(rootBRef, 1);
+
+    _timelineCapacityDrops.set(`${rootARef}:1`, {
+      key: `${rootARef}:1`,
+      ref: rootARef,
+      cycle: 1,
+      scope: "root",
+      rootOwnership: ownerA,
+      startMs: 0,
+      lastAccessMs: 1,
+    } as any);
+    _timelineCapacityDrops.set("child-drop-a:1", {
+      key: "child-drop-a:1",
+      ref: "child-drop-a",
+      cycle: 1,
+      parentRef: rootARef,
+      scope: "subagent",
+      rootOwnership: ownerA,
+      startMs: 100,
+      lastAccessMs: 1,
+    } as any);
+    _timelineCapacityDrops.set(`${rootBRef}:1`, {
+      key: `${rootBRef}:1`,
+      ref: rootBRef,
+      cycle: 1,
+      scope: "root",
+      rootOwnership: ownerB,
+      startMs: 0,
+      lastAccessMs: 1,
+    } as any);
+
+    const cycleOne = _buildSubagentTimeline(rootARef, 1, 0, 1_000);
+    expect(cycleOne.partial).toBeTrue();
+    expect(cycleOne.truncated).toBeTrue();
+    expect(cycleOne.partialReasons).toEqual(["truncated"]);
+    expect(cycleOne.observedItemCount).toBe(1);
+    expect(cycleOne.displayedItemCount).toBe(0);
+    expect(_timelineCapacityDrops.has(`${rootARef}:1`)).toBeFalse();
+    expect(_timelineCapacityDrops.has("child-drop-a:1")).toBeFalse();
+    expect(_timelineCapacityDrops.has(`${rootBRef}:1`)).toBeTrue();
+
+    const cycleTwo = _buildSubagentTimeline(rootARef, 2, 1_000, 2_000);
+    expect(cycleTwo.partial).toBeFalse();
+    expect(cycleTwo.truncated).toBeFalse();
+    expect(cycleTwo.observedItemCount).toBe(0);
+    expect(cycleTwo.displayedItemCount).toBe(0);
+
+    const rootBTimeline = _buildSubagentTimeline(rootBRef, 1, 0, 1_000);
+    expect(rootBTimeline.partial).toBeFalse();
+    expect(rootBTimeline.observedItemCount).toBe(0);
+    expect(rootBTimeline.displayedItemCount).toBe(0);
+    expect(_timelineCapacityDrops.size).toBe(0);
+  });
+
+  it("recovers from a full capacity with a bounded truncated marker", async () => {
+    _setClockForTests(() => 1_000);
+    for (let index = 0; index < 4_096; index++) {
+      const ref = `full-${index}`;
+      _timelineRuns.set(`${ref}:1`, {
+        key: `${ref}:1`,
+        ref,
+        scope: "root",
+        status: "running",
+        startMs: 900,
+        cycle: 1,
+        attempt: 1,
+        lastAccessMs: 1_000,
+      } as any);
+    }
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      child: { title: "Child", parentID: "root" },
+    });
+    await emit(hooks, "root-busy", "busy", "root", 1_000);
+    await emit(hooks, "root-idle", "idle", "root", 1_100);
+    const firstRoot = rootBody(bodies);
+    expect(firstRoot).toBeDefined();
+    expect(firstRoot.subagentTimeline).toMatchObject({
+      partial: false,
+      truncated: false,
+      partialReasons: [],
+      observedItemCount: 0,
+      displayedItemCount: 0,
+    });
+    expect(firstRoot.event).toBe("opencode.session_idle");
+    expect(_timelineCapacityDrops.size).toBeLessThanOrEqual(256);
+
+    _setClockForTests(() => 1_000 + 15 * 60 * 1000 + 1);
+    _cleanupSessions();
+    expect(_timelineRuns.size).toBe(0);
+    await emit(hooks, "root2-busy", "busy", "root", 1_000 + 15 * 60 * 1000 + 2);
+    await emit(hooks, "child2-busy", "busy", "child", 1_000 + 15 * 60 * 1000 + 3);
+    await emit(hooks, "child2-idle", "idle", "child", 1_000 + 15 * 60 * 1000 + 4);
+    await emit(hooks, "root2-idle", "idle", "root", 1_000 + 15 * 60 * 1000 + 5);
+    const roots = bodies.filter((body) => body.subagentTimeline);
+    expect(roots).toHaveLength(2);
+    expect(roots[1].subagentTimeline.items.map((item: any) => item.name)).toEqual(["Child"]);
+  });
+
+  it("protects fresh unconsumed runs while reclaiming stale running runs", () => {
+    const now = 15 * 60 * 1000 + 10_000;
+    _setClockForTests(() => now);
+    const protectedKey = "protected:1";
+    _timelineRuns.set(protectedKey, {
+      key: protectedKey,
+      ref: "protected",
+      scope: "subagent",
+      status: "completed",
+      startMs: 1,
+      endMs: 2,
+      cycle: 1,
+      attempt: 1,
+      lastAccessMs: now,
+    } as any);
+    const staleKey = "stale:1";
+    _timelineRuns.set(staleKey, {
+      key: staleKey,
+      ref: "stale",
+      scope: "subagent",
+      status: "running",
+      startMs: 1,
+      cycle: 1,
+      attempt: 1,
+      lastAccessMs: 1,
+    } as any);
+    _cleanupSessions();
+    expect(_timelineRuns.has(protectedKey)).toBeTrue();
+    expect(_timelineRuns.has(staleKey)).toBeFalse();
+  });
+
+  it("does not carry timeline on actions/errors and cleanup keeps child state before root completion", async () => {
+    const { hooks, bodies } = await makeTimelineServer({
+      root: { title: "Root", parentID: null },
+      child: { title: "Child", parentID: "root" },
+    });
+    await emit(hooks, "r-busy", "busy", "root", 1_000);
+    await emit(hooks, "c-busy", "busy", "child", 1_100);
+    _cleanupSessions();
+    const childRef = await _hashSessionRef("child");
+    expect([..._timelineRuns.values()].some((run: any) => run.ref === childRef)).toBeTrue();
+
+    await hooks.event!({
+      event: { id: "action", type: "question.asked", properties: { sessionID: "root", questions: [{ question: "safe" }] } },
+    });
+    await wait(200);
+    expect(bodies.find((body) => body.event === "opencode.question_asked")?.subagentTimeline).toBeUndefined();
+
+    await emit(hooks, "r-idle", "idle", "root", 2_000);
+    const root = rootBody(bodies);
+    expect(root.subagentTimeline.items).toHaveLength(1);
+    expect(root.error).toBeUndefined();
   });
 });

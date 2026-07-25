@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 from aiohttp import web
 
 from astrbot.api import logger
 
 from .display import DEFAULT_DISPLAY_TIMEZONE, create_display_context
+from .idempotency import (
+    ClaimResult,
+    ClaimStatus,
+    IdempotencyStore,
+    make_idempotency_key,
+)
 from .models import DisplayContext, EndpointRecord, NormalizedEvent, ServerConfig
 from .notification_policy import normalize_notification_mode, should_notify
 from .providers import ProviderError, ProviderRegistry, ProviderRegistryError
@@ -17,12 +23,13 @@ from .renderer import (
     DEFAULT_HTML_TEMPLATE,
     render_html_data,
     render_html_template,
+    render_subagent_timeline_html,
     render_text_default,
     trim_viewport_whitespace,
     validate_image_result,
 )
 from .template_registry import BUILT_IN_ID, ActiveTemplate, TemplateRegistry
-from .sender import Sender
+from .sender import DeliveryAttemptTracker, Sender
 
 DEFAULT_RENDER_OPTIONS: dict[str, Any] = {
     "full_page": True,
@@ -34,6 +41,54 @@ DEFAULT_RENDER_OPTIONS: dict[str, Any] = {
     "device_scale_factor_level": "high",
     "wait_until": "domcontentloaded",
 }
+
+_RENDER_FAILURE_MESSAGES: dict[str, str] = {
+    "render_failed": "HTML 图片渲染失败",
+    "html_render_not_available": "HTML 渲染不可用",
+    "template_render_failed": "HTML 模板渲染失败",
+    "html_render_failed": "HTML 图片截图失败",
+    "image_validation_failed": "图片结果校验失败",
+    "image_trim_failed": "图片裁切失败",
+    "timeline_render_failed": "时间线图片渲染失败",
+    "timeline_template_render_failed": "时间线模板渲染失败",
+    "timeline_html_render_failed": "时间线图片截图失败",
+    "timeline_image_validation_failed": "时间线图片校验失败",
+    "timeline_image_trim_failed": "时间线图片裁切失败",
+    "send_image_failed": "发送图片失败",
+}
+
+
+def _safe_failure_reason(error: BaseException, default: str = "render_failed") -> str:
+    reason = getattr(error, "reason", None)
+    if isinstance(reason, str) and reason in _RENDER_FAILURE_MESSAGES:
+        return reason
+    return default
+
+
+def _safe_exception_type(error: BaseException) -> str:
+    exception_type = getattr(error, "exception_type", None)
+    if isinstance(exception_type, str) and exception_type:
+        return exception_type
+    return type(error).__name__
+
+
+def _safe_failure_message(reason: str) -> str:
+    return _RENDER_FAILURE_MESSAGES.get(
+        reason, _RENDER_FAILURE_MESSAGES["render_failed"]
+    )
+
+
+def _raise_render_failure(
+    reason: str,
+    message: str,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    error = RuntimeError(message)
+    error.reason = reason  # type: ignore[attr-defined]
+    error.exception_type = type(cause).__name__ if cause is not None else "RuntimeError"  # type: ignore[attr-defined]
+    if cause is None:
+        raise error
+    raise error from cause
 
 
 class WebhookServer:
@@ -56,6 +111,7 @@ class WebhookServer:
         template_registry: TemplateRegistry | None = None,
         provider_registry: ProviderRegistry | None = None,
         display_context: DisplayContext | None = None,
+        idempotency_store: IdempotencyStore | None = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -68,6 +124,7 @@ class WebhookServer:
             self._plugin_config.get("display_timezone", DEFAULT_DISPLAY_TIMEZONE),
             warn=logger.warning,
         )
+        self._idempotency_store = idempotency_store or IdempotencyStore()
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -126,12 +183,18 @@ class WebhookServer:
             return await self._process_request(request, request_id)
         except web.HTTPException:
             raise
-        except Exception as e:
+        except Exception as exc:
             logger.error(
-                f"[WebhookNotifier] request_id={request_id} 未预期的处理错误: {e}"
+                f"[WebhookNotifier] request_id={request_id} "
+                "reason=internal_error "
+                f"type={type(exc).__name__}"
             )
             return self._error_response(
-                500, "internal_error", str(e), request_id, retryable=True
+                500,
+                "internal_error",
+                "服务器内部错误",
+                request_id,
+                retryable=True,
             )
 
     # ─── 内部辅助方法 ────────────────────────────────────────
@@ -211,9 +274,9 @@ class WebhookServer:
         # 3. 读取 body（带大小限制）
         try:
             body_bytes = await request.read()
-        except Exception as e:
+        except Exception:
             return self._error_response(
-                400, "invalid_json", f"读取请求体失败: {e}", request_id
+                400, "invalid_json", "读取请求体失败", request_id
             )
 
         if len(body_bytes) > self._config.body_limit_bytes:
@@ -227,9 +290,9 @@ class WebhookServer:
         # 4. 解析 JSON
         try:
             body = json.loads(body_bytes)
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
             return self._error_response(
-                400, "invalid_json", f"JSON 解析失败: {e}", request_id
+                400, "invalid_json", "JSON 解析失败", request_id
             )
 
         if not isinstance(body, dict):
@@ -334,8 +397,12 @@ class WebhookServer:
             f"event={event.event}"
         )
 
-        # 9. 解析 payload 中的 target alias
-        payload_target_alias = body.get("target_alias") or body.get("target")
+        # 9. 解析 payload 中的 target alias。优先使用明确的兼容字段，不能用
+        # truthiness fallback，否则空值会悄悄改成另一个路由选择器。
+        if "target_alias" in body:
+            payload_target_alias = body["target_alias"]
+        else:
+            payload_target_alias = body.get("target")
 
         return await self._dispatch_event(
             event, endpoint, payload_target_alias, request_id
@@ -349,6 +416,25 @@ class WebhookServer:
         request_id: str,
     ) -> web.Response:
         """应用发送策略后按全局渲染模式处理已标准化事件。"""
+        if target_alias is not None and (
+            not isinstance(target_alias, str) or not target_alias
+        ):
+            return self._error_response(
+                400,
+                "invalid_target_alias",
+                "target_alias 必须是 null 或非空字符串",
+                request_id,
+            )
+        if target_alias is not None and not any(
+            target.name == target_alias for target in endpoint.targets
+        ):
+            return self._error_response(
+                400,
+                "invalid_target_alias",
+                "target_alias 未绑定到当前 endpoint",
+                request_id,
+            )
+
         notification_mode = self._get_notification_mode()
         if not should_notify(
             mode=notification_mode,
@@ -373,7 +459,6 @@ class WebhookServer:
             f"event={event.event}"
         )
         render_mode = self._get_render_mode()
-        fallback_to_text = self._get_fallback_to_text()
 
         skipped_results = self._sender.preflight_private_notification_policy(
             endpoint, target_alias
@@ -397,7 +482,104 @@ class WebhookServer:
                 rendered=False,
             )
 
-        # 13. 按模式分支
+        # 13. 过滤与私聊 preflight 之后才进入幂等 single-flight。
+        if not event.id:
+            return await self._dispatch_owned_event(
+                event,
+                endpoint,
+                target_alias,
+                request_id,
+                claim=None,
+            )
+
+        key = make_idempotency_key(
+            endpoint_provider=endpoint.provider,
+            endpoint_path=endpoint.path,
+            event_name=event.event,
+            event_id=event.id,
+            session_scope=self._session_scope_value(event),
+            target_alias=target_alias,
+        )
+        claim = self._idempotency_store.claim(key)
+        if claim.status is ClaimStatus.CAPACITY:
+            self._log_idempotency(request_id, "capacity")
+            return self._error_response(
+                503,
+                "idempotency_capacity",
+                "幂等执行容量暂时耗尽",
+                request_id,
+                retryable=True,
+            )
+        if claim.status is ClaimStatus.REPLAY:
+            self._log_idempotency(request_id, "replayed")
+            return self._build_idempotency_skip_response(request_id, event)
+        if claim.status is ClaimStatus.WAITER:
+            self._log_idempotency(request_id, "waited")
+            claim = await self._idempotency_store.wait(claim)
+            if claim.status is ClaimStatus.REPLAY:
+                self._log_idempotency(request_id, "replayed")
+                return self._build_idempotency_skip_response(request_id, event)
+            if claim.status is ClaimStatus.CAPACITY:
+                self._log_idempotency(request_id, "capacity")
+                return self._error_response(
+                    503,
+                    "idempotency_capacity",
+                    "幂等执行容量暂时耗尽",
+                    request_id,
+                    retryable=True,
+                )
+
+        self._log_idempotency(request_id, "claimed")
+        return await self._dispatch_owned_event(
+            event,
+            endpoint,
+            target_alias,
+            request_id,
+            claim=claim,
+        )
+
+    async def _dispatch_owned_event(
+        self,
+        event: NormalizedEvent,
+        endpoint: EndpointRecord,
+        target_alias: str | None,
+        request_id: str,
+        *,
+        claim: ClaimResult | None,
+    ) -> web.Response:
+        tracker = DeliveryAttemptTracker() if claim is not None else None
+        try:
+            response = await self._dispatch_render_send(
+                event,
+                endpoint,
+                target_alias,
+                request_id,
+                tracker,
+            )
+        except BaseException:
+            if claim is not None:
+                self._finish_idempotency_claim(
+                    claim, tracker, request_id=request_id, response=None
+                )
+            raise
+
+        if claim is not None:
+            self._finish_idempotency_claim(
+                claim, tracker, request_id=request_id, response=response
+            )
+        return response
+
+    async def _dispatch_render_send(
+        self,
+        event: NormalizedEvent,
+        endpoint: EndpointRecord,
+        target_alias: str | None,
+        request_id: str,
+        tracker: DeliveryAttemptTracker | None,
+    ) -> web.Response:
+        """进入渲染/发送分支；调用方负责 owner 终态。"""
+        render_mode = self._get_render_mode()
+        fallback_to_text = self._get_fallback_to_text()
         if render_mode == "html_image":
             return await self._handle_html_image(
                 event,
@@ -405,6 +587,7 @@ class WebhookServer:
                 target_alias,
                 request_id,
                 fallback_to_text,
+                tracker,
             )
         else:
             return await self._handle_text(
@@ -412,7 +595,67 @@ class WebhookServer:
                 endpoint,
                 target_alias,
                 request_id,
+                tracker,
             )
+
+    async def _send_with_attempt_tracker(
+        self,
+        method_name: str,
+        *args: Any,
+        tracker: DeliveryAttemptTracker | None,
+    ) -> list[dict[str, Any]]:
+        method = getattr(self._sender, method_name)
+        if tracker is None:
+            return await method(*args)
+        return await method(*args, delivery_attempt_callback=tracker)
+
+    def _finish_idempotency_claim(
+        self,
+        claim: ClaimResult,
+        tracker: DeliveryAttemptTracker | None,
+        *,
+        request_id: str,
+        response: web.Response | None,
+    ) -> None:
+        attempted = tracker is not None and tracker.attempted
+        if attempted:
+            if self._idempotency_store.finalize(claim):
+                self._log_idempotency(request_id, "finalized")
+        else:
+            if self._idempotency_store.release(claim):
+                self._log_idempotency(request_id, "released")
+
+    def _log_idempotency(self, request_id: str, state: str) -> None:
+        logger.info(f"[WebhookNotifier] request_id={request_id} idempotency={state}")
+
+    def _build_idempotency_skip_response(
+        self,
+        request_id: str,
+        event: NormalizedEvent,
+    ) -> web.Response:
+        render_mode = self._get_render_mode()
+        return web.json_response(
+            {
+                "code": 0,
+                "message": "skipped",
+                "data": {
+                    "request_id": request_id,
+                    "provider": event.provider,
+                    "event": event.event,
+                    "delivered": False,
+                    "targets": [],
+                    "render_mode": render_mode,
+                    "requested_render_mode": render_mode,
+                    "fallback_to_text": False,
+                    "fallback_reason": None,
+                    "skipped": True,
+                    "skip_reason": "idempotency_replay",
+                    "deduplicated": True,
+                    "rendered": False,
+                    "retryable": False,
+                },
+            }
+        )
 
     async def _handle_text(
         self,
@@ -420,17 +663,28 @@ class WebhookServer:
         endpoint: EndpointRecord,
         target_alias: str | None,
         request_id: str,
+        tracker: DeliveryAttemptTracker | None = None,
     ) -> web.Response:
         """纯文本渲染与发送。"""
         try:
             rendered = render_text_default(event, self._display_context)
-        except Exception as e:
-            logger.error(f"[WebhookNotifier] request_id={request_id} 文本渲染失败: {e}")
+        except Exception as exc:
+            logger.error(
+                f"[WebhookNotifier] request_id={request_id} "
+                "reason=text_render_failed "
+                f"type={type(exc).__name__}"
+            )
             return self._error_response(
-                500, "render_failed", f"渲染失败: {e}", request_id
+                500, "render_failed", "文本渲染失败", request_id
             )
 
-        send_results = await self._sender.send_text(rendered, endpoint, target_alias)
+        send_results = await self._send_with_attempt_tracker(
+            "send_text",
+            rendered,
+            endpoint,
+            target_alias,
+            tracker=tracker,
+        )
         return self._build_render_response(
             request_id=request_id,
             provider=event.provider,
@@ -449,6 +703,7 @@ class WebhookServer:
         target_alias: str | None,
         request_id: str,
         fallback_to_text: bool,
+        tracker: DeliveryAttemptTracker | None = None,
     ) -> web.Response:
         """渲染一次 active 快照；custom 失败时在发送前尝试 built-in。"""
         active = (
@@ -468,45 +723,86 @@ class WebhookServer:
         image_result: Any = None
         render_options: dict[str, Any] = {}
         failure_reason = "render_failed"
-        failure_message = "HTML 图片渲染失败"
         for template in attempts:
             try:
                 image_result, render_options = await self._render_image_attempt(
                     event, template, request_id
                 )
                 break
-            except Exception as e:
-                failure_reason = getattr(e, "reason", "render_failed")
-                failure_message = str(e)
+            except Exception as exc:
+                failure_reason = _safe_failure_reason(exc)
                 logger.error(
                     f"[WebhookNotifier] request_id={request_id} "
-                    f"template={template.id} 图片生成失败: {e}"
+                    f"template={template.id} reason={failure_reason} "
+                    f"type={_safe_exception_type(exc)}"
                 )
         else:
-            if fallback_to_text:
-                return await self._fallback_to_text(
-                    event, endpoint, target_alias, request_id, failure_reason
-                )
-            return self._error_response(
-                500, "render_failed", failure_message, request_id
-            )
-
-        try:
-            send_results = await self._sender.send_image(
-                image_result, endpoint, target_alias
-            )
-        except Exception as e:
-            logger.error(f"[WebhookNotifier] request_id={request_id} 发送图片失败: {e}")
             if fallback_to_text:
                 return await self._fallback_to_text(
                     event,
                     endpoint,
                     target_alias,
                     request_id,
-                    "send_image_failed",
+                    failure_reason,
+                    tracker,
                 )
             return self._error_response(
-                500, "render_failed", f"发送图片失败: {e}", request_id
+                500,
+                "render_failed",
+                _safe_failure_message(failure_reason),
+                request_id,
+            )
+
+        timeline_image: Any = None
+        try:
+            timeline_image = await self._render_timeline_image_attempt(
+                event, request_id
+            )
+        except Exception as exc:
+            failure_reason = _safe_failure_reason(exc, "timeline_render_failed")
+            logger.warning(
+                f"[WebhookNotifier] request_id={request_id} "
+                f"reason={failure_reason} type={_safe_exception_type(exc)} "
+                "action=main_image_only"
+            )
+
+        try:
+            if timeline_image is None:
+                send_results = await self._send_with_attempt_tracker(
+                    "send_image",
+                    image_result,
+                    endpoint,
+                    target_alias,
+                    tracker=tracker,
+                )
+            else:
+                send_results = await self._send_with_attempt_tracker(
+                    "send_images",
+                    [image_result, timeline_image],
+                    endpoint,
+                    target_alias,
+                    tracker=tracker,
+                )
+        except Exception as exc:
+            logger.error(
+                f"[WebhookNotifier] request_id={request_id} "
+                "reason=send_image_failed "
+                f"type={type(exc).__name__}"
+            )
+            if fallback_to_text and not (tracker and tracker.attempted):
+                return await self._fallback_to_text(
+                    event,
+                    endpoint,
+                    target_alias,
+                    request_id,
+                    "send_image_failed",
+                    tracker,
+                )
+            return self._error_response(
+                500,
+                "render_failed",
+                _safe_failure_message("send_image_failed"),
+                request_id,
             )
 
         # Phase 4b: 检查是否为图片构造失败（message_build 阶段）
@@ -516,21 +812,60 @@ class WebhookServer:
             not r.get("ok", False) and r.get("error") == "unsupported_image_result"
             for r in send_results
         ):
-            logger.error(
-                f"[WebhookNotifier] request_id={request_id} "
-                f"图片构造失败（全部目标均为 unsupported_image_result），触发降级"
-            )
-            if fallback_to_text:
-                return await self._fallback_to_text(
-                    event,
-                    endpoint,
-                    target_alias,
-                    request_id,
-                    "image_construction_failed",
+            if timeline_image is not None and not (tracker and tracker.attempted):
+                logger.warning(
+                    f"[WebhookNotifier] request_id={request_id} "
+                    "reason=image_construction_failed action=main_image_only"
                 )
-            return self._error_response(
-                500, "render_failed", "图片构造失败（不支持的图片结果类型）", request_id
-            )
+                try:
+                    send_results = await self._send_with_attempt_tracker(
+                        "send_image",
+                        image_result,
+                        endpoint,
+                        target_alias,
+                        tracker=tracker,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"[WebhookNotifier] request_id={request_id} "
+                        "reason=send_image_failed "
+                        f"type={type(exc).__name__}"
+                    )
+                    if fallback_to_text and not (tracker and tracker.attempted):
+                        return await self._fallback_to_text(
+                            event,
+                            endpoint,
+                            target_alias,
+                            request_id,
+                            "send_image_failed",
+                            tracker,
+                        )
+                    return self._error_response(
+                        500,
+                        "render_failed",
+                        _safe_failure_message("send_image_failed"),
+                        request_id,
+                    )
+            else:
+                logger.error(
+                    f"[WebhookNotifier] request_id={request_id} "
+                    "reason=image_construction_failed action=fallback"
+                )
+                if fallback_to_text and not (tracker and tracker.attempted):
+                    return await self._fallback_to_text(
+                        event,
+                        endpoint,
+                        target_alias,
+                        request_id,
+                        "image_construction_failed",
+                        tracker,
+                    )
+                return self._error_response(
+                    500,
+                    "render_failed",
+                    "图片构造失败（不支持的图片结果类型）",
+                    request_id,
+                )
 
         return self._build_render_response(
             request_id=request_id,
@@ -543,6 +878,60 @@ class WebhookServer:
             send_results=send_results,
         )
 
+    async def _render_timeline_image_attempt(
+        self,
+        event: NormalizedEvent,
+        request_id: str,
+    ) -> Any:
+        """生成复杂时间线附图；失败由调用方安全降级为主卡。"""
+        if not self._html_render:
+            _raise_render_failure("html_render_not_available", "HTML 渲染不可用")
+
+        try:
+            rendered_html = render_subagent_timeline_html(event)
+        except Exception as exc:
+            _raise_render_failure(
+                "timeline_template_render_failed", "时间线模板渲染失败", exc
+            )
+
+        if rendered_html is None:
+            return None
+
+        render_options = self._get_render_options()
+        render_options["viewport_width"] = 812
+        try:
+            image_result = await self._html_render(
+                "{{ rendered_html | safe }}",
+                {"rendered_html": rendered_html},
+                return_url=False,
+                options=render_options,
+            )
+        except Exception as exc:
+            _raise_render_failure(
+                "timeline_html_render_failed", "时间线图片截图失败", exc
+            )
+
+        try:
+            validate_image_result(image_result)
+        except Exception as exc:
+            _raise_render_failure(
+                "timeline_image_validation_failed", "时间线图片校验失败", exc
+            )
+
+        try:
+            trimmed_image = trim_viewport_whitespace(image_result, canvas_width=812)
+            if trimmed_image is None:
+                _raise_render_failure(
+                    "timeline_image_trim_failed", "时间线图片裁切失败"
+                )
+            return trimmed_image
+        except Exception as exc:
+            if _safe_failure_reason(exc) == "timeline_image_trim_failed":
+                raise
+            _raise_render_failure(
+                "timeline_image_trim_failed", "时间线图片裁切失败", exc
+            )
+
     async def _render_image_attempt(
         self,
         event: NormalizedEvent,
@@ -551,16 +940,12 @@ class WebhookServer:
     ) -> tuple[Any, dict[str, Any]]:
         """完成单个模板的生成、截图、校验与 trim，不发送。"""
         if not self._html_render:
-            error = RuntimeError("html_render 回调未设置")
-            error.reason = "html_render_not_available"  # type: ignore[attr-defined]
-            raise error
+            _raise_render_failure("html_render_not_available", "HTML 渲染不可用")
         try:
             event_data = render_html_data(event, self._display_context)["event"]
             rendered_html = render_html_template(template.content, event_data)
         except Exception as exc:
-            error = RuntimeError(f"HTML 模板渲染失败: {exc}")
-            error.reason = "template_render_failed"  # type: ignore[attr-defined]
-            raise error from exc
+            _raise_render_failure("template_render_failed", "HTML 模板渲染失败", exc)
         render_options = self._get_render_options()
         render_options["viewport_width"] = template.canvas_width
         try:
@@ -571,18 +956,21 @@ class WebhookServer:
                 options=render_options,
             )
         except Exception as exc:
-            error = RuntimeError(f"html_render 截图失败: {exc}")
-            error.reason = "html_render_failed"  # type: ignore[attr-defined]
-            raise error from exc
+            _raise_render_failure("html_render_failed", "HTML 图片截图失败", exc)
         try:
             validate_image_result(image_result)
-        except (ValueError, TypeError) as exc:
-            error = RuntimeError(f"图片校验失败: {exc}")
-            error.reason = "image_validation_failed"  # type: ignore[attr-defined]
-            raise error from exc
-        image_result = trim_viewport_whitespace(
-            image_result, canvas_width=template.canvas_width
-        )
+        except Exception as exc:
+            _raise_render_failure("image_validation_failed", "图片结果校验失败", exc)
+        try:
+            image_result = trim_viewport_whitespace(
+                image_result, canvas_width=template.canvas_width
+            )
+            if image_result is None:
+                _raise_render_failure("image_trim_failed", "图片裁切失败")
+        except Exception as exc:
+            if _safe_failure_reason(exc) == "image_trim_failed":
+                raise
+            _raise_render_failure("image_trim_failed", "图片裁切失败", exc)
         logger.info(
             f"[WebhookNotifier] request_id={request_id} template={template.id} "
             f"html_length={len(rendered_html)} canvas_width={template.canvas_width}"
@@ -596,6 +984,7 @@ class WebhookServer:
         target_alias: str | None,
         request_id: str,
         fallback_reason: str,
+        tracker: DeliveryAttemptTracker | None = None,
     ) -> web.Response:
         """html_image 失败后降级为纯文本。
 
@@ -608,15 +997,23 @@ class WebhookServer:
 
         try:
             rendered = render_text_default(event, self._display_context)
-        except Exception as e:
+        except Exception as exc:
             logger.error(
-                f"[WebhookNotifier] request_id={request_id} 降级文本渲染也失败: {e}"
+                f"[WebhookNotifier] request_id={request_id} "
+                "reason=text_fallback_render_failed "
+                f"type={type(exc).__name__}"
             )
             return self._error_response(
-                500, "render_failed", f"降级文本渲染失败: {e}", request_id
+                500, "render_failed", "降级文本渲染失败", request_id
             )
 
-        send_results = await self._sender.send_text(rendered, endpoint, target_alias)
+        send_results = await self._send_with_attempt_tracker(
+            "send_text",
+            rendered,
+            endpoint,
+            target_alias,
+            tracker=tracker,
+        )
 
         return self._build_render_response(
             request_id=request_id,

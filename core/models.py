@@ -82,6 +82,7 @@ class NormalizedEvent:
     links: list[dict[str, Any]] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
     model_variant: str | None = None
+    subagent_timeline: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -101,6 +102,8 @@ class NormalizedEvent:
         }
         if self.model_variant is not None:
             result["model_variant"] = self.model_variant
+        if self.subagent_timeline is not None:
+            result["subagent_timeline"] = self.subagent_timeline
         return result
 
 

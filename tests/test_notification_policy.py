@@ -70,11 +70,11 @@ class _RecordingSender:
         self.preflight_calls += 1
         raise AssertionError("notification filtering must precede sender preflight")
 
-    async def send_text(self, *_args, **_kwargs):
+    async def send_text(self, *_args, delivery_attempt_callback=None, **_kwargs):
         self.text_calls += 1
         raise AssertionError("filtered event must not send text")
 
-    async def send_image(self, *_args, **_kwargs):
+    async def send_image(self, *_args, delivery_attempt_callback=None, **_kwargs):
         self.image_calls += 1
         raise AssertionError("filtered event must not send image")
 
@@ -136,8 +136,10 @@ async def test_focused_allows_failed_and_action_required(
         def preflight_private_notification_policy(self, *_args, **_kwargs):
             return None
 
-        async def send_text(self, *_args, **_kwargs):
+        async def send_text(self, *_args, delivery_attempt_callback=None, **_kwargs):
             self.sent += 1
+            if delivery_attempt_callback is not None:
+                delivery_attempt_callback.mark()
             return [{"name": "default", "ok": True, "error": None}]
 
     sender = Sender()
@@ -182,8 +184,10 @@ async def test_all_sends_auxiliary_completion() -> None:
         def preflight_private_notification_policy(self, *_args, **_kwargs):
             return None
 
-        async def send_text(self, *_args, **_kwargs):
+        async def send_text(self, *_args, delivery_attempt_callback=None, **_kwargs):
             self.sent += 1
+            if delivery_attempt_callback is not None:
+                delivery_attempt_callback.mark()
             return [{"name": "default", "ok": True, "error": None}]
 
     sender = Sender()

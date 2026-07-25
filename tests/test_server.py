@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import asyncio
+from collections.abc import Sequence
 
 import pytest
 from astrbot.api.star import Context
 
+from core.idempotency import IdempotencyStore
 from core.models import EndpointRecord, NormalizedEvent, ServerConfig, TargetAlias
 from core.omp import OmpProviderAdapter
 from core.opencode import OpenCodeProviderAdapter
@@ -15,6 +18,7 @@ from core.registry import EndpointRegistry
 from core.sender import Sender
 from core.server import DEFAULT_RENDER_OPTIONS, WebhookServer
 from core.template_registry import TemplateRegistry
+from core.notification_policy import SessionScope
 
 
 def _make_provider_registry() -> ProviderRegistry:
@@ -46,6 +50,44 @@ def _make_event() -> NormalizedEvent:
     )
 
 
+def _make_complex_event() -> NormalizedEvent:
+    """构造经过 provider 约束的复杂 root timeline fixture。"""
+    root_ref = "a" * 32
+    items = []
+    for index in range(6):
+        start = index * 1000
+        end = start + 1800 if index < 2 else start + 800
+        items.append(
+            {
+                "ref": f"{index + 1:032x}",
+                "parentRef": root_ref,
+                "status": "completed" if index != 5 else "failed",
+                "timingQuality": "observed",
+                "depth": 3 if index == 5 else 1,
+                "attempt": 1,
+                "name": f"worker-{index + 1}",
+                "agent": "gpt-5.5",
+                "startOffsetMs": start,
+                "endOffsetMs": end,
+                "durationMs": end - start,
+            }
+        )
+    event = _make_event()
+    event.event = "opencode.session_idle"
+    event.session_scope = SessionScope.ROOT
+    event.subagent_timeline = {
+        "version": 1,
+        "partial": False,
+        "partialReasons": [],
+        "timeBasis": "root_cycle",
+        "observedItemCount": len(items),
+        "displayedItemCount": len(items),
+        "truncated": False,
+        "items": items,
+    }
+    return event
+
+
 def _make_endpoint() -> EndpointRecord:
     return EndpointRecord(
         name="test_ep",
@@ -68,16 +110,30 @@ class FakeSender(Sender):
         # 不调用 super().__init__，避免依赖 Context
         self.sent_texts: list[str] = []
         self.sent_images: list[str | bytes] = []
+        self.sent_image_batches: list[list[str | bytes]] = []
+        self.delivered_image_batches: list[list[str | bytes]] = []
+        self.send_image_calls = 0
+        self.send_images_calls = 0
         self._fail_send: bool = False
+        self._unsupported_image_batch: bool = False
         self._enable_private_notifications = True
 
     def set_fail_send(self, fail: bool = True) -> None:
         self._fail_send = fail
 
+    def set_unsupported_image_batch(self, unsupported: bool = True) -> None:
+        self._unsupported_image_batch = unsupported
+
     async def send_text(
-        self, text: str, endpoint: EndpointRecord, target_alias: str | None = None
+        self,
+        text: str,
+        endpoint: EndpointRecord,
+        target_alias: str | None = None,
+        delivery_attempt_callback=None,
     ) -> list[dict]:
         self.sent_texts.append(text)
+        if delivery_attempt_callback is not None:
+            delivery_attempt_callback.mark()
         if self._fail_send:
             return [{"name": "default", "ok": False, "error": "simulated_failure"}]
         return [{"name": "default", "ok": True, "error": None}]
@@ -87,10 +143,125 @@ class FakeSender(Sender):
         image_result: str | bytes,
         endpoint: EndpointRecord,
         target_alias: str | None = None,
+        delivery_attempt_callback=None,
     ) -> list[dict]:
+        self.send_image_calls += 1
         self.sent_images.append(image_result)
+        self.sent_image_batches.append([image_result])
+        if delivery_attempt_callback is not None:
+            delivery_attempt_callback.mark()
         if self._fail_send:
             return [{"name": "default", "ok": False, "error": "simulated_failure"}]
+        self.delivered_image_batches.append([image_result])
+        return [{"name": "default", "ok": True, "error": None}]
+
+    async def send_images(
+        self,
+        image_results: Sequence[str | bytes],
+        endpoint: EndpointRecord,
+        target_alias: str | None = None,
+        delivery_attempt_callback=None,
+    ) -> list[dict]:
+        self.send_images_calls += 1
+        batch = list(image_results)
+        self.sent_images.extend(batch)
+        self.sent_image_batches.append(batch)
+        if self._unsupported_image_batch:
+            return [
+                {
+                    "name": None,
+                    "ok": False,
+                    "error": "unsupported_image_result",
+                }
+            ]
+        if delivery_attempt_callback is not None:
+            delivery_attempt_callback.mark()
+        if self._fail_send:
+            return [{"name": "default", "ok": False, "error": "simulated_failure"}]
+        self.delivered_image_batches.append(batch)
+        return [{"name": "default", "ok": True, "error": None}]
+
+
+class BoundarySender(FakeSender):
+    """支持发送边界回调的 sender，用于 server 并发/终态测试。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_send = asyncio.Event()
+        self.block_send = False
+
+    async def send_text(
+        self,
+        text: str,
+        endpoint: EndpointRecord,
+        target_alias: str | None = None,
+        delivery_attempt_callback=None,
+    ) -> list[dict]:
+        self.sent_texts.append(text)
+        if delivery_attempt_callback is not None:
+            delivery_attempt_callback.mark()
+        if self.block_send:
+            await self.release_send.wait()
+        return [{"name": "default", "ok": True, "error": None}]
+
+
+class ControlledSender:
+    """可控地在发送边界前后阻塞、抛错或返回 False。"""
+
+    def __init__(
+        self,
+        *,
+        mark_before_wait: bool = False,
+        wait_first: bool = False,
+        fail: bool = False,
+        raise_error: bool = False,
+    ) -> None:
+        self.mark_before_wait = mark_before_wait
+        self.wait_first = wait_first
+        self.fail = fail
+        self.raise_error = raise_error
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    def preflight_private_notification_policy(self, *_args, **_kwargs):
+        return None
+
+    async def send_text(
+        self,
+        _text,
+        _endpoint,
+        _target_alias=None,
+        delivery_attempt_callback=None,
+    ):
+        self.calls += 1
+        self.entered.set()
+        if self.mark_before_wait and delivery_attempt_callback is not None:
+            delivery_attempt_callback.mark()
+        if self.raise_error and not self.mark_before_wait:
+            raise RuntimeError("simulated send exception")
+        if self.wait_first and self.calls == 1:
+            await self.release.wait()
+        if not self.mark_before_wait and delivery_attempt_callback is not None:
+            delivery_attempt_callback.mark()
+        if self.raise_error:
+            raise RuntimeError("simulated send exception")
+        if self.fail:
+            return [{"name": "default", "ok": False, "error": "simulated_failure"}]
+        return [{"name": "default", "ok": True, "error": None}]
+
+
+class CallbackIncompatibleSender:
+    """故意不支持发送边界 callback，证明 server 不会无 tracker 降级调用。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def preflight_private_notification_policy(self, *_args, **_kwargs):
+        return None
+
+    async def send_text(self, _text, _endpoint, _target_alias=None):
+        self.calls += 1
         return [{"name": "default", "ok": True, "error": None}]
 
 
@@ -836,13 +1007,19 @@ class TestHandleHtmlImage:
         assert data["data"]["render_mode"] == "html_image"
         assert data["data"]["delivered"] is False
         assert "send_results" in data["data"]
+        assert server._sender.send_image_calls == 1
+        assert server._sender.send_images_calls == 0
+        assert server._sender.sent_texts == []
 
     async def test_send_image_exception_with_fallback(self, server: WebhookServer):
         """发送图片抛出异常时应降级为 text。"""
         event = _make_event()
         endpoint = _make_endpoint()
+        send_calls = 0
 
         async def raise_send(*args, **kwargs):
+            nonlocal send_calls
+            send_calls += 1
             raise RuntimeError("send crashed")
 
         server._sender.send_image = raise_send  # type: ignore[assignment]
@@ -859,6 +1036,8 @@ class TestHandleHtmlImage:
         assert data["data"]["fallback_reason"] == "send_image_failed"
         # 降级文本发送成功
         assert data["data"]["delivered"] is True
+        assert send_calls == 1
+        assert server._sender.sent_texts
 
     async def test_text_mode_still_works(self, server: WebhookServer):
         """text 模式仍应正常工作不受 html_image 影响。"""
@@ -935,6 +1114,279 @@ class TestHandleHtmlImage:
         assert calls == [812]
         assert len(sender.sent_images) == 1
         assert sender.sent_texts == []
+
+    async def test_simple_event_renders_once_and_sends_one_image(self):
+        sender = FakeSender()
+        render_calls = 0
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            nonlocal render_calls
+            render_calls += 1
+            return b"\x89PNG\r\n\x1a\nmain"
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+        )
+        response = await server._handle_html_image(
+            _make_event(), _make_endpoint(), None, "req-simple", True
+        )
+        data = json.loads(response.body)
+
+        assert response.status == 200
+        assert data["data"]["render_mode"] == "html_image"
+        assert render_calls == 1
+        assert sender.send_image_calls == 1
+        assert sender.send_images_calls == 0
+        assert sender.sent_image_batches == [[b"\x89PNG\r\n\x1a\nmain"]]
+        assert sender.sent_texts == []
+
+    async def test_complex_event_renders_two_images_in_one_sender_call(self):
+        sender = FakeSender()
+        render_calls = 0
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            nonlocal render_calls
+            render_calls += 1
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+        )
+        response = await server._handle_html_image(
+            _make_complex_event(), _make_endpoint(), None, "req-complex", True
+        )
+        data = json.loads(response.body)
+
+        assert response.status == 200
+        assert data["data"]["render_mode"] == "html_image"
+        assert render_calls == 2
+        assert sender.send_images_calls == 1
+        assert sender.send_image_calls == 0
+        assert sender.sent_image_batches == [
+            [b"\x89PNG\r\n\x1a\nimage", b"\x89PNG\r\n\x1a\nimage"]
+        ]
+        assert sender.sent_texts == []
+
+    async def test_custom_main_and_builtin_timeline_render_in_order(self, tmp_path):
+        registry = TemplateRegistry(tmp_path)
+        registry.save(
+            None,
+            "Custom",
+            "<html><body>{{ event.title }}</body></html>",
+            1000,
+            apply=True,
+        )
+        sender = FakeSender()
+        widths: list[int] = []
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            widths.append(options["viewport_width"])
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+            registry,
+        )
+        response = await server._handle_html_image(
+            _make_complex_event(), _make_endpoint(), None, "req-custom-complex", True
+        )
+
+        assert json.loads(response.body)["data"]["render_mode"] == "html_image"
+        assert widths == [1000, 812]
+        assert sender.send_images_calls == 1
+        assert sender.sent_image_batches == [
+            [b"\x89PNG\r\n\x1a\nimage", b"\x89PNG\r\n\x1a\nimage"]
+        ]
+
+    @pytest.mark.parametrize(
+        "failure_stage, expected_calls, reason",
+        [
+            ("helper", 1, "timeline_template_render_failed"),
+            ("html", 2, "timeline_html_render_failed"),
+            ("validate", 2, "timeline_image_validation_failed"),
+            ("trim", 2, "timeline_image_trim_failed"),
+        ],
+    )
+    async def test_timeline_failure_keeps_main_image_only(
+        self, monkeypatch, caplog, failure_stage, expected_calls, reason
+    ):
+        sender = FakeSender()
+        render_calls = 0
+        marker = "HTML <img> base64://secret /Volumes/private/ref-secret"
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            nonlocal render_calls
+            render_calls += 1
+            if failure_stage == "html" and render_calls == 2:
+                raise RuntimeError(marker)
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        def failing_timeline(event):
+            raise RuntimeError(marker)
+
+        if failure_stage == "helper":
+            monkeypatch.setattr(
+                "core.server.render_subagent_timeline_html", failing_timeline
+            )
+        elif failure_stage == "validate":
+            original_validate = __import__(
+                "core.server", fromlist=["validate_image_result"]
+            ).validate_image_result
+            validation_calls = 0
+
+            def fail_timeline_validation(result):
+                nonlocal validation_calls
+                validation_calls += 1
+                if validation_calls == 2:
+                    raise ValueError(marker)
+                return original_validate(result)
+
+            monkeypatch.setattr(
+                "core.server.validate_image_result", fail_timeline_validation
+            )
+        elif failure_stage == "trim":
+            trim_calls = 0
+
+            def fail_timeline_trim(result, canvas_width=812):
+                nonlocal trim_calls
+                trim_calls += 1
+                if trim_calls == 2:
+                    raise RuntimeError(marker)
+                return result
+
+            monkeypatch.setattr(
+                "core.server.trim_viewport_whitespace", fail_timeline_trim
+            )
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+        )
+        response = await server._handle_html_image(
+            _make_complex_event(), _make_endpoint(), None, "req-timeline-failure", True
+        )
+        data = json.loads(response.body)
+
+        assert response.status == 200
+        assert data["data"]["render_mode"] == "html_image"
+        assert data["data"]["fallback_reason"] is None
+        assert render_calls == expected_calls
+        assert sender.send_image_calls == 1
+        assert sender.send_images_calls == 0
+        assert sender.sent_texts == []
+        assert sender.sent_image_batches == [[b"\x89PNG\r\n\x1a\nimage"]]
+        assert any(f"reason={reason}" in record.message for record in caplog.records)
+        assert not any(marker in record.message for record in caplog.records)
+
+    @pytest.mark.parametrize(
+        "failure_stage, expected_calls, reason",
+        [
+            ("template", 0, "template_render_failed"),
+            ("html", 1, "html_render_failed"),
+            ("validate", 1, "image_validation_failed"),
+            ("trim", 1, "image_trim_failed"),
+        ],
+    )
+    async def test_main_render_failures_are_safe_without_text_fallback(
+        self, monkeypatch, caplog, failure_stage, expected_calls, reason
+    ):
+        sender = FakeSender()
+        html_calls = 0
+        marker = "HTML <img> base64://secret /Volumes/private/ref-secret"
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            nonlocal html_calls
+            html_calls += 1
+            if failure_stage == "html":
+                raise RuntimeError(marker)
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        if failure_stage == "template":
+
+            def fail_template(template, event):
+                raise RuntimeError(marker)
+
+            monkeypatch.setattr("core.server.render_html_template", fail_template)
+        elif failure_stage == "validate":
+
+            def fail_validate(result):
+                raise ValueError(marker)
+
+            monkeypatch.setattr("core.server.validate_image_result", fail_validate)
+        elif failure_stage == "trim":
+
+            def fail_trim(result, canvas_width=812):
+                raise RuntimeError(marker)
+
+            monkeypatch.setattr("core.server.trim_viewport_whitespace", fail_trim)
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": False},
+        )
+        response = await server._handle_html_image(
+            _make_event(), _make_endpoint(), None, "req-main-failure", False
+        )
+        data = json.loads(response.body)
+
+        assert response.status == 500
+        assert data["code"] == 1
+        assert data["data"]["error"] == "render_failed"
+        assert marker not in response.text
+        assert html_calls == expected_calls
+        assert sender.send_image_calls == 0
+        assert sender.send_images_calls == 0
+        assert sender.sent_texts == []
+        assert any(f"reason={reason}" in record.message for record in caplog.records)
+        assert not any(marker in record.message for record in caplog.records)
+
+    async def test_multi_image_construction_failure_sends_main_only(self):
+        sender = FakeSender()
+        sender.set_unsupported_image_batch()
+
+        async def capture_render(tmpl, data, return_url=True, options=None):
+            return b"\x89PNG\r\n\x1a\nimage"
+
+        server = WebhookServer(
+            ServerConfig(),
+            FakeRegistry(),
+            sender,
+            capture_render,
+            {"render_mode": "html_image", "fallback_to_text": True},
+        )
+
+        response = await server._handle_html_image(
+            _make_complex_event(), _make_endpoint(), None, "req-build-failure", True
+        )
+        data = json.loads(response.body)
+
+        assert response.status == 200
+        assert data["data"]["render_mode"] == "html_image"
+        assert sender.send_images_calls == 1
+        assert sender.send_image_calls == 1
+        assert sender.sent_image_batches == [
+            [b"\x89PNG\r\n\x1a\nimage", b"\x89PNG\r\n\x1a\nimage"],
+            [b"\x89PNG\r\n\x1a\nimage"],
+        ]
+        assert sender.delivered_image_batches == [[b"\x89PNG\r\n\x1a\nimage"]]
 
 
 # ─── _fallback_to_text ─────────────────────────────────────
@@ -1311,3 +1763,405 @@ async def test_integration_omp_payload_on_opencode_endpoint_returns_incompatible
     assert response.status == 400
     assert body["data"]["error"] == "provider_incompatible"
     assert body["data"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_duplicate_event_is_rendered_and_sent_once_with_compatible_skip():
+    sender = FakeSender()
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+        provider_registry=_make_provider_registry(),
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    first = await server._dispatch_event(event, endpoint, None, "first-request")
+    duplicate = await server._dispatch_event(event, endpoint, None, "retry-request")
+    first_data = json.loads(first.body)["data"]
+    duplicate_body = json.loads(duplicate.body)
+
+    assert first_data["delivered"] is True
+    assert duplicate.status == 200
+    assert duplicate_body["message"] == "skipped"
+    assert duplicate_body["data"] == {
+        "request_id": "retry-request",
+        "provider": "omp",
+        "event": "omp.session_stop",
+        "delivered": False,
+        "targets": [],
+        "render_mode": "text",
+        "requested_render_mode": "text",
+        "fallback_to_text": False,
+        "fallback_reason": None,
+        "skipped": True,
+        "skip_reason": "idempotency_replay",
+        "deduplicated": True,
+        "rendered": False,
+        "retryable": False,
+    }
+    assert len(sender.sent_texts) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_waits_for_owner_and_does_not_send_twice():
+    sender = BoundarySender()
+    sender.block_send = True
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+        provider_registry=_make_provider_registry(),
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    owner_task = asyncio.create_task(
+        server._dispatch_event(event, endpoint, None, "owner-request")
+    )
+    await asyncio.sleep(0)
+    duplicate_task = asyncio.create_task(
+        server._dispatch_event(event, endpoint, None, "duplicate-request")
+    )
+    await asyncio.sleep(0)
+    assert not duplicate_task.done()
+
+    sender.release_send.set()
+    owner, duplicate = await asyncio.gather(owner_task, duplicate_task)
+    assert owner.status == duplicate.status == 200
+    assert json.loads(duplicate.body)["data"]["deduplicated"] is True
+    assert len(sender.sent_texts) == 1
+
+
+@pytest.mark.asyncio
+async def test_render_failure_releases_claim_for_next_request(monkeypatch):
+    sender = FakeSender()
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+        provider_registry=_make_provider_registry(),
+    )
+    endpoint = _make_endpoint()
+    event = _make_event()
+    original = __import__(
+        "core.server", fromlist=["render_text_default"]
+    ).render_text_default
+    calls = 0
+
+    def fail_once(current_event, display_context):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("render failed")
+        return original(current_event, display_context)
+
+    monkeypatch.setattr("core.server.render_text_default", fail_once)
+    failed = await server._dispatch_event(event, endpoint, None, "failed-request")
+    recovered = await server._dispatch_event(event, endpoint, None, "recovered-request")
+
+    assert failed.status == 500
+    assert recovered.status == 200
+    assert json.loads(recovered.body)["data"]["delivered"] is True
+    assert len(sender.sent_texts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_alias", ["", "nonexistent", 123])
+async def test_invalid_target_alias_is_rejected_before_idempotency_claim(target_alias):
+    store = IdempotencyStore()
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        FakeSender(),
+        plugin_config={"render_mode": "text"},
+        idempotency_store=store,
+    )
+
+    response = await server._dispatch_event(
+        _make_event(), _make_endpoint(), target_alias, "invalid-alias"
+    )
+    payload = json.loads(response.body)
+
+    assert response.status == 400
+    assert payload["data"]["error"] == "invalid_target_alias"
+    assert store.size == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_incompatible_sender_never_falls_back_without_tracker():
+    store = IdempotencyStore()
+    sender = CallbackIncompatibleSender()
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+        idempotency_store=store,
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    with pytest.raises(TypeError, match="delivery_attempt_callback"):
+        await server._dispatch_event(event, endpoint, None, "unsupported-callback")
+    with pytest.raises(TypeError, match="delivery_attempt_callback"):
+        await server._dispatch_event(event, endpoint, None, "unsupported-retry")
+
+    assert sender.calls == 0
+    assert store.size == 0
+
+
+@pytest.mark.asyncio
+async def test_exact_target_alias_is_routed_and_keyed_without_normalization():
+    ctx = Context()
+    sender = Sender(ctx, enable_private_notifications=True)
+    endpoint = _make_endpoint()
+    endpoint.targets = [
+        TargetAlias(name="Alias", umo="test:GroupMessage:1"),
+        TargetAlias(name=" alias", umo="test:GroupMessage:2"),
+    ]
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+    )
+    event = _make_event()
+
+    first = await server._dispatch_event(event, endpoint, "Alias", "alias-one")
+    second = await server._dispatch_event(event, endpoint, " alias", "alias-two")
+    duplicate = await server._dispatch_event(event, endpoint, "Alias", "alias-retry")
+
+    assert first.status == second.status == duplicate.status == 200
+    assert json.loads(duplicate.body)["data"]["deduplicated"] is True
+    assert [umo for umo, _ in ctx._sent_messages] == [
+        "test:GroupMessage:1",
+        "test:GroupMessage:2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_delivery_boundary_releases_claim_for_retry():
+    sender = ControlledSender(wait_first=True)
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    owner = asyncio.create_task(
+        server._dispatch_event(event, endpoint, None, "cancel-before")
+    )
+    await sender.entered.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    sender.wait_first = False
+    retry = await server._dispatch_event(event, endpoint, None, "retry-before")
+
+    assert retry.status == 200
+    assert json.loads(retry.body)["data"]["delivered"] is True
+    assert sender.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_delivery_boundary_finalizes_claim():
+    sender = ControlledSender(mark_before_wait=True, wait_first=True)
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    owner = asyncio.create_task(
+        server._dispatch_event(event, endpoint, None, "cancel-after")
+    )
+    await sender.entered.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    duplicate = await server._dispatch_event(event, endpoint, None, "retry-after")
+
+    assert duplicate.status == 200
+    assert json.loads(duplicate.body)["data"]["deduplicated"] is True
+    assert sender.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mark_before_failure", [False, True])
+async def test_send_exception_releases_or_finalizes_by_delivery_boundary(
+    mark_before_failure: bool,
+):
+    sender = ControlledSender(
+        mark_before_wait=mark_before_failure,
+        raise_error=True,
+    )
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    with pytest.raises(RuntimeError, match="simulated send exception"):
+        await server._dispatch_event(event, endpoint, None, "exception-owner")
+
+    if mark_before_failure:
+        duplicate = await server._dispatch_event(
+            event, endpoint, None, "exception-retry"
+        )
+        assert json.loads(duplicate.body)["data"]["deduplicated"] is True
+        assert sender.calls == 1
+    else:
+        sender.raise_error = False
+        retry = await server._dispatch_event(event, endpoint, None, "exception-retry")
+        assert json.loads(retry.body)["data"]["delivered"] is True
+        assert sender.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_false_after_delivery_boundary_is_not_retried():
+    sender = ControlledSender(mark_before_wait=True, fail=True)
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    first = await server._dispatch_event(event, endpoint, None, "false-owner")
+    duplicate = await server._dispatch_event(event, endpoint, None, "false-retry")
+
+    assert json.loads(first.body)["message"] == "partial_failure"
+    assert json.loads(duplicate.body)["data"]["deduplicated"] is True
+    assert sender.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capacity_returns_503_and_expired_entry_recovers():
+    now = [100.0]
+    store = IdempotencyStore(capacity=1, clock=lambda: now[0])
+    sender = BoundarySender()
+    sender.block_send = True
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        plugin_config={"render_mode": "text"},
+        idempotency_store=store,
+    )
+    endpoint = _make_endpoint()
+    first_event = _make_event()
+    owner = asyncio.create_task(
+        server._dispatch_event(first_event, endpoint, None, "capacity-owner")
+    )
+    await asyncio.sleep(0)
+
+    second_event = _make_event()
+    second_event.id = "different-event-id"
+    full = await server._dispatch_event(second_event, endpoint, None, "capacity-full")
+    assert full.status == 503
+    assert json.loads(full.body)["data"]["error"] == "idempotency_capacity"
+
+    sender.release_send.set()
+    await owner
+    now[0] += 600
+
+    third_event = _make_event()
+    third_event.id = "expired-event-id"
+    recovered = await server._dispatch_event(
+        third_event, endpoint, None, "capacity-recovered"
+    )
+    assert recovered.status == 200
+    assert json.loads(recovered.body)["data"]["delivered"] is True
+
+
+@pytest.mark.asyncio
+async def test_filter_and_private_skip_do_not_pollute_idempotency_store():
+    filtered_store = IdempotencyStore()
+    filtered_sender = FakeSender()
+    filtered_server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        filtered_sender,
+        plugin_config={"render_mode": "text", "notification_mode": "focused"},
+        idempotency_store=filtered_store,
+    )
+    filtered_event = _make_event()
+    filtered_event.session_scope = SessionScope.SUBAGENT
+    filtered_event.status = "completed"
+    filtered = await filtered_server._dispatch_event(
+        filtered_event, _make_endpoint(), None, "filtered"
+    )
+    assert json.loads(filtered.body)["data"]["skip_reason"] == (
+        "notification_mode_filtered"
+    )
+    assert filtered_store.size == 0
+
+    private_store = IdempotencyStore()
+    ctx = Context()
+    private_sender = Sender(ctx)
+    private_endpoint = _make_endpoint()
+    private_endpoint.targets = [TargetAlias(name="private", umo="test:FriendMessage:1")]
+    private_server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        private_sender,
+        plugin_config={"render_mode": "text"},
+        idempotency_store=private_store,
+    )
+    private_event = _make_event()
+    skipped = await private_server._dispatch_event(
+        private_event, private_endpoint, None, "private-skip"
+    )
+    assert json.loads(skipped.body)["message"] == "skipped"
+    assert private_store.size == 0
+
+    private_sender._enable_private_notifications = True
+    delivered = await private_server._dispatch_event(
+        private_event, private_endpoint, None, "private-retry"
+    )
+    assert json.loads(delivered.body)["data"]["delivered"] is True
+    assert private_store.size == 1
+
+
+@pytest.mark.asyncio
+async def test_image_failure_after_delivery_boundary_is_not_retried():
+    sender = FakeSender()
+    sender.set_fail_send(True)
+
+    async def render_image(*_args, **_kwargs):
+        return b"\x89PNG\r\n\x1a\nimage"
+
+    server = WebhookServer(
+        ServerConfig(),
+        FakeRegistry(),
+        sender,
+        html_render=render_image,
+        plugin_config={"render_mode": "html_image", "fallback_to_text": True},
+    )
+    event = _make_event()
+    endpoint = _make_endpoint()
+
+    first = await server._dispatch_event(event, endpoint, None, "image-failure")
+    duplicate = await server._dispatch_event(event, endpoint, None, "image-retry")
+
+    assert json.loads(first.body)["message"] == "partial_failure"
+    assert json.loads(duplicate.body)["data"]["deduplicated"] is True
+    assert sender.send_image_calls == 1

@@ -14,7 +14,7 @@ from jinja2.utils import Namespace
 from markupsafe import Markup
 
 from .models import DisplayContext, NormalizedEvent
-from .display import build_display_event_data, format_timestamp
+from .display import build_display_event_data, format_duration_ms, format_timestamp
 
 DEFAULT_FALLBACK_VIEWPORT_WIDTH = 1280
 DEVICE_SCALE_CANDIDATES = (1.0, 1.3, 1.8)
@@ -27,6 +27,14 @@ MAX_PREVIEW_DEPTH = 10
 MAX_PREVIEW_NODES = 2000
 MAX_PREVIEW_CONTAINER = 200
 MAX_PREVIEW_STRING = 8192
+SUBAGENT_TIMELINE_MISSING_RATIO_LIMIT = 0.25
+SUBAGENT_TIMELINE_SIMPLE_BASE_ITEMS = 5
+SUBAGENT_TIMELINE_SIMPLE_MAX_DEPTH = 2
+SUBAGENT_TIMELINE_SIMPLE_MAX_CONCURRENCY = 2
+SUBAGENT_TIMELINE_COMPLEXITY_THRESHOLD = 4
+SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT = 8
+SUBAGENT_TIMELINE_GANTT_ROW_LIMIT = 24
+SUBAGENT_TIMELINE_UNLOCATED_RESERVE = 4
 CSP_META = (
     '<meta http-equiv="Content-Security-Policy" '
     "content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:\">"
@@ -44,6 +52,16 @@ _FORBIDDEN_TAGS = {"script", "iframe", "object", "embed", "base", "form"}
 _CSS_DANGEROUS = re.compile(r"url\s*\(|@import\b|expression\s*\(", re.I)
 _EXTERNAL_RESOURCE = re.compile(r"(?:https?|file)\s*:", re.I)
 _INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\r\n]+)`(?!`)")
+_TIMELINE_REF_LIKE_RE = re.compile(r"^[a-f0-9]{32,64}$", re.I)
+_TIMELINE_WINDOWS_PATH_RE = re.compile(r"^[a-z]:[\\/]", re.I)
+_TIMELINE_STATUSES = ("completed", "failed", "running", "cancelled", "unknown")
+_TIMELINE_STATUS_VIEW = {
+    "completed": ("已完成", "✓"),
+    "failed": ("失败", "!"),
+    "running": ("进行中", "…"),
+    "cancelled": ("已取消", "×"),
+    "unknown": ("状态未知", "?"),
+}
 
 
 # 默认文本模板（与 FSD 一致）
@@ -316,6 +334,240 @@ DEFAULT_HTML_TEMPLATE = """\
       line-height: 1.45;
     }
 
+    .subagent-panel {
+      overflow: hidden;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.74);
+    }
+
+    .subagent-summary {
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(60, 60, 67, 0.12);
+      background: rgba(245, 245, 247, 0.52);
+    }
+
+    .subagent-summary-main {
+      color: #1d1d1f;
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+
+    .subagent-summary-meta {
+      margin-top: 4px;
+      color: #6e6e73;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    .subagent-flags {
+      margin-top: 8px;
+    }
+
+    .subagent-flag,
+    .subagent-status,
+    .subagent-parallel {
+      display: inline-block;
+      border-radius: 999px;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+
+    .subagent-flag {
+      margin: 0 6px 4px 0;
+      padding: 3px 8px;
+      border: 1px solid rgba(142, 142, 147, 0.20);
+      color: #6e6e73;
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 13px;
+    }
+
+    .subagent-notice {
+      margin: 12px 14px 0;
+      padding: 10px 12px;
+      border: 1px dashed rgba(142, 142, 147, 0.34);
+      border-radius: 11px;
+      color: #5f6065;
+      background: rgba(245, 245, 247, 0.56);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .subagent-list {
+      margin: 0;
+      padding: 8px 14px 12px;
+      list-style: none;
+    }
+
+    .subagent-item {
+      position: relative;
+      margin-top: 8px;
+      padding: 11px 12px;
+      border: 1px solid rgba(60, 60, 67, 0.13);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.025);
+    }
+
+    .subagent-item.depth-2,
+    .subagent-item.depth-3,
+    .subagent-item.depth-4 {
+      border-left-width: 3px;
+      border-left-color: rgba(65, 108, 157, 0.42);
+    }
+
+    .subagent-item.depth-2 {
+      margin-left: 18px;
+    }
+
+    .subagent-item.depth-3 {
+      margin-left: 36px;
+    }
+
+    .subagent-item.depth-4 {
+      margin-left: 54px;
+    }
+
+    .subagent-item.depth-2:before,
+    .subagent-item.depth-3:before,
+    .subagent-item.depth-4:before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: 100%;
+      width: 14px;
+      border-top: 1px solid rgba(65, 108, 157, 0.34);
+    }
+
+    .subagent-item-head {
+      display: table;
+      width: 100%;
+    }
+
+    .subagent-name-wrap,
+    .subagent-state-wrap {
+      display: table-cell;
+      vertical-align: top;
+    }
+
+    .subagent-state-wrap {
+      width: 1%;
+      padding-left: 12px;
+      white-space: nowrap;
+      text-align: right;
+    }
+
+    .subagent-name {
+      color: #1d1d1f;
+      font-size: 17px;
+      font-weight: 700;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .subagent-agent {
+      margin-top: 2px;
+      color: #8a8a8e;
+      font-size: 14px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .subagent-status {
+      padding: 3px 8px;
+      border: 1px solid rgba(142, 142, 147, 0.22);
+      color: #5f6065;
+      background: rgba(245, 245, 247, 0.78);
+      font-size: 13px;
+    }
+
+    .subagent-status.completed {
+      color: #24663f;
+      border-color: rgba(52, 199, 89, 0.22);
+      background: rgba(52, 199, 89, 0.10);
+    }
+
+    .subagent-status.failed {
+      color: #9f2d2f;
+      border-color: rgba(255, 59, 48, 0.22);
+      background: rgba(255, 59, 48, 0.09);
+    }
+
+    .subagent-status.running {
+      color: #8a5a00;
+      border-color: rgba(255, 204, 0, 0.30);
+      background: rgba(255, 204, 0, 0.13);
+    }
+
+    .subagent-item-meta {
+      margin-top: 7px;
+      color: #6e6e73;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .subagent-item-meta span + span:before {
+      content: " · ";
+      color: #b0b0b5;
+    }
+
+    .subagent-parallel {
+      margin-left: 7px;
+      padding: 2px 7px;
+      border: 1px dashed rgba(65, 108, 157, 0.40);
+      color: #416c9d;
+      background: #f2f6fb;
+      font-size: 12px;
+    }
+
+    .subagent-more {
+      padding: 4px 14px 14px;
+      color: #6e6e73;
+      font-size: 14px;
+      font-weight: 600;
+      text-align: center;
+    }
+
+    .subagent-complex {
+      display: table;
+      width: calc(100% - 28px);
+      margin: 12px 14px 14px;
+      overflow: hidden;
+      border: 1px solid rgba(60, 60, 67, 0.12);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.82);
+    }
+
+    .subagent-metric {
+      display: table-cell;
+      width: 33.333%;
+      padding: 11px 8px;
+      border-left: 1px solid rgba(60, 60, 67, 0.12);
+      text-align: center;
+    }
+
+    .subagent-metric:first-child {
+      border-left: 0;
+    }
+
+    .subagent-metric-value {
+      display: block;
+      color: #1d1d1f;
+      font-size: 18px;
+      font-weight: 750;
+      line-height: 1.25;
+    }
+
+    .subagent-metric-label {
+      display: block;
+      margin-top: 3px;
+      color: #8a8a8e;
+      font-size: 12px;
+      line-height: 1.3;
+    }
+
     .meta {
       display: table;
       width: 100%;
@@ -421,10 +673,325 @@ DEFAULT_HTML_TEMPLATE = """\
         {% endif %}
       </ul>
 
+      {% set timeline = event.subagent_timeline_view|default(none) %}
+      {% if timeline %}
+      <div class="section-label">子任务执行</div>
+      <section class="subagent-panel">
+        <div class="subagent-summary">
+          <div class="subagent-summary-main">{{ timeline.summary_text|e }}</div>
+          {% if timeline.timing_summary %}
+          <div class="subagent-summary-meta">{{ timeline.timing_summary|e }}</div>
+          {% endif %}
+          {% if timeline.flags %}
+          <div class="subagent-flags">
+            {% for flag in timeline.flags %}<span class="subagent-flag">{{ flag|e }}</span>{% endfor %}
+          </div>
+          {% endif %}
+        </div>
+
+        {% if timeline.notice %}
+        <div class="subagent-notice">{{ timeline.notice|e }}</div>
+        {% endif %}
+
+        {% if timeline.mode in ['simple', 'degraded'] %}
+        <ol class="subagent-list">
+          {% for item in timeline.main_items %}
+          <li class="subagent-item depth-{{ item.depth_class }}">
+            <div class="subagent-item-head">
+              <div class="subagent-name-wrap">
+                <div class="subagent-name">{{ item.name|e }}{% if item.parallel %}<span class="subagent-parallel">并行</span>{% endif %}</div>
+                {% if item.agent %}<div class="subagent-agent">{{ item.agent|e }}</div>{% endif %}
+              </div>
+              <div class="subagent-state-wrap"><span class="subagent-status {{ item.status_class }}">{{ item.status_symbol|e }} {{ item.status_label|e }}</span></div>
+            </div>
+            {% if item.meta_labels %}
+            <div class="subagent-item-meta">{% for meta in item.meta_labels %}<span>{{ meta|e }}</span>{% endfor %}</div>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ol>
+        {% if timeline.main_hidden_count > 0 %}<div class="subagent-more">另有 {{ timeline.main_hidden_count }} 项未展开</div>{% endif %}
+        {% else %}
+        <div class="subagent-complex">
+          {% for metric in timeline.metrics %}
+          <div class="subagent-metric"><span class="subagent-metric-value">{{ metric.value|e }}</span><span class="subagent-metric-label">{{ metric.label|e }}</span></div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </section>
+      {% endif %}
+
       <div class="meta">
         <div class="meta-item"><span class="meta-label">生成时间：</span>{{ generated_time|default('未提供', true)|e }}</div>
         <div class="meta-item"><span class="meta-label">事件时间：</span>{{ event_time|default('未提供', true)|e }}</div>
       </div>
+    </div>
+  </main>
+</body>
+</html>"""
+
+SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: fit-content;
+      min-width: 0;
+      min-height: 0;
+      color: #1d1d1f;
+      background: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+    body { padding: 16px; overflow-x: hidden; }
+    .card {
+      position: relative;
+      width: 780px;
+      max-width: 780px;
+      overflow: hidden;
+      border: 1px solid rgba(0, 0, 0, 0.10);
+      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,.97), rgba(250,250,252,.95));
+      box-shadow: 0 18px 46px rgba(0,0,0,.12), 0 1px 0 rgba(255,255,255,.8) inset;
+    }
+    .card:before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 1px;
+      background: rgba(255,255,255,.9);
+    }
+    .inner { padding: 27px 30px 23px; }
+    .topbar { display: table; width: 100%; margin-bottom: 16px; }
+    .eyebrow-wrap, .status-wrap { display: table-cell; vertical-align: top; }
+    .status-wrap { text-align: right; }
+    .eyebrow, .status-badge, .flag {
+      display: inline-block;
+      border: 1px solid rgba(0,0,0,.08);
+      border-radius: 999px;
+      background: rgba(255,255,255,.76);
+    }
+    .eyebrow { padding: 5px 10px; color: #6e6e73; font-size: 16px; font-weight: 550; }
+    .status-badge {
+      position: relative;
+      padding: 5px 11px 5px 24px;
+      color: #5f6065;
+      border-color: rgba(142,142,147,.22);
+      background: rgba(245,245,247,.78);
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .status-badge:before {
+      content: "";
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      width: 8px;
+      height: 8px;
+      margin-top: -4px;
+      border-radius: 50%;
+      background: #8e8e93;
+    }
+    h1 { margin: 0; font-size: 31px; line-height: 1.18; letter-spacing: -.025em; }
+    .subtitle { margin-top: 8px; color: #6e6e73; font-size: 16px; line-height: 1.45; }
+    .overview {
+      display: table;
+      width: 100%;
+      margin-top: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(60,60,67,.12);
+      border-radius: 14px;
+      background: rgba(245,245,247,.54);
+    }
+    .metric {
+      display: table-cell;
+      width: 33.333%;
+      padding: 11px 8px;
+      border-left: 1px solid rgba(60,60,67,.12);
+      text-align: center;
+    }
+    .metric:first-child { border-left: 0; }
+    .metric-value { display: block; font-size: 18px; font-weight: 780; }
+    .metric-label { display: block; margin-top: 3px; color: #8a8a8e; font-size: 12px; }
+    .flags { margin-top: 10px; }
+    .flag { margin: 0 6px 4px 0; padding: 3px 8px; color: #6e6e73; font-size: 12px; font-weight: 700; }
+    .section-label { margin: 20px 0 8px; color: #8a8a8e; font-size: 13px; font-weight: 750; letter-spacing: .12em; }
+    .timeline {
+      overflow: hidden;
+      border: 1px solid rgba(0,0,0,.08);
+      border-radius: 16px;
+      background: rgba(255,255,255,.8);
+    }
+    .axis, .row {
+      display: grid;
+      grid-template-columns: 174px minmax(0,1fr) 104px;
+    }
+    .axis {
+      min-height: 44px;
+      color: #8a8a8e;
+      background: rgba(245,245,247,.72);
+      font-size: 11px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .axis-name, .axis-state { display: flex; align-items: center; padding: 0 12px; }
+    .axis-state { justify-content: flex-end; }
+    .axis-track, .track {
+      position: relative;
+      border-right: 1px solid rgba(60,60,67,.12);
+      border-left: 1px solid rgba(60,60,67,.12);
+      background-image: linear-gradient(to right, transparent calc(25% - 1px), rgba(60,60,67,.11) 25%, transparent calc(25% + 1px)), linear-gradient(to right, transparent calc(50% - 1px), rgba(60,60,67,.11) 50%, transparent calc(50% + 1px)), linear-gradient(to right, transparent calc(75% - 1px), rgba(60,60,67,.11) 75%, transparent calc(75% + 1px));
+    }
+    .track { overflow: hidden; }
+    .tick { position: absolute; bottom: 8px; transform: translateX(-50%); white-space: nowrap; }
+    .tick.first { transform: none; }
+    .tick.last { transform: translateX(-100%); }
+    .row { min-height: 54px; border-top: 1px solid rgba(60,60,67,.12); }
+    .task {
+      min-width: 0;
+      padding: 8px 11px;
+      border-left: 3px solid transparent;
+    }
+    .task.depth-2 { padding-left: 21px; border-left-color: rgba(65,108,157,.26); }
+    .task.depth-3 { padding-left: 31px; border-left-color: rgba(65,108,157,.34); }
+    .task.depth-4 { padding-left: 41px; border-left-color: rgba(65,108,157,.42); }
+    .task-name, .task-agent {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .task-name { font-size: 14px; font-weight: 730; line-height: 1.3; }
+    .task-agent { margin-top: 3px; color: #8a8a8e; font-size: 11px; line-height: 1.25; }
+    .bar {
+      position: absolute;
+      top: 13px;
+      bottom: 13px;
+      min-width: 5px;
+      border: 1px solid rgba(65,108,157,.42);
+      border-radius: 7px;
+      background: #dce9f7;
+      box-shadow: 0 2px 7px rgba(50,72,96,.09);
+    }
+    .bar.completed { border-color: rgba(40,116,71,.42); background: #dff2e6; }
+    .bar.failed { border-color: rgba(190,48,53,.48); background: #f8dddd; }
+    .bar.running { border-color: rgba(181,122,0,.48); background: #fff0bf; }
+    .bar.cancelled { border-color: rgba(110,110,115,.40); background: #e8e8eb; }
+    .bar.unknown { border-color: rgba(65,108,157,.42); background: #dce9f7; }
+    .bar.partial {
+      border-style: dashed;
+      background: repeating-linear-gradient(135deg, #e5e8ed 0, #e5e8ed 6px, #f7f7f8 6px, #f7f7f8 11px);
+    }
+    .state {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: flex-end;
+      min-width: 0;
+      padding: 7px 10px;
+      text-align: right;
+    }
+    .state-label { font-size: 12px; font-weight: 750; white-space: nowrap; }
+    .state-label.completed { color: #24663f; }
+    .state-label.failed { color: #9f2d2f; }
+    .state-label.running { color: #8a5a00; }
+    .state-time { margin-top: 3px; color: #8a8a8e; font-size: 11px; white-space: nowrap; }
+    .unlocated {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px dashed rgba(142,142,147,.34);
+      border-radius: 13px;
+      background: rgba(245,245,247,.52);
+    }
+    .unlocated-title { color: #5f6065; font-size: 14px; font-weight: 750; }
+    .unlocated-list { margin: 8px 0 0; padding: 0; list-style: none; }
+    .unlocated-item {
+      display: table;
+      width: 100%;
+      padding: 7px 0;
+      border-top: 1px solid rgba(60,60,67,.10);
+    }
+    .unlocated-item:first-child { border-top: 0; }
+    .unlocated-name, .unlocated-state { display: table-cell; vertical-align: middle; font-size: 13px; }
+    .unlocated-name { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 680; }
+    .unlocated-state { width: 1%; padding-left: 12px; color: #6e6e73; white-space: nowrap; text-align: right; }
+    .legend {
+      margin-top: 12px;
+      color: #6e6e73;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .legend-item { display: inline-block; margin: 0 14px 5px 0; white-space: nowrap; }
+    .legend-mark { display: inline-block; width: 17px; height: 8px; margin-right: 5px; border-radius: 3px; vertical-align: 1px; }
+    .legend-mark.completed { background: #dff2e6; border: 1px solid rgba(40,116,71,.42); }
+    .legend-mark.failed { background: #f8dddd; border: 1px solid rgba(190,48,53,.48); }
+    .legend-mark.running { background: #fff0bf; border: 1px solid rgba(181,122,0,.48); }
+    .legend-mark.cancelled { background: #e8e8eb; border: 1px solid rgba(110,110,115,.40); }
+    .legend-mark.unknown { background: #dce9f7; border: 1px solid rgba(65,108,157,.42); }
+    .legend-mark.partial { background: #f7f7f8; border: 1px dashed rgba(110,110,115,.55); }
+    .remaining {
+      margin-top: 10px;
+      padding: 9px 11px;
+      border-radius: 10px;
+      color: #6e6e73;
+      background: rgba(245,245,247,.65);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="inner">
+      <div class="topbar">
+        <div class="eyebrow-wrap"><span class="eyebrow">根任务 · 相对时间</span></div>
+        <div class="status-wrap"><span class="status-badge">相对时间线</span></div>
+      </div>
+      <h1>子任务执行时间线</h1>
+      <div class="subtitle">{{ event.subtitle|e }}</div>
+      <div class="overview">
+        {% for metric in event.metrics %}<div class="metric"><span class="metric-value">{{ metric.value|e }}</span><span class="metric-label">{{ metric.label|e }}</span></div>{% endfor %}
+      </div>
+      {% if event.flags %}<div class="flags">{% for flag in event.flags %}<span class="flag">{{ flag|e }}</span>{% endfor %}</div>{% endif %}
+
+      <div class="section-label">执行区间</div>
+      <section class="timeline">
+        <div class="axis">
+          <div class="axis-name">子任务</div>
+          <div class="axis-track">{% for tick in event.axis_ticks %}<span class="tick {{ tick.edge_class }}" style="left: {{ tick.left }}%;">{{ tick.label|e }}</span>{% endfor %}</div>
+          <div class="axis-state">状态 / 耗时</div>
+        </div>
+        {% for item in event.gantt_items %}
+        <div class="row timeline-row">
+          <div class="task depth-{{ item.depth_class }}"><div class="task-name">{{ item.name|e }}</div>{% if item.agent %}<div class="task-agent">{{ item.agent|e }}</div>{% endif %}</div>
+          <div class="track"><span class="bar {{ item.status_class }}{% if item.partial_interval %} partial{% endif %}" style="left: {{ item.left_pct }}%; width: {{ item.width_pct }}%;"></span></div>
+          <div class="state"><span class="state-label {{ item.status_class }}">{{ item.status_symbol|e }} {{ item.status_label|e }}</span><span class="state-time">{{ item.timing_label|e }}</span></div>
+        </div>
+        {% endfor %}
+      </section>
+
+      {% if event.unlocated_items %}
+      <section class="unlocated">
+        <div class="unlocated-title">未定位任务 · 缺少完整起止时间</div>
+        <ul class="unlocated-list">
+          {% for item in event.unlocated_items %}<li class="unlocated-item"><span class="unlocated-name">{{ item.name|e }}{% if item.agent %} · {{ item.agent|e }}{% endif %}</span><span class="unlocated-state">{{ item.status_symbol|e }} {{ item.status_label|e }} · 区间不完整</span></li>{% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      <div class="legend">
+        <span class="legend-item"><span class="legend-mark completed"></span>已完成</span>
+        <span class="legend-item"><span class="legend-mark failed"></span>失败</span>
+        <span class="legend-item"><span class="legend-mark running"></span>进行中</span>
+        <span class="legend-item"><span class="legend-mark cancelled"></span>已取消</span>
+        <span class="legend-item"><span class="legend-mark unknown"></span>状态未知</span>
+        <span class="legend-item"><span class="legend-mark partial"></span>区间不完整</span>
+      </div>
+      {% if event.remaining_count > 0 %}<div class="remaining">其余 {{ event.remaining_count }} 项未展开；汇总数字仍包含已观测任务。</div>{% endif %}
     </div>
   </main>
 </body>
@@ -445,6 +1012,421 @@ def _render_inline_code(value: Any) -> Markup:
         cursor = match.end()
     parts.append(Markup.escape(text[cursor:]))
     return Markup("").join(parts)
+
+
+def _is_finite_timeline_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _safe_timeline_display_text(value: Any, *, fallback: str = "") -> str:
+    """Return bounded display text without surfacing refs, paths, or raw JSON."""
+
+    if not isinstance(value, str):
+        return fallback
+    text = re.sub(r"\s+", " ", value).strip()
+    if not text:
+        return fallback
+    lowered = text.lower()
+    path_like = (
+        text.startswith(("/", "~/", "file:"))
+        or _TIMELINE_WINDOWS_PATH_RE.match(text) is not None
+        or re.search(r"/(?:users|home|var|tmp|volumes|private)/", lowered) is not None
+    )
+    json_like = (text.startswith("{") and text.endswith("}")) or (
+        text.startswith("[") and text.endswith("]")
+    )
+    if path_like or json_like or _TIMELINE_REF_LIKE_RE.fullmatch(text):
+        return fallback
+    return text
+
+
+def _is_auxiliary_timeline_item(item: dict[str, Any]) -> bool:
+    for key in ("name", "agent"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip().lower() == "smartfetch-secondary":
+            return True
+    return False
+
+
+def _timeline_interval(item: dict[str, Any]) -> tuple[float, float] | None:
+    start = item.get("startOffsetMs")
+    end = item.get("endOffsetMs")
+    if (
+        isinstance(start, bool)
+        or not isinstance(start, (int, float))
+        or not math.isfinite(start)
+        or start < 0
+        or isinstance(end, bool)
+        or not isinstance(end, (int, float))
+        or not math.isfinite(end)
+        or end < 0
+    ):
+        return None
+    start_value = float(start)
+    end_value = float(end)
+    if end_value < start_value:
+        return None
+    return start_value, end_value
+
+
+def _timeline_reliable_interval(item: dict[str, Any]) -> tuple[float, float] | None:
+    interval = _timeline_interval(item)
+    if interval is None or item.get("timingQuality") not in {"observed", "fallback"}:
+        return None
+    return interval
+
+
+def _timeline_peak_concurrency(intervals: list[tuple[float, float]]) -> int:
+    events: list[tuple[float, int]] = []
+    for start, end in intervals:
+        if end <= start:
+            continue
+        events.append((start, 1))
+        events.append((end, -1))
+    current = 0
+    peak = 0
+    for _, delta in sorted(events, key=lambda event: (event[0], event[1])):
+        current += delta
+        peak = max(peak, current)
+    if intervals and peak == 0:
+        return 1
+    return peak
+
+
+def _timeline_overlap_data(
+    intervals: list[tuple[int, float, float]],
+) -> tuple[set[int], int]:
+    parallel_indices: set[int] = set()
+    overlap_pairs = 0
+    for left_index, (item_index, start, end) in enumerate(intervals):
+        if end <= start:
+            continue
+        for other_index, other_start, other_end in intervals[left_index + 1 :]:
+            if other_end <= other_start:
+                continue
+            if max(start, other_start) < min(end, other_end):
+                parallel_indices.update((item_index, other_index))
+                overlap_pairs += 1
+    return parallel_indices, overlap_pairs
+
+
+def _format_timeline_scale(value_ms: float) -> str:
+    value = max(0.0, value_ms)
+    if value < 1000:
+        return f"{int(round(value))}毫秒"
+    seconds = value / 1000
+    if seconds < 60:
+        text = f"{seconds:.1f}".rstrip("0").rstrip(".")
+        return f"{text}秒"
+    total_seconds = int(round(seconds))
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    if minutes < 60:
+        return (
+            f"{minutes}分{remaining_seconds}秒" if remaining_seconds else f"{minutes}分"
+        )
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}小时{remaining_minutes}分" if remaining_minutes else f"{hours}小时"
+
+
+def _timeline_status_view(status: Any) -> tuple[str, str, str]:
+    status_key = (
+        status
+        if isinstance(status, str) and status in _TIMELINE_STATUSES
+        else "unknown"
+    )
+    label, symbol = _TIMELINE_STATUS_VIEW[status_key]
+    return status_key, label, symbol
+
+
+def _timeline_is_root_completion(event: NormalizedEvent) -> bool:
+    scope = getattr(event.session_scope, "value", event.session_scope)
+    return event.event == "opencode.session_idle" and scope == "root"
+
+
+def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | None:
+    """Build a deterministic, display-only timeline view without raw identifiers."""
+
+    timeline = event.subagent_timeline
+    if not _timeline_is_root_completion(event) or not isinstance(timeline, dict):
+        return None
+    raw_items = timeline.get("items")
+    if not isinstance(raw_items, list):
+        return None
+    indexed_items = [
+        (index, item)
+        for index, item in enumerate(raw_items)
+        if isinstance(item, dict) and not _is_auxiliary_timeline_item(item)
+    ]
+    if not indexed_items:
+        return None
+
+    item_count = len(indexed_items)
+    excluded_count = len(raw_items) - item_count
+    observed_raw = timeline.get("observedItemCount")
+    observed_count = (
+        max(item_count, observed_raw - excluded_count)
+        if isinstance(observed_raw, int) and not isinstance(observed_raw, bool)
+        else item_count
+    )
+    truncated = timeline.get("truncated") is True or observed_count > item_count
+    partial = timeline.get("partial") is True
+
+    status_counts = {status: 0 for status in _TIMELINE_STATUSES}
+    all_intervals: list[tuple[int, float, float]] = []
+    reliable_intervals: list[tuple[float, float]] = []
+    missing_count = 0
+    max_depth = 1
+    for index, item in indexed_items:
+        status_key, _, _ = _timeline_status_view(item.get("status"))
+        status_counts[status_key] += 1
+        depth = item.get("depth")
+        if isinstance(depth, int) and not isinstance(depth, bool):
+            max_depth = max(max_depth, depth)
+        interval = _timeline_interval(item)
+        if interval is None:
+            missing_count += 1
+        else:
+            all_intervals.append((index, interval[0], interval[1]))
+        reliable_interval = _timeline_reliable_interval(item)
+        if reliable_interval is not None:
+            reliable_intervals.append(reliable_interval)
+
+    missing_ratio = missing_count / item_count
+    parallel_indices, overlap_pairs = _timeline_overlap_data(all_intervals)
+    observed_peak = _timeline_peak_concurrency(
+        [(start, end) for _, start, end in all_intervals]
+    )
+    reliable_peak = _timeline_peak_concurrency(reliable_intervals)
+    reliable_span_ms = None
+    if reliable_intervals:
+        reliable_span_ms = max(end for _, end in reliable_intervals) - min(
+            start for start, _ in reliable_intervals
+        )
+
+    complexity_score = max(0, item_count - SUBAGENT_TIMELINE_SIMPLE_BASE_ITEMS)
+    complexity_score += 2 * max(0, max_depth - SUBAGENT_TIMELINE_SIMPLE_MAX_DEPTH)
+    complexity_score += 2 * max(
+        0, observed_peak - SUBAGENT_TIMELINE_SIMPLE_MAX_CONCURRENCY
+    )
+    if overlap_pairs >= 2:
+        complexity_score += 1
+    if partial:
+        complexity_score += 1
+    if truncated:
+        complexity_score += 2
+
+    if missing_ratio > SUBAGENT_TIMELINE_MISSING_RATIO_LIMIT:
+        mode = "degraded"
+    else:
+        hard_complex = (
+            max_depth > SUBAGENT_TIMELINE_SIMPLE_MAX_DEPTH
+            or observed_peak > SUBAGENT_TIMELINE_SIMPLE_MAX_CONCURRENCY
+            or truncated
+        )
+        mode = (
+            "complex"
+            if hard_complex
+            or complexity_score >= SUBAGENT_TIMELINE_COMPLEXITY_THRESHOLD
+            else "simple"
+        )
+
+    timeline_end_ms = max((end for _, _, end in all_intervals), default=1.0)
+    timeline_end_ms = max(1.0, timeline_end_ms)
+    item_views: list[dict[str, Any]] = []
+    for index, item in indexed_items:
+        status_class, status_label, status_symbol = _timeline_status_view(
+            item.get("status")
+        )
+        name = _safe_timeline_display_text(item.get("name"), fallback="未命名子任务")
+        agent = _safe_timeline_display_text(item.get("agent"))
+        depth = item.get("depth")
+        depth_value = (
+            depth if isinstance(depth, int) and not isinstance(depth, bool) else 1
+        )
+        depth_class = min(4, max(1, depth_value))
+        interval = _timeline_interval(item)
+        reliable_interval = _timeline_reliable_interval(item)
+        duration = item.get("durationMs")
+        duration_label = None
+        if (
+            reliable_interval is not None
+            and isinstance(duration, (int, float))
+            and not isinstance(duration, bool)
+            and math.isfinite(duration)
+            and duration >= 0
+            and item.get("timingQuality") != "partial"
+        ):
+            duration_label = format_duration_ms(duration)
+
+        meta_labels: list[str] = []
+        if reliable_interval is not None:
+            meta_labels.append(f"+{_format_timeline_scale(reliable_interval[0])}")
+            if duration_label:
+                meta_labels.append(duration_label)
+        elif interval is not None or item.get("timingQuality") == "partial":
+            meta_labels.append("区间不完整")
+        else:
+            meta_labels.append("时间未定位")
+
+        left_pct = 0.0
+        width_pct = 0.0
+        if interval is not None:
+            left_pct = min(100.0, max(0.0, interval[0] / timeline_end_ms * 100))
+            width_pct = min(
+                100.0 - left_pct,
+                max(0.8, (interval[1] - interval[0]) / timeline_end_ms * 100),
+            )
+        timing_label = (
+            duration_label
+            if duration_label
+            else "区间不完整"
+            if interval is None or item.get("timingQuality") == "partial"
+            else "已定位"
+        )
+        item_views.append(
+            {
+                "source_index": index,
+                "name": name,
+                "agent": agent,
+                "status_class": status_class,
+                "status_label": status_label,
+                "status_symbol": status_symbol,
+                "depth_class": depth_class,
+                "parallel": index in parallel_indices,
+                "meta_labels": meta_labels,
+                "located": interval is not None,
+                "partial_interval": interval is not None
+                and item.get("timingQuality") == "partial",
+                "left_pct": f"{left_pct:.3f}".rstrip("0").rstrip("."),
+                "width_pct": f"{width_pct:.3f}".rstrip("0").rstrip("."),
+                "timing_label": timing_label,
+                "sort_start": interval[0] if interval is not None else math.inf,
+            }
+        )
+
+    item_views.sort(key=lambda item: (item["sort_start"], item["source_index"]))
+    for item in item_views:
+        item.pop("sort_start", None)
+        item.pop("source_index", None)
+
+    status_parts = [
+        f"{_TIMELINE_STATUS_VIEW[status][0]} {count}"
+        for status, count in status_counts.items()
+        if count
+    ]
+    summary_text = f"{observed_count} 个子任务"
+    if status_parts:
+        summary_text += " · " + " · ".join(status_parts)
+
+    observation_limited = partial or truncated
+    peak_metric_label = "已观测峰值并发" if observation_limited else "峰值并发"
+    span_metric_label = "已观测跨度" if observation_limited else "总跨度"
+    timing_parts: list[str] = []
+    if reliable_peak:
+        timing_parts.append(f"{peak_metric_label} {reliable_peak}")
+    if reliable_span_ms is not None:
+        timing_parts.append(
+            f"{span_metric_label} {format_duration_ms(reliable_span_ms)}"
+        )
+    timing_summary = " · ".join(timing_parts)
+
+    flags: list[str] = []
+    if partial:
+        flags.append("部分数据")
+    if truncated:
+        flags.append("记录已截断")
+    if observed_count > item_count:
+        flags.append(f"已记录 {item_count}/{observed_count}")
+    if missing_count:
+        flags.append(f"{missing_count} 项时间不完整")
+    if max_depth > 1:
+        flags.append("包含嵌套执行")
+
+    if mode == "degraded":
+        notice = "部分时间数据缺失，以下仅按已观测信息展示。"
+    elif mode == "complex":
+        notice = "流程较复杂，主卡仅展示关键摘要。"
+    elif partial:
+        notice = "部分执行区间不完整，未显示精确耗时。"
+    else:
+        notice = ""
+
+    main_items = item_views[:SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT]
+    main_hidden_count = max(0, observed_count - len(main_items))
+    reliable_span_label = (
+        format_duration_ms(reliable_span_ms)
+        if isinstance(reliable_span_ms, (int, float))
+        else "不可用"
+    )
+    metrics = [
+        {"value": str(observed_count), "label": "子任务"},
+        {
+            "value": str(reliable_peak) if reliable_peak else "—",
+            "label": peak_metric_label,
+        },
+        {
+            "value": reliable_span_label,
+            "label": span_metric_label,
+        },
+    ]
+
+    located_items = [item for item in item_views if item["located"]]
+    unlocated_items = [item for item in item_views if not item["located"]]
+    reserve = min(len(unlocated_items), SUBAGENT_TIMELINE_UNLOCATED_RESERVE)
+    located_limit = SUBAGENT_TIMELINE_GANTT_ROW_LIMIT - reserve
+    gantt_items = located_items[:located_limit]
+    displayed_unlocated = unlocated_items[
+        : SUBAGENT_TIMELINE_GANTT_ROW_LIMIT - len(gantt_items)
+    ]
+    remaining_count = max(
+        0, observed_count - len(gantt_items) - len(displayed_unlocated)
+    )
+    gantt_displayed_count = len(gantt_items) + len(displayed_unlocated)
+    observation_subtitle = " · 指标按已观测范围计算" if observation_limited else ""
+    axis_ticks = []
+    for index in range(5):
+        left = index * 25
+        edge_class = "first" if index == 0 else "last" if index == 4 else ""
+        axis_ticks.append(
+            {
+                "left": left,
+                "edge_class": edge_class,
+                "label": _format_timeline_scale(timeline_end_ms * index / 4),
+            }
+        )
+
+    return {
+        "mode": mode,
+        "complexity_score": complexity_score,
+        "item_count": item_count,
+        "observed_count": observed_count,
+        "max_depth": max_depth,
+        "peak_concurrency": observed_peak,
+        "missing_count": missing_count,
+        "missing_ratio": missing_ratio,
+        "partial": partial,
+        "truncated": truncated,
+        "summary_text": summary_text,
+        "timing_summary": timing_summary,
+        "flags": flags,
+        "notice": notice,
+        "main_items": main_items,
+        "main_hidden_count": main_hidden_count,
+        "metrics": metrics,
+        "subtitle": (
+            f"观测 {observed_count} 个 · 本图展示 {gantt_displayed_count} 个"
+            f" · 时间相对根任务起点{observation_subtitle}"
+        ),
+        "axis_ticks": axis_ticks,
+        "gantt_items": gantt_items,
+        "unlocated_items": displayed_unlocated,
+        "remaining_count": remaining_count,
+    }
 
 
 def _create_sandbox(autoescape: bool = False) -> SandboxedEnvironment:
@@ -651,7 +1633,88 @@ def render_text_default(
         if label or value:
             lines.append(f"{label}：{value}" if label else value)
 
+    _append_subagent_timeline_text(lines, event)
+
     return "\n".join(lines)
+
+
+def _append_subagent_timeline_text(
+    lines: list[str], event: NormalizedEvent, *, max_items: int = 12
+) -> None:
+    """Append a bounded, non-visual summary for a root OpenCode completion."""
+
+    timeline = event.subagent_timeline
+    scope = getattr(event.session_scope, "value", event.session_scope)
+    if (
+        event.event != "opencode.session_idle"
+        or scope != "root"
+        or not isinstance(timeline, dict)
+    ):
+        return
+
+    lines.append("")
+    lines.append("子任务时间线：")
+    observed = timeline.get("observedItemCount")
+    displayed = timeline.get("displayedItemCount")
+    if isinstance(observed, int) and isinstance(displayed, int):
+        lines.append(f"任务数：{observed}（展示 {displayed}）")
+
+    states: list[str] = []
+    if timeline.get("partial") is True:
+        states.append("部分数据")
+    if timeline.get("truncated") is True:
+        states.append("已截断")
+    lines.append(f"状态：{'、'.join(states) if states else '完整'}")
+
+    items = timeline.get("items")
+    if not isinstance(items, list):
+        return
+    visible_items = [item for item in items if isinstance(item, dict)]
+    for item in visible_items[:max_items]:
+        name = _safe_timeline_display_text(item.get("name"))
+        agent = _safe_timeline_display_text(item.get("agent"))
+        if name:
+            label = name
+            if agent:
+                label = f"{label}（{agent}）"
+        elif agent:
+            label = agent
+        else:
+            label = "子任务"
+
+        status = item.get("status")
+        status_key = status if isinstance(status, str) else ""
+        status_text = {
+            "running": "运行中",
+            "completed": "已完成",
+            "failed": "失败",
+            "cancelled": "已取消",
+            "unknown": "未知",
+        }.get(status_key, "未知")
+        detail = f"{label}：{status_text}"
+        duration = item.get("durationMs")
+        timing_quality = item.get("timingQuality")
+        partial_reasons = timeline.get("partialReasons")
+        clamped = isinstance(partial_reasons, list) and "clamped" in partial_reasons
+        if (
+            isinstance(duration, (int, float))
+            and not isinstance(duration, bool)
+            and timing_quality in {"observed", "fallback"}
+            and not clamped
+        ):
+            detail += f"，耗时 {format_duration_ms(duration)}"
+        elif timing_quality == "partial" or clamped:
+            detail += "，区间不完整"
+        lines.append(f"- {detail}")
+
+    if len(visible_items) > max_items:
+        lines.append(f"其余 {len(visible_items) - max_items} 个任务未展开")
+    if (
+        isinstance(observed, int)
+        and isinstance(displayed, int)
+        and observed > displayed
+    ):
+        lines.append(f"另有 {observed - displayed} 个任务未展示")
 
 
 def render_html_data(
@@ -680,6 +1743,9 @@ def render_html_data(
         datetime.now(timezone.utc).isoformat(), display_context
     )
     data["event_time"] = format_timestamp(data.get("emitted_at", ""), display_context)
+    timeline_view = _build_subagent_timeline_view(event)
+    if timeline_view is not None:
+        data["subagent_timeline_view"] = timeline_view
 
     # NormalizedEvent 已用 list[dict] 存储 fields，模板 list 分支可用
     return {"event": data}
@@ -716,6 +1782,15 @@ def render_html_default(
 ) -> str:
     """使用默认 HTML 模板将标准化事件渲染为 HTML 卡片。"""
     return render_html(event, DEFAULT_HTML_TEMPLATE, display_context)
+
+
+def render_subagent_timeline_html(event: NormalizedEvent) -> str | None:
+    """Render the bounded second-image timeline for a complex root completion."""
+
+    view = _build_subagent_timeline_view(event)
+    if view is None or view["mode"] != "complex":
+        return None
+    return render_html_template(SUBAGENT_TIMELINE_HTML_TEMPLATE, view)
 
 
 def validate_image_result(result: Any) -> bool:

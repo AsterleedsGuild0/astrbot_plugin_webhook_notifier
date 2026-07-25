@@ -84,6 +84,43 @@ interface Envelope {
   permission?: PermissionEnvelope;
   question?: QuestionEnvelope;
   error?: { category: string; code?: string };
+  subagentTimeline?: SubagentTimelineEnvelope;
+}
+
+type TimelinePartialReason =
+  | "missing_parent"
+  | "missing_start"
+  | "missing_end"
+  | "invalid_parent_graph"
+  | "truncated"
+  | "clamped";
+
+type TimelineItemStatus = "running" | "completed" | "failed" | "cancelled" | "unknown";
+type TimelineTimingQuality = "observed" | "fallback" | "partial" | "unknown";
+
+interface SubagentTimelineItem {
+  ref: string;
+  parentRef: string;
+  name?: string;
+  agent?: string;
+  status: TimelineItemStatus;
+  startOffsetMs?: number;
+  endOffsetMs?: number;
+  durationMs?: number;
+  timingQuality: TimelineTimingQuality;
+  depth: number;
+  attempt: number;
+}
+
+interface SubagentTimelineEnvelope {
+  version: 1;
+  partial: boolean;
+  partialReasons: TimelinePartialReason[];
+  timeBasis: "root_cycle";
+  observedItemCount: number;
+  displayedItemCount: number;
+  truncated: boolean;
+  items: SubagentTimelineItem[];
 }
 
 type SessionScope = "root" | "subagent" | "auxiliary" | "unknown";
@@ -137,6 +174,8 @@ interface OpenCodeEvent {
   cycleTimingCaptured?: boolean;
   /** Internal marker that the claimed cycle timing passed validation. */
   cycleTimingReliable?: boolean;
+  /** Internal anonymous parent reference populated by session enrichment. */
+  timelineParentRef?: string;
   status?: string;
   session?: {
     name?: string;
@@ -257,6 +296,18 @@ const MAX_ACTION_OPTIONS = 12;
 const MAX_PERMISSION_ITEMS = 16;
 const MAX_PERMISSION_PATTERNS = 16;
 const MAX_ENVELOPE_BYTES = 64 * 1024;
+const MAX_TIMELINE_BYTES = 24 * 1024;
+const MAX_TIMELINE_ITEMS = 64;
+const MAX_TIMELINE_DEPTH = 8;
+const TIMELINE_OVERLAP_TOLERANCE_MS = 100;
+const MAX_TIMELINE_RUNS = 4096;
+const RETAIN_TIMELINE_RUNS = 2048;
+const MAX_TIMELINE_PARENTS = 4096;
+const RETAIN_TIMELINE_PARENTS = 2048;
+const MAX_TIMELINE_CAPACITY_DROPS = 256;
+const RETAIN_TIMELINE_CAPACITY_DROPS = 128;
+const TIMELINE_RUNNING_TTL_MS = 15 * 60 * 1000;
+const TIMELINE_ENDED_TTL_MS = 60 * 60 * 1000;
 const MAX_COUNT = 1_000_000;
 const MAX_DURATION_MS = 604_800_000;
 const MAX_RETRIES = 2; // 3 total attempts (1 initial + 2 retries)
@@ -379,6 +430,56 @@ const _sessionScopes = new Map<string, SessionScope>();
 /** Assistant metadata keyed only by the existing anonymous session ref. */
 const _assistantMetadata = new Map<string, AssistantMetadata>();
 
+interface TimelineRun {
+  key: string;
+  ref: string;
+  parentRef?: string;
+  /** Internal anonymous ownership anchor; never serialized in an envelope. */
+  rootOwnership?: TimelineRootOwnership;
+  /** Whether ownership is confirmed by a compatible parent chain or provisional. */
+  rootOwnershipQuality?: TimelineOwnershipQuality;
+  scope: SessionScope;
+  name?: string;
+  agent?: string;
+  status: TimelineItemStatus;
+  startMs?: number;
+  endMs?: number;
+  startQuality?: "observed" | "fallback";
+  endQuality?: "observed" | "fallback";
+  cycle: number;
+  attempt: number;
+  lastAccessMs: number;
+  consumed?: boolean;
+}
+
+interface TimelineRootOwnership {
+  rootRef: string;
+  rootCycle: number;
+  rootRunKey: string;
+}
+
+type TimelineOwnershipQuality = "confirmed" | "provisional";
+
+interface TimelineCapacityDrop {
+  key: string;
+  ref: string;
+  cycle: number;
+  parentRef?: string;
+  /** Internal anonymous ownership anchor; never serialized in an envelope. */
+  rootOwnership?: TimelineRootOwnership;
+  rootOwnershipQuality?: TimelineOwnershipQuality;
+  scope: SessionScope;
+  startMs?: number;
+  lastAccessMs: number;
+}
+
+/** Timeline state is anonymous and process-local; no raw session IDs are kept. */
+const _timelineRuns = new Map<string, TimelineRun>();
+/** Parent hints are keyed by the exact run key, never by mutable session ref. */
+const _timelineParents = new Map<string, string>();
+/** Bounded markers for runs rejected only because the collector was at capacity. */
+const _timelineCapacityDrops = new Map<string, TimelineCapacityDrop>();
+
 // ─── Session Ref Hashing ────────────────────────────────────
 
 const _textEncoder = new TextEncoder();
@@ -434,6 +535,863 @@ function _setClockForTests(clock?: () => number): void {
 function _safeEpochMs(raw: unknown): number | undefined {
   if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return undefined;
   return raw;
+}
+
+function _timelineRunKey(sessionRef: string, cycle: number): string {
+  return `${sessionRef}:${cycle}`;
+}
+
+function _timelineRootOwnership(rootRef: string, rootCycle: number): TimelineRootOwnership {
+  return {
+    rootRef,
+    rootCycle,
+    rootRunKey: _timelineRunKey(rootRef, rootCycle),
+  };
+}
+
+function _timelineOwnershipForRun(run: TimelineRun): TimelineRootOwnership | undefined {
+  if (run.scope === "root") return _timelineRootOwnership(run.ref, run.cycle);
+  return run.rootOwnership;
+}
+
+function _timelineOwnershipQualityForRun(run: TimelineRun): TimelineOwnershipQuality {
+  if (run.scope === "root") return "confirmed";
+  return run.rootOwnershipQuality ?? "provisional";
+}
+
+function _timelineOwnershipMatchesTarget(
+  ownership: TimelineRootOwnership | undefined,
+  rootRunKey: string,
+): "target" | "unrelated" | "unknown" {
+  if (!ownership) return "unknown";
+  return ownership.rootRunKey === rootRunKey ? "target" : "unrelated";
+}
+
+function _timelinePartialIntervalsOverlap(
+  aStartMs: number | undefined,
+  aEndMs: number | undefined,
+  bStartMs: number | undefined,
+  bEndMs: number | undefined,
+): boolean {
+  if (aStartMs === undefined && aEndMs === undefined) return false;
+  if (bStartMs === undefined && bEndMs === undefined) return false;
+  if (aEndMs !== undefined && bStartMs !== undefined && aEndMs <= bStartMs) return false;
+  if (bEndMs !== undefined && aStartMs !== undefined && bEndMs <= aStartMs) return false;
+  return true;
+}
+
+interface TimelineParentOwnershipResolution {
+  ownership: TimelineRootOwnership;
+  quality: TimelineOwnershipQuality;
+}
+
+/**
+ * A parent run is compatible only when its own interval can belong to the
+ * child's cycle.  Once a parent has an ownership anchor, the anchored root
+ * interval is an additional cycle guard: a stale running/unenriched parent
+ * from an older root cycle must not remain a candidate merely because its
+ * end time is missing.
+ */
+function _timelineParentCandidateQuality(
+  run: TimelineRun,
+  ownership: TimelineRootOwnership,
+  childStartMs: number | undefined,
+  childEndMs: number | undefined,
+): TimelineOwnershipQuality | undefined {
+  const hasParentTiming = run.startMs !== undefined || run.endMs !== undefined;
+  const hasChildTiming = childStartMs !== undefined || childEndMs !== undefined;
+
+  if (hasParentTiming || hasChildTiming) {
+    if (!_timelinePartialIntervalsOverlap(run.startMs, run.endMs, childStartMs, childEndMs)) {
+      return undefined;
+    }
+
+    const rootRun = _timelineRuns.get(ownership.rootRunKey);
+    if (rootRun && hasChildTiming
+      && !_timelinePartialIntervalsOverlap(rootRun.startMs, rootRun.endMs, childStartMs, childEndMs)) {
+      return undefined;
+    }
+  }
+
+  const candidateQuality = _timelineOwnershipQualityForRun(run);
+  if (run.scope === "root" || candidateQuality === "confirmed") return "confirmed";
+  return "provisional";
+}
+
+function _timelineParentOwnership(
+  parentRef: string,
+  childStartMs: number | undefined,
+  childEndMs: number | undefined,
+): TimelineParentOwnershipResolution | undefined {
+  const candidates = _timelineRunsForRef(parentRef)
+    .map((run) => ({ run, ownership: _timelineOwnershipForRun(run) }))
+    .filter((candidate): candidate is { run: TimelineRun; ownership: TimelineRootOwnership } => candidate.ownership !== undefined)
+    .flatMap((candidate) => {
+      const quality = _timelineParentCandidateQuality(
+        candidate.run,
+        candidate.ownership,
+        childStartMs,
+        childEndMs,
+      );
+      return quality ? [{ ...candidate, quality }] : [];
+    });
+  if (candidates.length === 0) return undefined;
+
+  candidates.sort((a, b) => {
+    const aQuality = a.quality === "confirmed" ? 1 : 0;
+    const bQuality = b.quality === "confirmed" ? 1 : 0;
+    return bQuality - aQuality
+      || (b.run.startMs ?? Number.NEGATIVE_INFINITY) - (a.run.startMs ?? Number.NEGATIVE_INFINITY)
+      || b.run.cycle - a.run.cycle;
+  });
+  const selected = candidates[0]!;
+  return { ownership: selected.ownership, quality: selected.quality };
+}
+
+function _timelineOwnershipCompatibleWithRun(
+  ownership: TimelineRootOwnership,
+  run: TimelineRun,
+): boolean | undefined {
+  const rootRun = _timelineRuns.get(ownership.rootRunKey);
+  if (!rootRun) return undefined;
+  if (run.startMs === undefined && run.endMs === undefined) return undefined;
+  return _timelinePartialIntervalsOverlap(rootRun.startMs, rootRun.endMs, run.startMs, run.endMs);
+}
+
+function _adoptTimelineOwnership(
+  run: TimelineRun,
+  ownership: TimelineRootOwnership,
+  quality: TimelineOwnershipQuality,
+): boolean {
+  const existing = run.rootOwnership;
+  if (!existing) {
+    run.rootOwnership = ownership;
+    run.rootOwnershipQuality = quality;
+    return true;
+  }
+
+  if (existing.rootRunKey === ownership.rootRunKey) {
+    if (quality === "confirmed" || run.rootOwnershipQuality === undefined) {
+      run.rootOwnershipQuality = quality;
+    }
+    return true;
+  }
+
+  const existingQuality = run.rootOwnershipQuality ?? "provisional";
+  if (existingQuality === "confirmed") return false;
+  if (quality === "confirmed") {
+    run.rootOwnership = ownership;
+    run.rootOwnershipQuality = quality;
+    return true;
+  }
+
+  // Two provisional hints are not ordered by arrival alone.  A stale hint
+  // whose anchored root interval is already disjoint may be replaced by the
+  // newer compatible hint; otherwise remain unresolved rather than guessing.
+  if (_timelineOwnershipCompatibleWithRun(existing, run) === false) {
+    run.rootOwnership = ownership;
+    run.rootOwnershipQuality = quality;
+    return true;
+  }
+  return false;
+}
+
+function _propagateTimelineOwnership(
+  parentRef: string,
+  ownership: TimelineRootOwnership,
+  quality: TimelineOwnershipQuality,
+  parentStartMs?: number,
+  parentEndMs?: number,
+): void {
+  const visited = new Set<string>();
+  const visit = (
+    ancestorRef: string,
+    ancestorStartMs: number | undefined,
+    ancestorEndMs: number | undefined,
+  ): void => {
+    if (visited.has(ancestorRef)) return;
+    visited.add(ancestorRef);
+    for (const run of [..._timelineRuns.values()]) {
+      if (run.parentRef !== ancestorRef || run.scope === "root" || run.scope === "auxiliary") continue;
+      if (!_timelinePartialIntervalsOverlap(ancestorStartMs, ancestorEndMs, run.startMs, run.endMs)) continue;
+      const adopted = _adoptTimelineOwnership(run, ownership, quality);
+      if (!adopted && run.rootOwnership?.rootRunKey !== ownership.rootRunKey) continue;
+      _timelineRefreshRun(run);
+      visit(run.ref, run.startMs, run.endMs);
+    }
+    for (const drop of [..._timelineCapacityDrops.values()]) {
+      if (drop.parentRef !== ancestorRef || drop.scope === "root" || drop.scope === "auxiliary") continue;
+      if (!_timelinePartialIntervalsOverlap(ancestorStartMs, ancestorEndMs, drop.startMs, undefined)) continue;
+      if (!drop.rootOwnership
+        || drop.rootOwnership.rootRunKey === ownership.rootRunKey
+        || (drop.rootOwnershipQuality !== "confirmed" && quality === "confirmed")) {
+        drop.rootOwnership = ownership;
+        drop.rootOwnershipQuality = quality;
+      } else if (drop.rootOwnership.rootRunKey !== ownership.rootRunKey) {
+        continue;
+      }
+    }
+  };
+  visit(parentRef, parentStartMs, parentEndMs);
+}
+
+function _timelineRefreshRun(run: TimelineRun): void {
+  run.lastAccessMs = _nowMs();
+  _timelineRuns.delete(run.key);
+  _timelineRuns.set(run.key, run);
+}
+
+function _timelineCapacityAvailable(): boolean {
+  if (_timelineRuns.size < MAX_TIMELINE_RUNS) return true;
+  _cleanupTimelineRuns(true);
+  return _timelineRuns.size < MAX_TIMELINE_RUNS;
+}
+
+function _recordTimelineCapacityDrop(sessionRef: string, cycle: number, startMs?: number): void {
+  const key = _timelineRunKey(sessionRef, cycle);
+  const existing = _timelineCapacityDrops.get(key);
+  const marker: TimelineCapacityDrop = existing ?? {
+    key,
+    ref: sessionRef,
+    cycle,
+    scope: _cachedSessionScope(sessionRef) ?? "unknown",
+    lastAccessMs: _nowMs(),
+  };
+  if (marker.scope === "root") {
+    marker.rootOwnership = _timelineRootOwnership(sessionRef, cycle);
+    marker.rootOwnershipQuality = "confirmed";
+  }
+  if (startMs !== undefined) marker.startMs = startMs;
+  marker.lastAccessMs = _nowMs();
+  _timelineCapacityDrops.delete(key);
+  _timelineCapacityDrops.set(key, marker);
+  if (_timelineCapacityDrops.size > MAX_TIMELINE_CAPACITY_DROPS) {
+    const entries = [..._timelineCapacityDrops.keys()];
+    for (const oldKey of entries.slice(0, Math.max(0, entries.length - RETAIN_TIMELINE_CAPACITY_DROPS))) {
+      _timelineCapacityDrops.delete(oldKey);
+    }
+  }
+}
+
+function _timelineRunFor(sessionRef: string, cycle: number): TimelineRun | undefined {
+  const run = _timelineRuns.get(_timelineRunKey(sessionRef, cycle));
+  if (run) _timelineRefreshRun(run);
+  return run;
+}
+
+function _timelineRunForCurrentCycle(sessionRef: string, cycle?: number): TimelineRun | undefined {
+  const resolvedCycle = cycle ?? _sessions.get(sessionRef)?.cycle;
+  return resolvedCycle && resolvedCycle > 0 ? _timelineRunFor(sessionRef, resolvedCycle) : undefined;
+}
+
+function _startTimelineRun(sessionRef: string, cycle: number, startMs: number): void {
+  const key = _timelineRunKey(sessionRef, cycle);
+  if (_timelineRuns.has(key)) return;
+  if (!_timelineCapacityAvailable()) {
+    _recordTimelineCapacityDrop(sessionRef, cycle, startMs);
+    return;
+  }
+  const scope = _cachedSessionScope(sessionRef) ?? "unknown";
+  _timelineRuns.set(key, {
+    key,
+    ref: sessionRef,
+    scope,
+    rootOwnership: scope === "root" ? _timelineRootOwnership(sessionRef, cycle) : undefined,
+    rootOwnershipQuality: scope === "root" ? "confirmed" : undefined,
+    status: "running",
+    startMs,
+    startQuality: "observed",
+    cycle,
+    attempt: cycle,
+    lastAccessMs: _nowMs(),
+  });
+}
+
+function _updateTimelineIdentity(
+  sessionRef: string,
+  event: OpenCodeEvent,
+  parentKnown: boolean,
+  parentRef?: string,
+  cycle?: number,
+): void {
+  const resolvedCycle = cycle ?? _sessions.get(sessionRef)?.cycle;
+  const run = resolvedCycle && resolvedCycle > 0
+    ? _timelineRunFor(sessionRef, resolvedCycle)
+    : undefined;
+  const dropped = resolvedCycle && resolvedCycle > 0
+    ? _timelineCapacityDrops.get(_timelineRunKey(sessionRef, resolvedCycle))
+    : undefined;
+  if (!run && !dropped) return;
+
+  if (run && event.sessionScope && event.sessionScope !== "unknown") {
+    run.scope = event.sessionScope;
+  }
+  const name = _sanitiseName(event.session?.name ?? event.session?.title);
+  if (run && name) run.name = name;
+  const agent = _sanitiseActionText(event.agent, MAX_AGENT_MODEL_LENGTH);
+  if (run && agent) run.agent = agent;
+
+  if (dropped && event.sessionScope && event.sessionScope !== "unknown") {
+    dropped.scope = event.sessionScope;
+  }
+
+  if (parentKnown) {
+    if (parentRef) {
+      if (run) run.parentRef = parentRef;
+      if (dropped) dropped.parentRef = parentRef;
+      if (run) {
+        _timelineParents.delete(run.key);
+        _timelineParents.set(run.key, parentRef);
+      }
+    } else {
+      if (run) {
+        delete run.parentRef;
+        _timelineParents.delete(run.key);
+      }
+    }
+  } else if (run && !run.parentRef) {
+    const cachedParentRef = _timelineParents.get(run.key);
+    if (cachedParentRef) run.parentRef = cachedParentRef;
+  }
+
+  const currentScope = run?.scope ?? dropped?.scope;
+  if (currentScope === "root") {
+    const ownership = _timelineRootOwnership(sessionRef, resolvedCycle!);
+    if (run) {
+      run.rootOwnership = ownership;
+      run.rootOwnershipQuality = "confirmed";
+    }
+    if (dropped) {
+      dropped.rootOwnership = ownership;
+      dropped.rootOwnershipQuality = "confirmed";
+    }
+    _propagateTimelineOwnership(
+      sessionRef,
+      ownership,
+      "confirmed",
+      run?.startMs ?? dropped?.startMs,
+      run?.endMs,
+    );
+  } else if (currentScope === "subagent" && parentRef) {
+    const childStartMs = run?.startMs ?? dropped?.startMs;
+    const childEndMs = run?.endMs;
+    const resolution = _timelineParentOwnership(parentRef, childStartMs, childEndMs);
+    if (resolution) {
+      const runAdopted = run
+        ? _adoptTimelineOwnership(run, resolution.ownership, resolution.quality)
+        : true;
+      const dropExisting = dropped?.rootOwnership;
+      const dropAdopted = !dropped || !dropExisting
+        || dropExisting.rootRunKey === resolution.ownership.rootRunKey
+        || (dropped.rootOwnershipQuality !== "confirmed" && resolution.quality === "confirmed");
+      if (dropped && dropAdopted) {
+        dropped.rootOwnership = resolution.ownership;
+        dropped.rootOwnershipQuality = resolution.quality;
+      }
+      if (runAdopted && dropAdopted) {
+        _propagateTimelineOwnership(
+          sessionRef,
+          resolution.ownership,
+          resolution.quality,
+          run?.startMs ?? dropped?.startMs,
+          run?.endMs,
+        );
+      }
+    }
+  } else if (parentKnown && currentScope !== "subagent") {
+    if (run) {
+      delete run.rootOwnership;
+      delete run.rootOwnershipQuality;
+    }
+    if (dropped) {
+      delete dropped.rootOwnership;
+      delete dropped.rootOwnershipQuality;
+    }
+  }
+  if (run) _timelineRefreshRun(run);
+  if (dropped) {
+    dropped.lastAccessMs = _nowMs();
+    _timelineCapacityDrops.delete(dropped.key);
+    _timelineCapacityDrops.set(dropped.key, dropped);
+  }
+}
+
+function _updateTimelineTimingFromEvent(sessionRef: string, event: OpenCodeEvent, cycle?: number): void {
+  const run = _timelineRunForCurrentCycle(sessionRef, cycle);
+  if (!run) return;
+
+  const allowFallback = event.cycleTimingReliable !== true;
+  const startMs = allowFallback
+    ? _safeEpochMs(event.taskStartedAt !== undefined ? Date.parse(String(event.taskStartedAt)) : undefined)
+    : undefined;
+  const endMs = allowFallback
+    ? _safeEpochMs(event.endedAt !== undefined ? Date.parse(String(event.endedAt)) : undefined)
+    : undefined;
+  if (run.startMs === undefined && startMs !== undefined) {
+    run.startMs = startMs;
+    run.startQuality = "fallback";
+  }
+  if (run.endMs === undefined && endMs !== undefined) {
+    run.endMs = endMs;
+    run.endQuality = "fallback";
+  }
+  _timelineRefreshRun(run);
+}
+
+function _finishTimelineRun(
+  sessionRef: string,
+  cycle: number,
+  status: TimelineItemStatus,
+  endMs: number | undefined,
+): void {
+  const run = _timelineRunFor(sessionRef, cycle);
+  if (!run) return;
+  run.status = status;
+  if (endMs !== undefined) {
+    run.endMs = endMs;
+    run.endQuality = "observed";
+  }
+  _timelineRefreshRun(run);
+}
+
+function _rollbackTimelineEnd(sessionRef: string, cycle: number, endMs: number): void {
+  const run = _timelineRunFor(sessionRef, cycle);
+  if (!run || run.endQuality !== "observed" || run.endMs !== endMs) return;
+  run.endMs = undefined;
+  run.endQuality = undefined;
+  run.status = "running";
+  _timelineRefreshRun(run);
+}
+
+function _rollbackTimelineFailure(sessionRef: string, cycle: number, endMs: number): void {
+  const run = _timelineRunFor(sessionRef, cycle);
+  if (!run || run.endQuality !== "observed" || run.endMs !== endMs) return;
+  run.endMs = undefined;
+  run.endQuality = undefined;
+  run.status = "running";
+  _timelineRefreshRun(run);
+}
+
+function _timelineIntervalsOverlap(
+  startMs: number | undefined,
+  endMs: number | undefined,
+  rootStartMs: number,
+  rootEndMs: number,
+): boolean {
+  if (startMs === undefined && endMs === undefined) return false;
+  if (startMs !== undefined && endMs !== undefined) {
+    // Complete intervals use true half-open overlap.  Tolerance is reserved
+    // for events missing one endpoint and must never turn zero overlap into
+    // a fabricated slice of the root cycle.
+    return startMs < rootEndMs && rootStartMs < endMs;
+  }
+  if (startMs !== undefined) return startMs < rootEndMs + TIMELINE_OVERLAP_TOLERANCE_MS;
+  return rootStartMs < (endMs as number) + TIMELINE_OVERLAP_TOLERANCE_MS;
+}
+
+function _timelineRunsForRef(ref: string): TimelineRun[] {
+  return [..._timelineRuns.values()]
+    .filter((run) => run.ref === ref)
+    .sort((a, b) => {
+      const aStart = a.startMs ?? Number.NEGATIVE_INFINITY;
+      const bStart = b.startMs ?? Number.NEGATIVE_INFINITY;
+      return bStart - aStart || b.cycle - a.cycle;
+    });
+}
+
+interface TimelineParentResolution {
+  relation: "belongs_to_target" | "unrelated_root" | "broken";
+  ownership: "target" | "unrelated" | "unknown";
+  depth?: number;
+  reason?: "missing_parent" | "invalid_parent_graph";
+}
+
+function _resolveTimelineParentChain(
+  run: TimelineRun,
+  rootRef: string,
+  rootCycle: number,
+  rootRunKey: string,
+  rootStartMs: number,
+  rootEndMs: number,
+): TimelineParentResolution {
+  const resolve = (current: TimelineRun, distance: number, visited: Set<string>): TimelineParentResolution => {
+    if (current.key === rootRunKey || (current.ref === rootRef && current.cycle === rootCycle)) {
+      return { relation: "belongs_to_target", ownership: "target", depth: distance };
+    }
+    if (current.scope === "root") return { relation: "unrelated_root", ownership: "unrelated" };
+
+    const currentOwnership = _timelineOwnershipMatchesTarget(current.rootOwnership, rootRunKey);
+    if (currentOwnership === "unrelated") {
+      return { relation: "unrelated_root", ownership: "unrelated" };
+    }
+    if (distance >= MAX_TIMELINE_DEPTH) {
+      return {
+        relation: "broken",
+        ownership: currentOwnership,
+        reason: currentOwnership === "target" ? "invalid_parent_graph" : undefined,
+      };
+    }
+    if (visited.has(current.key)) {
+      return {
+        relation: "broken",
+        ownership: currentOwnership,
+        reason: currentOwnership === "target" ? "invalid_parent_graph" : undefined,
+      };
+    }
+    visited.add(current.key);
+
+    const parentRef = current.parentRef;
+    if (!parentRef) {
+      return {
+        relation: "broken",
+        ownership: currentOwnership,
+        reason: currentOwnership === "target" ? "missing_parent" : undefined,
+      };
+    }
+
+    // A direct parentRef is an explicit session anchor.  The frozen root
+    // interval is only used to choose the target cycle, never to infer an
+    // owner for an otherwise unknown parent chain.
+    if (parentRef === rootRef && _timelineIntervalsOverlap(
+      current.startMs,
+      current.endMs,
+      rootStartMs,
+      rootEndMs,
+    )) {
+      return { relation: "belongs_to_target", ownership: "target", depth: distance + 1 };
+    }
+    if (parentRef === rootRef && currentOwnership === "target") {
+      return { relation: "belongs_to_target", ownership: "target", depth: distance + 1 };
+    }
+    if (parentRef !== rootRef && _cachedSessionScope(parentRef) === "root") {
+      return { relation: "unrelated_root", ownership: "unrelated" };
+    }
+
+    const allParents = _timelineRunsForRef(parentRef);
+    const parents = allParents.filter((candidate) => {
+      const ownership = _timelineOwnershipMatchesTarget(_timelineOwnershipForRun(candidate), rootRunKey);
+      return ownership !== "unknown" || _timelineIntervalsOverlap(
+        candidate.startMs,
+        candidate.endMs,
+        rootStartMs,
+        rootEndMs,
+      );
+    });
+    if (parents.length === 0) {
+      const knownOwnerships = allParents.map((candidate) => _timelineOwnershipMatchesTarget(
+        _timelineOwnershipForRun(candidate),
+        rootRunKey,
+      ));
+      if (knownOwnerships.includes("target")) {
+        return {
+          relation: "broken",
+          ownership: "target",
+          reason: "missing_parent",
+        };
+      }
+      if (knownOwnerships.includes("unrelated") || allParents.some((candidate) => candidate.scope === "root")) {
+        return { relation: "unrelated_root", ownership: "unrelated" };
+      }
+      return {
+        relation: "broken",
+        ownership: currentOwnership,
+        reason: currentOwnership === "target" ? "missing_parent" : undefined,
+      };
+    }
+
+    let sawTargetBroken: "missing_parent" | "invalid_parent_graph" | undefined;
+    let sawUnrelated = false;
+    for (const parent of parents) {
+      const result = resolve(parent, distance + 1, new Set(visited));
+      if (result.relation === "belongs_to_target") return result;
+      if (result.ownership === "target" && result.reason) sawTargetBroken = result.reason;
+      if (result.relation === "unrelated_root") sawUnrelated = true;
+    }
+    if (sawTargetBroken) return { relation: "broken", ownership: "target", reason: sawTargetBroken };
+    if (sawUnrelated) return { relation: "unrelated_root", ownership: "unrelated" };
+    return { relation: "broken", ownership: currentOwnership };
+  };
+
+  return resolve(run, 0, new Set<string>());
+}
+
+function _timelineQuality(
+  run: TimelineRun,
+  startOffsetMs: number | undefined,
+  endOffsetMs: number | undefined,
+  clamped: boolean,
+): TimelineTimingQuality {
+  if (clamped) return "partial";
+  if (startOffsetMs === undefined && endOffsetMs === undefined) return "unknown";
+  if (startOffsetMs === undefined || endOffsetMs === undefined) return "partial";
+  if (run.startQuality === "fallback" || run.endQuality === "fallback") return "fallback";
+  return "observed";
+}
+
+function _timelineItem(
+  run: TimelineRun,
+  depth: number,
+  rootStartMs: number,
+  rootDurationMs: number,
+  reasons: Set<TimelinePartialReason>,
+): SubagentTimelineItem {
+  const rawStartOffset = run.startMs === undefined ? undefined : run.startMs - rootStartMs;
+  const rawEndOffset = run.endMs === undefined ? undefined : run.endMs - rootStartMs;
+  const clamp = (value: number): number => Math.min(rootDurationMs, Math.max(0, value));
+  const startOffsetMs = rawStartOffset === undefined ? undefined : clamp(rawStartOffset);
+  const endOffsetMs = rawEndOffset === undefined ? undefined : clamp(rawEndOffset);
+  const clamped = (rawStartOffset !== undefined && startOffsetMs !== rawStartOffset)
+    || (rawEndOffset !== undefined && endOffsetMs !== rawEndOffset);
+  if (run.startMs === undefined) reasons.add("missing_start");
+  if (run.endMs === undefined) reasons.add("missing_end");
+  if (clamped) reasons.add("clamped");
+
+  const item: SubagentTimelineItem = {
+    ref: run.ref,
+    parentRef: run.parentRef ?? "",
+    status: run.status,
+    timingQuality: _timelineQuality(run, startOffsetMs, endOffsetMs, clamped),
+    depth,
+    attempt: run.attempt,
+  };
+  if (run.name) item.name = run.name;
+  if (run.agent) item.agent = run.agent;
+  if (startOffsetMs !== undefined) item.startOffsetMs = startOffsetMs;
+  if (endOffsetMs !== undefined) item.endOffsetMs = endOffsetMs;
+  if (!clamped && startOffsetMs !== undefined && endOffsetMs !== undefined) {
+    item.durationMs = Math.max(0, endOffsetMs - startOffsetMs);
+  }
+  return item;
+}
+
+function _timelineReasonList(reasons: Set<TimelinePartialReason>): TimelinePartialReason[] {
+  const order: TimelinePartialReason[] = [
+    "missing_parent",
+    "missing_start",
+    "missing_end",
+    "invalid_parent_graph",
+    "truncated",
+    "clamped",
+  ];
+  return order.filter((reason) => reasons.has(reason));
+}
+
+interface TimelineBuildResult {
+  timeline: SubagentTimelineEnvelope;
+  runKeys: string[];
+  capacityDropKeys: string[];
+}
+
+function _timelineCapacityDropOwnership(
+  drop: TimelineCapacityDrop,
+  rootRef: string,
+  rootCycle: number,
+  rootRunKey: string,
+  rootStartMs: number,
+  rootEndMs: number,
+): "target" | "unrelated" | "unknown" {
+  if (drop.key === rootRunKey || (drop.ref === rootRef && drop.cycle === rootCycle)) return "target";
+  const anchoredOwnership = _timelineOwnershipMatchesTarget(drop.rootOwnership, rootRunKey);
+  if (anchoredOwnership !== "unknown") return anchoredOwnership;
+  if (drop.scope === "root" || drop.scope === "auxiliary") return "unrelated";
+  if (!drop.parentRef) return "unknown";
+  const synthetic: TimelineRun = {
+    key: drop.key,
+    ref: drop.ref,
+    parentRef: drop.parentRef,
+    scope: drop.scope,
+    status: "unknown",
+    startMs: drop.startMs,
+    cycle: drop.cycle,
+    attempt: drop.cycle,
+    lastAccessMs: drop.lastAccessMs,
+  };
+  const resolution = _resolveTimelineParentChain(
+    synthetic,
+    rootRef,
+    rootCycle,
+    rootRunKey,
+    rootStartMs,
+    rootEndMs,
+  );
+  return resolution.ownership;
+}
+
+function _collectSubagentTimeline(
+  rootRef: string,
+  rootCycle: number,
+  rootStartMs: number,
+  rootEndMs: number,
+  rootRunKey = _timelineRunKey(rootRef, rootCycle),
+): TimelineBuildResult {
+  const rootDurationMs = Math.max(0, rootEndMs - rootStartMs);
+  const reasons = new Set<TimelinePartialReason>();
+  const candidates: Array<{ run: TimelineRun; depth: number }> = [];
+  const runKeys: string[] = [];
+  const capacityDropKeys: string[] = [];
+  let observedItemCount = 0;
+
+  for (const run of _timelineRuns.values()) {
+    if (run.key === rootRunKey || run.ref === rootRef || run.scope === "root" || run.scope === "auxiliary") continue;
+    const hasAnyTiming = run.startMs !== undefined || run.endMs !== undefined;
+    if (hasAnyTiming && !_timelineIntervalsOverlap(run.startMs, run.endMs, rootStartMs, rootEndMs)) {
+      continue;
+    }
+    const resolution = _resolveTimelineParentChain(
+      run,
+      rootRef,
+      rootCycle,
+      rootRunKey,
+      rootStartMs,
+      rootEndMs,
+    );
+    if (resolution.relation === "unrelated_root") continue;
+    if (resolution.relation === "broken") {
+      if (resolution.ownership === "target" && resolution.reason) reasons.add(resolution.reason);
+      continue;
+    }
+    if (resolution.reason) {
+      reasons.add(resolution.reason);
+      continue;
+    }
+    candidates.push({ run, depth: resolution.depth! });
+    runKeys.push(run.key);
+    observedItemCount++;
+  }
+
+  let capacityDropCount = 0;
+  for (const drop of _timelineCapacityDrops.values()) {
+    const ownership = _timelineCapacityDropOwnership(
+      drop,
+      rootRef,
+      rootCycle,
+      rootRunKey,
+      rootStartMs,
+      rootEndMs,
+    );
+    if (ownership === "target") {
+      capacityDropKeys.push(drop.key);
+      const isRootMarker = drop.key === rootRunKey
+        || (drop.ref === rootRef && drop.cycle === rootCycle)
+        || drop.scope === "root"
+        || drop.scope === "auxiliary";
+      if (!isRootMarker && drop.scope === "subagent") {
+        capacityDropCount++;
+      }
+    }
+  }
+  if (capacityDropCount > 0) {
+    observedItemCount = Math.min(MAX_TIMELINE_RUNS, observedItemCount + capacityDropCount);
+    reasons.add("truncated");
+  }
+
+  candidates.sort((a, b) => {
+    const clampOffset = (value: number): number => Math.min(rootDurationMs, Math.max(0, value));
+    const aStart = a.run.startMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : clampOffset(a.run.startMs - rootStartMs);
+    const bStart = b.run.startMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : clampOffset(b.run.startMs - rootStartMs);
+    if (aStart !== bStart) return aStart - bStart;
+    const aEnd = a.run.endMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : clampOffset(a.run.endMs - rootStartMs);
+    const bEnd = b.run.endMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : clampOffset(b.run.endMs - rootStartMs);
+    if (aEnd !== bEnd) return aEnd - bEnd;
+    return a.run.ref.localeCompare(b.run.ref);
+  });
+
+  const items = candidates
+    .slice(0, MAX_TIMELINE_ITEMS)
+    .map(({ run, depth }) => _timelineItem(run, depth, rootStartMs, rootDurationMs, reasons));
+  let truncated = candidates.length > MAX_TIMELINE_ITEMS || capacityDropCount > 0;
+  if (truncated) reasons.add("truncated");
+
+  const makeTimeline = (): SubagentTimelineEnvelope => ({
+    version: 1,
+    partial: reasons.size > 0,
+    partialReasons: _timelineReasonList(reasons),
+    timeBasis: "root_cycle",
+    observedItemCount,
+    displayedItemCount: items.length,
+    truncated,
+    items: [...items],
+  });
+
+  let timeline = makeTimeline();
+  while (_textEncoder.encode(JSON.stringify(timeline)).length > MAX_TIMELINE_BYTES && items.length > 0) {
+    items.pop();
+    truncated = true;
+    reasons.add("truncated");
+    timeline = makeTimeline();
+  }
+  if (_textEncoder.encode(JSON.stringify(timeline)).length > MAX_TIMELINE_BYTES) {
+    items.length = 0;
+    truncated = true;
+    reasons.add("truncated");
+    timeline = makeTimeline();
+  }
+  return { timeline, runKeys, capacityDropKeys };
+}
+
+function _buildSubagentTimeline(
+  rootRef: string,
+  rootCycle: number,
+  rootStartMs: number,
+  rootEndMs: number,
+  rootRunKey = _timelineRunKey(rootRef, rootCycle),
+): SubagentTimelineEnvelope {
+  const result = _collectSubagentTimeline(rootRef, rootCycle, rootStartMs, rootEndMs, rootRunKey);
+  for (const key of result.runKeys) {
+    const run = _timelineRuns.get(key);
+    if (!run || run.status === "running") continue;
+    run.consumed = true;
+    _timelineRuns.delete(key);
+    _timelineParents.delete(key);
+  }
+  for (const key of result.capacityDropKeys) {
+    _timelineCapacityDrops.delete(key);
+  }
+  return result.timeline;
+}
+
+function _cleanupTimelineRuns(force = false): void {
+  const now = _nowMs();
+  for (const [key, drop] of _timelineCapacityDrops) {
+    if (now - drop.lastAccessMs >= TIMELINE_RUNNING_TTL_MS) _timelineCapacityDrops.delete(key);
+  }
+
+  const removable = [..._timelineRuns.values()]
+    .filter((run) => {
+      if (run.consumed && run.status !== "running") return true;
+      if (run.status === "running") return now - run.lastAccessMs >= TIMELINE_RUNNING_TTL_MS;
+      return now - run.lastAccessMs >= TIMELINE_ENDED_TTL_MS;
+    })
+    .sort((a, b) => {
+      const priority = (run: TimelineRun): number => {
+        if (run.consumed && run.status !== "running") return 0;
+        if (run.status !== "running") return 1;
+        return 2;
+      };
+      return priority(a) - priority(b) || a.lastAccessMs - b.lastAccessMs;
+    });
+  const target = Math.min(RETAIN_TIMELINE_RUNS, MAX_TIMELINE_RUNS);
+  for (const run of removable) {
+    if (!force && run.status !== "running" && !run.consumed && now - run.lastAccessMs < TIMELINE_ENDED_TTL_MS) continue;
+    if (_timelineRuns.size <= target && !run.consumed && !(!force && run.status === "running")) break;
+    _timelineRuns.delete(run.key);
+    _timelineParents.delete(run.key);
+  }
+
+  if (_timelineParents.size > MAX_TIMELINE_PARENTS) {
+    const entries = [..._timelineParents.keys()];
+    for (let i = 0; i < entries.length - RETAIN_TIMELINE_PARENTS; i++) {
+      _timelineParents.delete(entries[i]!);
+    }
+  }
 }
 
 // ─── Name Sanitisation ──────────────────────────────────────
@@ -1325,6 +2283,19 @@ interface IdleClaim {
   cycle: number;
   eventId: string;
   endedAtMs: number;
+  /** Frozen root terminal claim; never re-read from _sessions after enrichment. */
+  rootRef: string;
+  rootCycle: number;
+  rootRunKey: string;
+  rootStartMs?: number;
+  rootEndMs?: number;
+}
+
+interface ErrorClaim {
+  sessionRef: string;
+  cycle: number;
+  eventId: string;
+  endedAtMs: number;
 }
 
 interface EventStateContext {
@@ -1378,6 +2349,7 @@ function _startBusyCycle(state: SessionState, sessionRef: string, receivedAtMs: 
   state.cycleEndedAtMs = undefined;
   state.pendingEventId = undefined;
   _clearAssistantTiming(sessionRef);
+  _startTimelineRun(sessionRef, state.cycle, receivedAtMs);
 }
 
 async function _eventStateContext(event: OpenCodeEvent): Promise<EventStateContext | null> {
@@ -1438,11 +2410,24 @@ async function _claimIdleEvent(
   try {
     const eventId = _generateId();
     const endedAtMs = _safeEpochMs(event.receivedAtMs) ?? _nowMs();
-    claim = { sessionRef, cycle: state.cycle, eventId, endedAtMs };
+    const rootCycle = state.cycle;
+    const rootStartMs = _safeEpochMs(state.cycleStartedAtMs);
+    claim = {
+      sessionRef,
+      cycle: rootCycle,
+      eventId,
+      endedAtMs,
+      rootRef: sessionRef,
+      rootCycle,
+      rootRunKey: _timelineRunKey(sessionRef, rootCycle),
+      rootStartMs,
+      rootEndMs: endedAtMs,
+    };
     state.sentIdle = true;
     state.pendingEventId = eventId;
     state.cycleEndedAtMs = endedAtMs;
     _applyCycleTimingSnapshot(event, state, endedAtMs);
+    _finishTimelineRun(sessionRef, state.cycle, "completed", endedAtMs);
     return claim;
   } catch (error) {
     // Roll back the claim itself, while the cycle/event guard prevents an old
@@ -1456,11 +2441,44 @@ async function _claimIdleEvent(
   }
 }
 
+async function _claimErrorEvent(
+  event: OpenCodeEvent,
+  config: ResolvedConfig,
+): Promise<ErrorClaim | null> {
+  if (!config.events.has("session_error")) return null;
+  const context = await _eventStateContext(event);
+  if (!context) return null;
+  const { sessionRef, state } = context;
+  const eventId = _generateId();
+  const endedAtMs = _safeEpochMs(event.receivedAtMs) ?? _nowMs();
+  const claim: ErrorClaim = {
+    sessionRef,
+    cycle: state.cycle,
+    eventId,
+    endedAtMs,
+  };
+  state.hadErrorForCycle = true;
+  state.sentIdle = true;
+  state.pendingEventId = eventId;
+  _finishTimelineRun(sessionRef, claim.cycle, "failed", endedAtMs);
+  return claim;
+}
+
+function _rollbackErrorClaim(claim: ErrorClaim): void {
+  const state = _sessions.get(claim.sessionRef);
+  if (!state || state.cycle !== claim.cycle || state.pendingEventId !== claim.eventId) return;
+  state.hadErrorForCycle = false;
+  state.sentIdle = false;
+  state.pendingEventId = undefined;
+  _rollbackTimelineFailure(claim.sessionRef, claim.cycle, claim.endedAtMs);
+}
+
 function _rollbackIdleClaim(claim: IdleClaim): void {
   const state = _sessions.get(claim.sessionRef);
   if (state && state.cycle === claim.cycle && state.pendingEventId === claim.eventId) {
     state.sentIdle = false;
     state.pendingEventId = undefined;
+    _rollbackTimelineEnd(claim.sessionRef, claim.cycle, claim.endedAtMs);
   }
   _idleProcessing.delete(claim.sessionRef);
 }
@@ -1496,6 +2514,7 @@ function _cleanupSessions(): void {
   }
   _cleanupAssistantMetadata();
   _cleanupMetadataSampleSessions();
+  _cleanupTimelineRuns();
 }
 
 // ─── Config Resolution ──────────────────────────────────────
@@ -1623,7 +2642,12 @@ async function _buildEnvelope(
   eventId: string,
   config?: Pick<ResolvedConfig, "actionContentMode">
     & Partial<Pick<ResolvedConfig, "instanceDisplayName">>
-    & { actionOverride?: ActionEnvelopeOverride; allowOversizedAction?: boolean },
+    & {
+      actionOverride?: ActionEnvelopeOverride;
+      allowOversizedAction?: boolean;
+      idleClaim?: IdleClaim;
+      errorClaim?: ErrorClaim;
+    },
 ): Promise<Envelope | null> {
   // Derive output event type
   const outputEvent = _mapEventType(event);
@@ -1717,9 +2741,32 @@ async function _buildEnvelope(
     envelope.error = _deriveErrorCategory(event.error);
   }
 
+  // Timeline is deliberately attached only to a completed root cycle.  The
+  // terminal claim was frozen before any async enrichment; never consult the
+  // mutable current session state here.
+  if (outputEvent === "opencode.session_idle" && event.sessionScope === "root") {
+    const rootClaim = config?.idleClaim;
+    if (rootClaim?.rootStartMs !== undefined && rootClaim.rootEndMs !== undefined) {
+      envelope.subagentTimeline = _buildSubagentTimeline(
+        rootClaim.rootRef,
+        rootClaim.rootCycle,
+        rootClaim.rootStartMs,
+        rootClaim.rootEndMs,
+        rootClaim.rootRunKey,
+      );
+    }
+  }
+
   // The individual action limits keep this deterministic; retain a final guard
   // so a future allowlisted field cannot accidentally create an oversized hook.
-  if (!config?.allowOversizedAction && _textEncoder.encode(JSON.stringify(envelope)).length > MAX_ENVELOPE_BYTES) {
+  if (!config?.allowOversizedAction && _serializedEnvelopeBytes(envelope) > MAX_ENVELOPE_BYTES) {
+    if (envelope.subagentTimeline) {
+      // Timeline is optional; never allow it to turn an otherwise valid root
+      // completion into a dropped envelope.
+      delete envelope.subagentTimeline;
+    }
+  }
+  if (!config?.allowOversizedAction && _serializedEnvelopeBytes(envelope) > MAX_ENVELOPE_BYTES) {
     return null;
   }
   return envelope;
@@ -1980,7 +3027,7 @@ function _mapEventType(event: OpenCodeEvent): OutputEvent | null {
 async function _processEvent(
   event: OpenCodeEvent,
   config: ResolvedConfig,
-  options?: { idleClaim?: IdleClaim; statePrepared?: boolean },
+  options?: { idleClaim?: IdleClaim; errorClaim?: ErrorClaim; statePrepared?: boolean },
 ): Promise<Envelope | null> {
   const rawSessionId = event.sessionId;
   if (!rawSessionId) return null;
@@ -2030,7 +3077,7 @@ async function _processEvent(
     const claim = options?.idleClaim ?? await _claimIdleEvent(event, config);
     if (!claim) return null;
     try {
-      const envelope = await _buildEnvelope(event, claim.eventId, config);
+      const envelope = await _buildEnvelope(event, claim.eventId, { ...config, idleClaim: claim });
       if (!envelope) {
         // Roll back only the claimed cycle. A newer busy cycle may already
         // have replaced this state while enrichment was in flight.
@@ -2050,21 +3097,21 @@ async function _processEvent(
 
   // --- session.error ---
   if (t === "session.error") {
-    if (!config.events.has("session_error")) return null;
-    const eventId = _generateId();
-    st.hadErrorForCycle = true;
-    st.sentIdle = true; // suppress any subsequent idle
-    st.pendingEventId = eventId;
-    const envelope = await _buildEnvelope(event, eventId, config);
-    if (!envelope) {
-      // Rollback: no error notification was produced, so this cycle must remain
-      // eligible for a later error retry or the final idle notification.
-      st.hadErrorForCycle = false;
-      st.sentIdle = false;
-      st.pendingEventId = undefined;
-      return null;
+    const claim = options?.errorClaim ?? await _claimErrorEvent(event, config);
+    if (!claim) return null;
+    try {
+      const envelope = await _buildEnvelope(event, claim.eventId, { ...config, errorClaim: claim });
+      if (!envelope) {
+        // Rollback: no error notification was produced, so this cycle must remain
+        // eligible for a later error retry or the final idle notification.
+        _rollbackErrorClaim(claim);
+        return null;
+      }
+      return envelope;
+    } catch (error) {
+      _rollbackErrorClaim(claim);
+      throw error;
     }
-    return envelope;
   }
 
   return null;
@@ -2240,7 +3287,7 @@ async function _onEvent(
   rawEvent: OpenCodeEvent,
   config: ResolvedConfig,
   log: DiagnosticLog,
-  options?: { idleClaim?: IdleClaim; statePrepared?: boolean },
+  options?: { idleClaim?: IdleClaim; errorClaim?: ErrorClaim; statePrepared?: boolean },
 ): Promise<void> {
   try {
     const envelope = await _processEvent(rawEvent, config, options);
@@ -2257,6 +3304,8 @@ async function _onEvent(
     await _sendWithRetry(envelope, config, log);
   } catch {
     // Last-resort safety net — should never fire
+    if (options?.idleClaim) _rollbackIdleClaim(options.idleClaim);
+    if (options?.errorClaim) _rollbackErrorClaim(options.errorClaim);
     log.error("[webhook-notifier] unexpected internal error");
   } finally {
     // Cleanup must also run for busy-only, ignored, filtered, and malformed
@@ -2487,13 +3536,6 @@ function _deriveSessionScope(
 ): SessionScope {
   if (!data || typeof data !== "object" || Array.isArray(data)) return "unknown";
   const sessionData = data as Record<string, unknown>;
-  const baseScope: SessionScope = !("parentID" in sessionData) || sessionData.parentID === undefined || sessionData.parentID === null
-    ? "root"
-    : typeof sessionData.parentID === "string" && sessionData.parentID.trim().length > 0
-      ? "subagent"
-      : "unknown";
-  if (baseScope === "subagent") return baseScope;
-
   const sessionName = _sanitiseName(
     typeof sessionData.title === "string"
       ? sessionData.title
@@ -2501,7 +3543,17 @@ function _deriveSessionScope(
         ? sessionData.name
         : undefined,
   );
-  return sessionName && auxiliarySessionNames.has(sessionName) ? "auxiliary" : baseScope;
+  // Explicit auxiliary identities win independently of parentID.  Some
+  // smartfetch helper sessions carry a parent for orchestration, but must
+  // never become timeline subagents or focused notifications.
+  if (sessionName && auxiliarySessionNames.has(sessionName)) return "auxiliary";
+
+  if (!("parentID" in sessionData) || sessionData.parentID === undefined || sessionData.parentID === null) {
+    return "root";
+  }
+  return typeof sessionData.parentID === "string" && sessionData.parentID.trim().length > 0
+    ? "subagent"
+    : "unknown";
 }
 
 /**
@@ -2514,6 +3566,7 @@ async function _enrichEvent(
   input: PluginInput,
   diagnostics?: MetadataDiagnosticContext,
   auxiliarySessionNames: ReadonlySet<string> = DEFAULT_AUXILIARY_SESSION_NAMES,
+  timelineCycle?: number,
 ): Promise<void> {
   if (!event.projectName) {
     event.projectName = _projectNameFromInput(input);
@@ -2537,6 +3590,8 @@ async function _enrichEvent(
   _applyAssistantMetadata(event, _cachedAssistantMetadata(sessionRef));
 
   let sessionData: Record<string, unknown> | undefined;
+  let timelineParentKnown = false;
+  let timelineParentRef: string | undefined;
   try {
     const response = await input.client.session.get({ path: { id: rawSessionId } });
     const inspectedResponse = _inspectSessionResponse(response);
@@ -2549,6 +3604,15 @@ async function _enrichEvent(
     } else {
       sessionData = data as Record<string, unknown>;
       setScope(_deriveSessionScope(sessionData, auxiliarySessionNames));
+
+      // Hash the parent in this call stack and retain only the anonymous ref.
+      // The raw parentID is never copied to the event, state, logs, or envelope.
+      timelineParentKnown = true;
+      const rawParentID = sessionData.parentID;
+      if (typeof rawParentID === "string" && rawParentID.trim().length > 0) {
+        timelineParentRef = await _hashSessionRef(rawParentID.trim());
+        event.timelineParentRef = timelineParentRef;
+      }
 
       // Only fill fields not already present in the event or assistant cache.
       if (!event.session) event.session = {};
@@ -2602,6 +3666,12 @@ async function _enrichEvent(
     _log.warn(SESSION_GET_WARNING);
   }
 
+  const updateTimeline = (): void => {
+    _updateTimelineIdentity(sessionRef, event, timelineParentKnown, timelineParentRef, timelineCycle);
+    _updateTimelineTimingFromEvent(sessionRef, event, timelineCycle);
+  };
+  updateTimeline();
+
   // Busy is a state transition only; defer the potentially heavier messages
   // fallback until an event that can actually produce a notification.
   if (event.type === "session.status" && event.status === "busy") return;
@@ -2644,6 +3714,7 @@ async function _enrichEvent(
       }
       break;
     }
+    updateTimeline();
   } catch {
     // Do not expose the exception, session ID, ref, title, or response body.
     _diagnoseSessionMessages({ responseShape: "invalid" }, sessionDiagnostics);
@@ -2747,6 +3818,7 @@ const server: Plugin = async (input, options) => {
     async event(wrapped: { event: Event }): Promise<void> {
       const receivedAtMs = _nowMs();
       let idleClaim: IdleClaim | null = null;
+      let errorClaim: ErrorClaim | null = null;
       try {
         // v1.18.4 assistant updates are metadata-only and must be consumed
         // before normalisation so they never enter the state machine/HTTP path.
@@ -2797,9 +3869,23 @@ const server: Plugin = async (input, options) => {
           if (!idleClaim) return;
         }
 
+        // session.error has the same pre-enrichment claim boundary as root
+        // idle.  A delayed error may finish its old cycle, but never mutate a
+        // newer busy cycle that began while session.get/messages was pending.
+        if (normalized.type === "session.error") {
+          errorClaim = await _claimErrorEvent(normalized, config);
+          if (!errorClaim) return;
+        }
+
         // Attempt session metadata enrichment from runtime
         if (normalized.sessionId) {
-          await _enrichEvent(normalized, input, diagnostics, config.auxiliarySessionNames);
+          await _enrichEvent(
+            normalized,
+            input,
+            diagnostics,
+            config.auxiliarySessionNames,
+            idleClaim?.cycle ?? errorClaim?.cycle,
+          );
         }
 
         await _onEvent(
@@ -2810,10 +3896,13 @@ const server: Plugin = async (input, options) => {
             ? { statePrepared: true }
             : idleClaim
               ? { idleClaim }
-              : undefined,
+              : errorClaim
+                ? { errorClaim }
+                : undefined,
         );
       } catch {
         if (idleClaim) _rollbackIdleClaim(idleClaim);
+        if (errorClaim) _rollbackErrorClaim(errorClaim);
         _log.error("[webhook-notifier] unexpected internal error");
       }
     },
@@ -2839,6 +3928,11 @@ export type {
   SessionScope,
   ResolvedConfig,
   Envelope,
+  SubagentTimelineEnvelope,
+  SubagentTimelineItem,
+  TimelinePartialReason,
+  TimelineItemStatus,
+  TimelineTimingQuality,
   OpenCodeEvent,
   SessionState,
   AssistantMetadata,
@@ -2886,6 +3980,10 @@ export {
   _metadataDiagnosticSamples,
   _metadataSampleSessions,
   _assistantMetadata,
+  _timelineRuns,
+  _timelineParents,
+  _timelineCapacityDrops,
+  _buildSubagentTimeline,
   _cacheAssistantMetadata,
   _cachedAssistantMetadata,
   _cleanupAssistantMetadata,

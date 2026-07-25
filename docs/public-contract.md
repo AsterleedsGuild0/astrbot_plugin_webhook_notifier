@@ -36,14 +36,67 @@
 - OpenCode 丰富通知字段：实例标识 `instanceDisplayName`、客户端自动推导的 `projectName`、会话名、agent、`provider/model`、会话开始时间、busy→idle 任务时间（无可靠周期时间时 fallback 到 Assistant 元数据）与可读耗时/低敏计数，以及默认 strict、显式 opt-in 的 `actionContentMode`；项目名只在详细字段中显示。
 - OpenCode 可选模型档位字段 `modelVariant`：优先来自 Assistant `info.variant`，缺失时来自 `session.model.variant`；仅在同时存在 `model` 时于展示副本中原样追加到模型值，例如 `cpa/gpt-5.6-sol(max)`，不单独显示。该字段不保证等同于 provider 原始 `reasoning_effort`/`reasoningEffort`，不根据 provider/model 推断。
 - OpenCode V1 `session.scope`（`root|subagent|auxiliary|unknown`）与 Client scope 判断；`parentID` 不是公共字段，绝不发送。默认精确识别 `smartfetch-secondary`，非空 `parentID` 始终优先为 `subagent`。
+- OpenCode root `session_idle` 的可选 `subagentTimeline`。它只允许出现在 `event=opencode.session_idle` 且 `session.scope=root` 的 envelope；其他 event 或 scope 携带该字段会被 Python strict adapter 拒绝。该能力无新增配置项，仍是 root completion 的可选数据。
 - OpenCode Permission/Question 瞬时聚合：同一 Session、同一类型固定 150ms debounce；Permission 与 Question 不合并，不同 Session 不合并；回复在 flush 前撤销。Permission envelope 使用 `permission: {count, items[]}`，Question 保持 `question: {count, optionCount, summary?, items?}`。
 - 全局 `notification_mode` 仅允许 `focused`（默认）和 `all`；`focused` 只抑制 `subagent` 与 `auxiliary` 的 `completed`，unknown scope/status fail-open。策略过滤返回 HTTP 200、`message=skipped`、`scope`、`reason=notification_mode_filtered`、`skip_reason=notification_mode_filtered`、`rendered=false`、`delivered=false`、`retryable=false`，且不进入 renderer、T2I 或 sender。
+- Webhook retry 幂等：Envelope 顶层 `id` 参与幂等键；相同 endpoint/provider、event、id、session scope 与 target selector 在进程内 10 分钟、最多 2048 项 single-flight。重复请求返回 HTTP 200、`message=skipped`、`skip_reason=idempotency_replay`、`deduplicated=true`，过滤和全私聊策略 skip 不占用幂等 cache。
 
 `actionContentMode` 与 `notification_mode` 正交：前者只控制 Question/Permission 内容隐私，后者只控制通知是否发送。
 
 聚合 bucket 只存在客户端进程内存，raw session ID 仅作本地 key；request ID 仅用于去重/撤销，不出站。`strict` 的 Permission item 仅允许 `category`，不会发送正文；`summary`/`full` 仍按 allowlist 和上限处理。
 
 这些候选能力在 RC 包完成 AstrBot WebUI 手动安装、Bot Endpoint 和 Desktop 端到端 smoke 前，不得写成已验证发布能力。
+
+---
+
+## `subagentTimeline` 精简契约
+
+Wire JSON 使用 camelCase。以下是精简 shape，不代表可省略其中的必填字段：
+
+```json
+{
+  "event": "opencode.session_idle",
+  "session": {"scope": "root"},
+  "subagentTimeline": {
+    "version": 1,
+    "timeBasis": "root_cycle",
+    "partial": false,
+    "partialReasons": [],
+    "observedItemCount": 1,
+    "displayedItemCount": 1,
+    "truncated": false,
+    "items": [
+      {
+        "ref": "<匿名 hash 引用>",
+        "parentRef": "<匿名 hash 引用>",
+        "status": "completed",
+        "timingQuality": "observed",
+        "depth": 1,
+        "attempt": 1
+      }
+    ]
+  }
+}
+```
+
+- `subagentTimeline` 的字段为 `version`、`timeBasis`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 与 `items`。item 必须有 `ref`、`parentRef`、`status`、`timingQuality`、`depth`、`attempt`，可选 `name`、`agent`、`startOffsetMs`、`endOffsetMs`、`durationMs`。
+- `partialReasons` 使用受限值：`missing_parent`、`missing_start`、`missing_end`、`invalid_parent_graph`、`truncated`、`clamped`；`timingQuality` 表示 `observed`、`fallback`、`partial` 或 `unknown` 的时间可信度。
+- `ref`/`parentRef` 是匿名 hash 图引用，仅用于建立父子关系，不是 raw Session ID；默认用户输出不展示它们。
+- offset 是相对 root busy→idle cycle 的毫秒偏移；它描述观测到的时间关系，不声明调度依赖。区间重叠只表示任务同时运行。
+- `partial` 必须反映缺失、校正或其他不完整原因；`truncated` 表示记录受上限截断。Python adapter 对未知字段、错误 scope/event、错误 shape 和超限 payload fail-closed。
+- 限制为 `items` 不超过 64 项、timeline JSON 不超过 24 KiB、整个 request body 不超过 64 KiB、`depth` 不超过 8。超限、缺失或截断时应保留 `partial`/`truncated` 语义，不把不完整数据表述为完整执行记录。
+
+该字段不进入 `session_error`、`permission_asked`、`question_asked` 或非 root session 通知。`auxiliary`（包括 `smartfetch-secondary`）不进入 timeline；`focused` 仍独立过滤成功完成的 `subagent`/`auxiliary` 通知，但 root completion 可以汇总 timeline。
+
+---
+
+## Webhook retry 幂等
+
+- OpenCode Envelope 顶层 `id` 是 HTTP retry 幂等键的组成部分；同一 key 的并发请求只允许一个 owner 进入渲染/发送，其他请求等待 owner 终态。
+- 幂等 store 仅为当前进程内存中的 10 分钟 TTL、2048 项 LRU；TTL 从 owner 完成后开始，重放不会续期。
+- 服务重启、进程崩溃或未来多实例部署之间不保证共享幂等状态。幂等不是远端 exactly-once 交付保证。
+- notification policy filtered 与 all-private preflight 的 skip 在 claim 之前返回，因此不占用 cache。
+- duplicate replay 使用当前 HTTP request_id 返回兼容的 `skipped` 200，不复用原请求的 aiohttp response，也不在响应或幂等日志中暴露 event id、endpoint path 或 payload。
 
 ---
 

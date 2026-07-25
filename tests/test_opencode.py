@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 from datetime import datetime, timezone
 
 import pytest
@@ -39,6 +41,47 @@ def _make_adapter():
 
 def _received_at() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _timeline_ref(value: str) -> str:
+    return hashlib.sha256(f"opencode:{value}".encode()).hexdigest()[:32]
+
+
+def _timeline_item(**overrides) -> dict:
+    item = {
+        "ref": _timeline_ref("child"),
+        "parentRef": _timeline_ref("root"),
+        "name": "Child",
+        "agent": "child-agent",
+        "status": "completed",
+        "startOffsetMs": 100,
+        "endOffsetMs": 400,
+        "durationMs": 300,
+        "timingQuality": "observed",
+        "depth": 1,
+        "attempt": 1,
+    }
+    item.update(overrides)
+    return item
+
+
+def _timeline_payload(
+    timeline: dict, *, event: str = "opencode.session_idle", scope="root"
+) -> dict:
+    return {
+        **_VALID_PAYLOAD,
+        "event": event,
+        "session": {"ref": _timeline_ref("root"), "scope": scope},
+        "subagentTimeline": timeline,
+    }
+
+
+def _parse_timeline(payload: dict, headers: dict | None = None):
+    return _make_adapter().parse(
+        headers=headers or {"x-opencode-event": payload["event"]},
+        payload=payload,
+        received_at=_received_at(),
+    )
 
 
 # ─── Header/Body 校验 ─────────────────────────────────────
@@ -683,6 +726,240 @@ class TestOpenCodeFormatting:
     )
     def test_duration_is_readable(self, duration_ms, expected):
         assert _format_duration_ms(duration_ms) == expected
+
+
+class TestSubagentTimelineContract:
+    def test_direct_nested_partial_and_truncated_round_trip(self):
+        timelines = [
+            {
+                "version": 1,
+                "partial": False,
+                "partialReasons": [],
+                "timeBasis": "root_cycle",
+                "observedItemCount": 1,
+                "displayedItemCount": 1,
+                "truncated": False,
+                "items": [_timeline_item()],
+            },
+            {
+                "version": 1,
+                "partial": False,
+                "partialReasons": [],
+                "timeBasis": "root_cycle",
+                "observedItemCount": 2,
+                "displayedItemCount": 2,
+                "truncated": False,
+                "items": [
+                    _timeline_item(
+                        ref=_timeline_ref("grandchild"),
+                        parentRef=_timeline_ref("child"),
+                        depth=2,
+                    ),
+                    _timeline_item(),
+                ],
+            },
+            {
+                "version": 1,
+                "partial": True,
+                "partialReasons": ["missing_start", "missing_end"],
+                "timeBasis": "root_cycle",
+                "observedItemCount": 1,
+                "displayedItemCount": 1,
+                "truncated": False,
+                "items": [],
+            },
+            {
+                "version": 1,
+                "partial": True,
+                "partialReasons": ["truncated"],
+                "timeBasis": "root_cycle",
+                "observedItemCount": 2,
+                "displayedItemCount": 1,
+                "truncated": True,
+                "items": [_timeline_item()],
+            },
+        ]
+
+        partial_item = _timeline_item(timingQuality="unknown")
+        partial_item.pop("startOffsetMs")
+        partial_item.pop("endOffsetMs")
+        partial_item.pop("durationMs")
+        timelines[2]["items"] = [partial_item]
+
+        for timeline in timelines:
+            event = _parse_timeline(_timeline_payload(timeline))
+            assert event.subagent_timeline == timeline
+            assert event.to_dict()["subagent_timeline"] == timeline
+
+    def test_missing_optional_timeline_is_compatible(self):
+        event = _make_adapter().parse(
+            headers=dict(_HEADERS),
+            payload=dict(_VALID_PAYLOAD),
+            received_at=_received_at(),
+        )
+        assert event.subagent_timeline is None
+        assert "subagent_timeline" not in event.to_dict()
+
+    @pytest.mark.parametrize(
+        ("event", "scope"),
+        [
+            ("opencode.question_asked", "root"),
+            ("opencode.session_idle", "subagent"),
+            ("opencode.session_idle", "auxiliary"),
+            ("opencode.session_idle", "unknown"),
+        ],
+    )
+    def test_timeline_is_root_idle_only(self, event, scope):
+        payload = _timeline_payload(
+            {
+                "version": 1,
+                "partial": False,
+                "partialReasons": [],
+                "timeBasis": "root_cycle",
+                "observedItemCount": 0,
+                "displayedItemCount": 0,
+                "truncated": False,
+                "items": [],
+            },
+            event=event,
+            scope=scope,
+        )
+        with pytest.raises(ProviderError):
+            _parse_timeline(payload)
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            lambda t: t.update(extra=True),
+            lambda t: t.update(version=2),
+            lambda t: t.update(partial=False, partialReasons=["missing_end"]),
+            lambda t: t.update(partialReasons=["missing_end", "missing_end"]),
+            lambda t: t.update(partialReasons=["not-a-reason"], partial=True),
+            lambda t: t.update(timeBasis="wall_clock"),
+            lambda t: t.update(observedItemCount=-1),
+            lambda t: t.update(displayedItemCount=2),
+            lambda t: t.update(items=[]),
+            lambda t: t.update(truncated=True, partial=False, partialReasons=[]),
+        ],
+    )
+    def test_invalid_timeline_envelope_is_rejected(self, mutation):
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [_timeline_item()],
+        }
+        mutation(timeline)
+        with pytest.raises(ProviderError):
+            _parse_timeline(_timeline_payload(timeline))
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            lambda item: item.update(extra=True),
+            lambda item: item.update(ref="raw-session-id"),
+            lambda item: item.update(parentRef="/private/project"),
+            lambda item: item.update(status="done"),
+            lambda item: item.update(timingQuality="complete"),
+            lambda item: item.update(name="x" * 201),
+            lambda item: item.update(agent="x" * 129),
+            lambda item: item.update(startOffsetMs=-1),
+            lambda item: item.update(endOffsetMs=99, durationMs=1),
+            lambda item: item.update(depth=0),
+            lambda item: item.update(depth=9),
+            lambda item: item.update(attempt=0),
+            lambda item: item.update(attempt=1_000_001),
+            lambda item: item.update(startOffsetMs=math.inf),
+            lambda item: item.update(startOffsetMs=200, endOffsetMs=100),
+        ],
+    )
+    def test_invalid_timeline_item_is_rejected(self, mutation):
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [_timeline_item()],
+        }
+        mutation(timeline["items"][0])
+        with pytest.raises(ProviderError):
+            _parse_timeline(_timeline_payload(timeline))
+
+    def test_partial_timing_rejects_exact_duration(self):
+        timeline = {
+            "version": 1,
+            "partial": True,
+            "partialReasons": ["clamped"],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [
+                _timeline_item(
+                    timingQuality="partial",
+                )
+            ],
+        }
+        with pytest.raises(ProviderError):
+            _parse_timeline(_timeline_payload(timeline))
+
+    def test_accepts_sixty_four_items_and_rejects_more(self):
+        items = [
+            _timeline_item(
+                ref=_timeline_ref(f"child-{index}"),
+                name=f"Child {index}",
+                startOffsetMs=index,
+                endOffsetMs=index + 1,
+                durationMs=1,
+            )
+            for index in range(64)
+        ]
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 64,
+            "displayedItemCount": 64,
+            "truncated": False,
+            "items": items,
+        }
+        assert (
+            _parse_timeline(_timeline_payload(timeline)).subagent_timeline == timeline
+        )
+
+        too_many = dict(timeline)
+        too_many["observedItemCount"] = 65
+        too_many["displayedItemCount"] = 65
+        too_many["items"] = items + [_timeline_item(ref=_timeline_ref("child-64"))]
+        with pytest.raises(ProviderError):
+            _parse_timeline(_timeline_payload(too_many))
+
+    def test_body_size_limit_still_applies_with_timeline(self):
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 0,
+            "displayedItemCount": 0,
+            "truncated": False,
+            "items": [],
+        }
+        with pytest.raises(ProviderError):
+            _parse_timeline(
+                {
+                    **_timeline_payload(timeline),
+                    "projectName": "x" * (65 * 1024),
+                }
+            )
 
 
 def labels_index(label: str, fields: list) -> int:

@@ -4,13 +4,16 @@
 
 ## v1.1.0-rc.1 - 2026-07-23
 
+- 修复 OpenCode `timeoutMs=5000` 在服务端渲染/投递约 5 秒以上时触发 retry、造成同一权限通知重复投递的问题：服务端新增按 Envelope 顶层 `id` 的进程内 single-flight 幂等与发送边界追踪；示例 timeout 调整为 15000 毫秒。
 - 冻结多 Provider 通知降噪：新增全局 `notification_mode`，默认 `focused` 只抑制成功完成的 OpenCode `subagent`；`all` 保持全部通知，unknown scope/status fail-open。`actionContentMode` 与该策略正交。
+- OpenCode root `session_idle` 可选携带 `subagentTimeline`：记录相对 root busy→idle cycle 的匿名子任务图、时间质量、部分/截断状态与有界计数；不新增配置项，也不在其他 event 或 scope 携带。
+- 默认渲染按执行复杂度展示子任务阶段：简单流程最多 8 项主卡，复杂流程使用同一 MessageChain 的独立横向甘特图（最多 24 行）；缺失或附图失败时只保留安全主卡，不展示匿名图引用或假精确耗时。
 - OpenCode V1 新增 `session.scope`（缺失兼容为 `unknown`），Client 通过既有 `session.get()` 判断 root/subagent，永不发送 `parentID`；服务端升级必须先于 Client 重启。
 - #18：引入 Provider Adapter / Registry 与依赖注入边界，支持 `omp` 与 `opencode` provider，并保持 Endpoint provider 在创建后不可变。
 - #19：增加 OpenCode Server Adapter，接收 V1 envelope，覆盖 `session_idle`、`session_error` 与 `permission_asked` 三类事件。
 - #20：增加 OpenCode V1 Client Plugin，使用正确的 `default { id, server }` 与 `plugin` tuple，支持 env/file URL/Token 配置、状态机、timeout 和有限 retry。
 - #21：收紧 OpenCode 字段白名单与隐私边界，匿名化 session ref、清洗 name fallback，并补齐 Bun/Python 契约测试、隔离 CLI Plugin Service smoke、Desktop 安全 SKIP 与中文集成文档。
-- 本 RC 的源码验证覆盖 Bun/Python 测试和 CLI smoke；这不等同于已通过 RC ZIP 的 AstrBot WebUI 安装、Bot Endpoint 实际验证或 Desktop 端到端 smoke。
+- 本 RC 的本地验证覆盖 Python 829、Bun 221 和 OpenCode 1.18.4 CLI smoke；这不等同于已通过 RC ZIP 的 AstrBot WebUI 安装、Bot Endpoint 实际验证或 Desktop 端到端 smoke。
 - 使用本 RC ZIP 的 AstrBot WebUI 手动安装、Bot Endpoint 验证和 Desktop 端到端 smoke 尚待本 RC 包验证，不能据此宣称已通过或已发布 `v1.1.0`。
 
 ---

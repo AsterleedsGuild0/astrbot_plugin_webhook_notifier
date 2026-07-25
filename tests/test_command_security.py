@@ -312,7 +312,11 @@ class SenderStub:
     def preflight_private_notification_policy(self, endpoint, target_alias):
         return None
 
-    async def send_text(self, rendered, endpoint, target_alias):
+    async def send_text(
+        self, rendered, endpoint, target_alias, delivery_attempt_callback=None
+    ):
+        if delivery_attempt_callback is not None:
+            delivery_attempt_callback.mark()
         return [{"ok": True, "name": "default"}]
 
 

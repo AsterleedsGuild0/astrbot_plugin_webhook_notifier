@@ -6,6 +6,7 @@
 
 - OpenCode Plugin API 基线：`v1.17.9`。
 - 当前实际本机 CLI/Desktop 验证目标：`v1.18.4`。
+- 已验证范围：本地 Python 829、Bun 221 和 OpenCode 1.18.4 CLI smoke；真实 AstrBot WebUI、Bot Endpoint 与 OpenCode Desktop E2E 尚未执行。
 - 集成入口是 OpenCode V1 file Plugin 的 `default { id, server }` 形态，不是旧版 `tui`、裸函数或任意自定义导出。
 - Python 服务端使用 Endpoint 的 Bearer 鉴权和 `opencode` provider；创建后 provider 不可变。
 
@@ -21,7 +22,7 @@ OpenCode Desktop 测试依赖已经部署的新 AstrBot 服务端和一条真实
 
 按以下顺序执行：
 
-1. 先部署并重载包含 `session.scope` allowlist 和通知策略的新版 AstrBot 服务端；旧服务端严格 allowlist 不接受新字段。
+1. 先部署并重载包含 `session.scope` allowlist、`subagentTimeline` strict 校验和通知策略的新版 AstrBot 服务端；旧服务端严格 allowlist 不接受新字段。
 2. 使用新版本号构建 AstrBot 插件测试 ZIP，校验 ZIP 根目录、版本字段、文件清单和 checksum。
 3. 在测试 AstrBot 中安装该 ZIP 并重载 Webhook Notifier，确认运行版本已经更新。
 4. 与 Bot 交互创建 `provider=opencode` Endpoint，从认证 Plugin Page 获取 Base URL，并分别取得 Endpoint Path 与一次性交付的 Bearer Token。
@@ -94,7 +95,7 @@ OpenCode 配置顶层的 `plugin` 必须是 tuple 数组。每一项是：
       {
         "url": "{env:OPENCODE_WEBHOOK_URL}",
         "token": "{env:OPENCODE_WEBHOOK_TOKEN}",
-        "timeoutMs": 5000,
+        "timeoutMs": 15000,
         "enabled": true,
         "events": [
           "session_idle",
@@ -144,7 +145,7 @@ Token 也可以使用受控文件：
 {
   "url": "{env:OPENCODE_WEBHOOK_URL}",
   "token": "{file:<TOKEN_FILE_PATH>}",
-  "timeoutMs": 5000
+  "timeoutMs": 15000
 }
 ```
 
@@ -208,7 +209,23 @@ OpenCode Session <ref12>
 
 ## 白名单与隐私边界
 
-Envelope 只允许显式 V1 字段：`id`、`event`、`version`、`emittedAt`、`session`、可选 `instanceDisplayName`、`projectName`、`agent`、`model`、`modelVariant`、`durationMs`、`startedAt`、`taskStartedAt`、`endedAt`、`counts`、`permission`、`question`、`error`。`modelVariant` 是清洗、限长的安全字符串；它来自 OpenCode 的 Assistant `info.variant`，缺失时才来自 `session.model.variant`，不推断、不改名为原始 `reasoning_effort`。`session` 只允许 `ref`、`scope` 与清洗后的 `name`；`scope` 可为 `root`、`subagent`、`auxiliary` 或 `unknown`，缺失时服务端按 `unknown` 兼容。`parentID` 始终禁止进入 envelope；事件专属对象只允许声明过的标量、有限数组和计数，未知键 fail-closed。服务端把实例标识作为 `source.name`，把会话名（缺失时使用匿名 fallback）作为 title 和 `sessionName` 字段，并在有 `projectName` 时增加“项目”行。
+Envelope 只允许显式 V1 字段：`id`、`event`、`version`、`emittedAt`、`session`、可选 `instanceDisplayName`、`projectName`、`agent`、`model`、`modelVariant`、`durationMs`、`startedAt`、`taskStartedAt`、`endedAt`、`counts`、`permission`、`question`、`error` 与 root `session_idle` 专用的 `subagentTimeline`。`modelVariant` 是清洗、限长的安全字符串；它来自 OpenCode 的 Assistant `info.variant`，缺失时才来自 `session.model.variant`，不推断、不改名为原始 `reasoning_effort`。`session` 只允许 `ref`、`scope` 与清洗后的 `name`；`scope` 可为 `root`、`subagent`、`auxiliary` 或 `unknown`，缺失时服务端按 `unknown` 兼容。`parentID` 始终禁止进入 envelope；事件专属对象只允许声明过的标量、有限数组和计数，未知键 fail-closed。服务端把实例标识作为 `source.name`，把会话名（缺失时使用匿名 fallback）作为 title 和 `sessionName` 字段，并在有 `projectName` 时增加“项目”行。
+
+### `subagentTimeline` 与通知边界
+
+`subagentTimeline` 只允许出现在 `event=opencode.session_idle` 且 `session.scope=root` 的 root completion。它不是独立事件，也不创建独立 template 或配置项；其他 event 或 scope 携带该字段会被 Python strict adapter 拒绝。
+
+其 shape 包含 `version=1`、`timeBasis=root_cycle`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 和 `items`。item 使用 `ref`、`parentRef`、可选 `name`/`agent`、状态、相对 root cycle 的 `startOffsetMs`/`endOffsetMs`/`durationMs`、`timingQuality`、`depth` 与 `attempt`。`ref`/`parentRef` 是匿名 hash 图引用，不是 raw Session ID；它们和路径、tool args 不进入 built-in 用户输出。
+
+timeline 限制为最多 64 个 item、24 KiB JSON、depth 不超过 8，并受整个 64 KiB body 限制。缺失、超限、校正或截断必须通过 `partial`、`partialReasons`、`truncated` 和 timing quality 表达。offset 是 root busy→idle cycle 的相对观测时间，不声称调度依赖；重叠只表示同时运行。`auxiliary`（包括 `smartfetch-secondary`）不进入 timeline；`focused` 仍过滤成功完成的 subagent/auxiliary 独立通知，但 root completion 可以汇总 timeline。
+
+默认图片渲染按 item 数量、depth、峰值并发/重叠以及 partial/truncated 综合判断复杂度，而不是只按 item 数：
+
+- simple：主卡最多 8 项阶段卡。
+- complex：主卡保留摘要，并在同一 MessageChain 追加独立横向甘特图，最多 24 行。
+- start/end 缺失比例超过 25%：不画甘特图；`partial`/`clamped` 不展示假精确 duration，未定位任务不画假 bar。
+
+Sender 最多发送 1～2 张图。附图生成、校验或构造失败时只发送主卡；实际发送失败后不自动重试主卡，以避免重复通知。部署顺序仍是服务端先升级并重载、再部署新版 Client 并完全重启 OpenCode。
 
 Question/Permission 内容默认使用 `actionContentMode=strict`，只发送 Permission item 的 `category` 与 Question 的 `count`/`optionCount` 计数；`summary` 发送清洗、截断摘要而不发送完整描述；`full` 才会发送显式白名单中的问题文本、选项 label/description、推荐信息、权限标题/描述/操作目标或 patterns。Permission 使用 `{count, items[]}`，最多 16 个 item；Question 保持 `{count, optionCount, summary?, items?}`，最多 8 个问题、每题 12 个选项，计数可反映去重后的总量。`full` 仍受单段文本、数组和总 payload 上限约束。序列化后的 UTF-8 请求体超过 64 KiB 时，聚合体不会先发送原体或重试原体，而会降级为 Permission 的计数/类别摘要或 Question 的计数摘要；降级体仍超限则跳过发送。
 
@@ -232,12 +249,13 @@ Client 通过已有的 `input.client.session.get()` 判断 scope：非空字符�
 ## Timeout、retry 与 at-least-once
 
 - `timeoutMs` 默认 10000 毫秒；配置为正数时使用配置值。
+- HTML 图片模式建议将 `timeoutMs` 配置为至少 15000 毫秒；仓库示例使用 15000，TypeScript 默认值仍为 10000。
 - 每个事件最多 3 次 HTTP 尝试：1 次初始请求加 2 次 retry。
 - network error、timeout、HTTP 429 和 HTTP 5xx 可 retry；401、403、413 及其他 4xx 不 retry。
 - backoff 使用指数退避和少量 jitter，默认从约 400 毫秒开始，单次上限 5000 毫秒；合法 `Retry-After` 会在上限内生效。
 - Hook 对 OpenCode runtime 是 fire-and-forget，失败会记录脱敏分类并结束，不阻塞 OpenCode。
 
-该链路是 **at-least-once 风格的尽力投递**，不是 exactly-once：网络超时发生在服务端已接收之后时，retry 可能产生重复请求。同一次客户端 retry 会保持稳定 `id`，但当前 AstrBot 服务端不提供幂等去重，重复请求可能产生重复通知。`skipped` 或非 retryable 4xx 不应继续重试。
+该链路是 **at-least-once 风格的尽力投递**，不是 exactly-once：网络超时发生在服务端已接收之后时，retry 仍可能产生重复 HTTP 请求。同一次客户端 retry 会保持稳定 `id`，服务端使用 Envelope 顶层 `id` 参与进程内 single-flight 幂等；相同 endpoint/provider、event、id、session scope 与 target selector 在 10 分钟内最多保留 2048 项，duplicate 返回兼容的 `skipped` 200。服务重启、崩溃或未来多实例之间不保证共享幂等状态；`skipped` 或非 retryable 4xx 不应继续重试。
 
 ---
 
@@ -294,7 +312,7 @@ python scripts/smoke_opencode_plugin.py --desktop
 | Plugin 被加载但没有请求 | URL/env/file 插值、Endpoint Path、Bearer Token、事件过滤器 | 先用固定脱敏事件验证，不要把 Token 放到 URL |
 | HTTP 401/403 | Endpoint provider、Token 是否属于同一条 OpenCode Endpoint | 重新从 AstrBot 私聊 rotate，旧 Token 不恢复 |
 | HTTP 413 或未知字段错误 | payload 是否绕过了官方 Plugin、是否携带 raw/cwd/prompt | 回到 V1 allowlist，不要放宽服务端白名单 |
-| 只收到 idle 或重复 idle | 是否先收到 busy、是否同一周期多次 idle、是否发生 retry | 以 `id` 去重；检查状态机和 at-least-once 语义 |
+| 只收到 idle 或重复 idle | 是否先收到 busy、是否同一周期多次 idle、是否发生 retry | 以稳定 `id` 去重；检查状态机和 at-least-once 语义 |
 | 新 Client 返回未知字段 | 是否先升级服务端 | 服务端必须先升级并重载，再重启 OpenCode Client；旧严格 allowlist 服务端会拒绝 `session.scope` |
 | Desktop 无法安全验证 | 正在运行的实例或 profile 无法隔离 | 保持 `SKIP`，按上面的新隔离实例步骤人工验证 |
 

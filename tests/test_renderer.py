@@ -5,15 +5,20 @@ from __future__ import annotations
 import pytest
 
 from core.models import NormalizedEvent
+from core.notification_policy import SessionScope
 from core.renderer import (
     DEFAULT_HTML_TEMPLATE,
     DEFAULT_TEXT_TEMPLATE,
+    SUBAGENT_TIMELINE_GANTT_ROW_LIMIT,
+    SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT,
+    _build_subagent_timeline_view,
     _expected_canvas_right,
     _scaled_right_crop_padding,
     render_html,
     render_html_data,
     render_html_default,
     render_preview,
+    render_subagent_timeline_html,
     render_text,
     render_text_default,
     trim_viewport_whitespace,
@@ -51,6 +56,68 @@ def _make_event(
         links=[],
         raw={},
     )
+
+
+def _timeline_item(
+    index: int,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+    depth: int = 1,
+    status: str = "completed",
+    timing_quality: str | None = None,
+    name: str | None = None,
+    agent: str | None = "worker",
+) -> dict:
+    if start is None and end is None and timing_quality is None:
+        timing_quality = "unknown"
+    elif timing_quality is None:
+        timing_quality = "observed"
+    item = {
+        "ref": f"{index + 1:032x}",
+        "parentRef": "f" * 32,
+        "name": name if name is not None else f"child-{index}",
+        "status": status,
+        "timingQuality": timing_quality,
+        "depth": depth,
+        "attempt": 1,
+    }
+    if agent is not None:
+        item["agent"] = agent
+    if start is not None:
+        item["startOffsetMs"] = start
+    if end is not None:
+        item["endOffsetMs"] = end
+    if start is not None and end is not None and timing_quality != "partial":
+        item["durationMs"] = end - start
+    return item
+
+
+def _timeline_event(
+    items: list[dict],
+    *,
+    partial: bool = False,
+    partial_reasons: list[str] | None = None,
+    truncated: bool = False,
+    observed_count: int | None = None,
+) -> NormalizedEvent:
+    event = _make_event(title="根任务已完成", fields=[])
+    event.provider = "opencode"
+    event.event = "opencode.session_idle"
+    event.session_scope = SessionScope.ROOT
+    event.subagent_timeline = {
+        "version": 1,
+        "partial": partial,
+        "partialReasons": partial_reasons or [],
+        "timeBasis": "root_cycle",
+        "observedItemCount": observed_count
+        if observed_count is not None
+        else len(items),
+        "displayedItemCount": len(items),
+        "truncated": truncated,
+        "items": items,
+    }
+    return event
 
 
 class TestRenderTextDefault:
@@ -120,6 +187,141 @@ class TestRenderTextDefault:
         event.source["name"] = ""
         result = render_text_default(event)
         assert "[unknown]" in result
+
+    def test_opencode_timeline_text_fallback_is_readable(self):
+        event = _make_event(fields=[])
+        event.provider = "opencode"
+        event.event = "opencode.session_idle"
+        event.session_scope = SessionScope.ROOT
+        event.subagent_timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [
+                {
+                    "ref": "a" * 32,
+                    "parentRef": "b" * 32,
+                    "name": "Build child",
+                    "agent": "worker",
+                    "status": "completed",
+                    "startOffsetMs": 0,
+                    "endOffsetMs": 65_000,
+                    "durationMs": 65_000,
+                    "timingQuality": "observed",
+                    "depth": 1,
+                    "attempt": 1,
+                }
+            ],
+        }
+
+        result = render_text_default(event)
+        assert "子任务时间线：" in result
+        assert "任务数：1（展示 1）" in result
+        assert "状态：完整" in result
+        assert "Build child（worker）：已完成，耗时 1 分钟 5 秒" in result
+        assert "a" * 32 not in result
+        assert "b" * 32 not in result
+
+    def test_opencode_timeline_text_fallback_handles_partial_missing_fields(self):
+        event = _make_event(fields=[])
+        event.provider = "opencode"
+        event.event = "opencode.session_idle"
+        event.session_scope = SessionScope.ROOT
+        event.subagent_timeline = {
+            "version": 1,
+            "partial": True,
+            "partialReasons": ["missing_start", "missing_end"],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [
+                {
+                    "ref": "c" * 32,
+                    "parentRef": "d" * 32,
+                    "status": "unknown",
+                    "timingQuality": "unknown",
+                    "depth": 1,
+                    "attempt": 1,
+                }
+            ],
+        }
+
+        result = render_text_default(event)
+        assert "状态：部分数据" in result
+        assert "- 子任务：未知" in result
+        assert "耗时" not in result.split("子任务时间线：", 1)[1]
+        assert "c" * 32 not in result
+        assert "d" * 32 not in result
+
+    def test_opencode_timeline_partial_or_clamped_never_shows_exact_duration(self):
+        event = _make_event(fields=[])
+        event.provider = "opencode"
+        event.event = "opencode.session_idle"
+        event.session_scope = SessionScope.ROOT
+        event.subagent_timeline = {
+            "version": 1,
+            "partial": True,
+            "partialReasons": ["clamped"],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [
+                {
+                    "ref": "a" * 32,
+                    "parentRef": "b" * 32,
+                    "status": "completed",
+                    "startOffsetMs": 0,
+                    "endOffsetMs": 1000,
+                    "timingQuality": "partial",
+                    "depth": 1,
+                    "attempt": 1,
+                }
+            ],
+        }
+
+        result = render_text_default(event)
+        timeline_text = result.split("子任务时间线：", 1)[1]
+        assert "耗时" not in timeline_text
+        assert "区间不完整" in timeline_text
+
+    def test_opencode_timeline_text_fallback_is_bounded(self):
+        event = _make_event(fields=[])
+        event.provider = "opencode"
+        event.event = "opencode.session_idle"
+        event.session_scope = SessionScope.ROOT
+        event.subagent_timeline = {
+            "version": 1,
+            "partial": True,
+            "partialReasons": ["truncated"],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 20,
+            "displayedItemCount": 20,
+            "truncated": True,
+            "items": [
+                {
+                    "ref": f"{index:032x}",
+                    "parentRef": "e" * 32,
+                    "name": f"Child {index}",
+                    "status": "running",
+                    "timingQuality": "unknown",
+                    "depth": 1,
+                    "attempt": 1,
+                }
+                for index in range(20)
+            ],
+        }
+
+        result = render_text_default(event)
+        assert "状态：部分数据、已截断" in result
+        assert "Child 11" in result
+        assert "Child 12" not in result
+        assert "其余 8 个任务未展开" in result
 
     def test_omp_example_format(self):
         """应匹配 FSD 中的 OMP 示例格式。"""
@@ -242,6 +444,38 @@ class TestRenderHtmlData:
         context = render_html_data(event)
         assert context["event"]["source"] == "AstrBot"
 
+    def test_timeline_is_preserved_for_phase_two_without_raw_leakage(self):
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [
+                {
+                    "ref": "f" * 32,
+                    "parentRef": "0" * 32,
+                    "status": "completed",
+                    "timingQuality": "unknown",
+                    "depth": 1,
+                    "attempt": 1,
+                }
+            ],
+        }
+        event = _make_event()
+        event.provider = "opencode"
+        event.event = "opencode.session_idle"
+        event.session_scope = SessionScope.ROOT
+        event.subagent_timeline = timeline
+
+        assert event.raw == {}
+        assert event.to_dict()["subagent_timeline"] == timeline
+        html_data = render_html_data(event)["event"]
+        assert html_data["subagent_timeline"] == timeline
+        assert "raw" in html_data and html_data["raw"] == {}
+
     def test_status_and_opencode_labels_are_localized_in_display_copy(self):
         event = _make_event(title="Session One")
         event.status = "action_required"
@@ -262,6 +496,330 @@ class TestRenderHtmlData:
         html = render_html_default(event)
         assert "待处理" in html
         assert "action_required" not in html
+
+
+class TestSubagentTimelineVisuals:
+    def test_empty_and_legacy_events_do_not_render_timeline_sections(self):
+        empty = _timeline_event([])
+        assert _build_subagent_timeline_view(empty) is None
+        assert render_subagent_timeline_html(empty) is None
+        assert "子任务执行" not in render_html_default(empty)
+
+        omp = _make_event()
+        old_opencode = _make_event()
+        old_opencode.provider = "opencode"
+        old_opencode.event = "opencode.session_idle"
+        old_opencode.session_scope = SessionScope.ROOT
+        for event in (omp, old_opencode):
+            assert render_subagent_timeline_html(event) is None
+            assert "子任务执行" not in render_html_default(event)
+
+    def test_simple_timeline_uses_compact_cards_with_status_depth_and_duration(self):
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=1000, status="completed"),
+                _timeline_item(1, start=1000, end=2500, status="failed"),
+                _timeline_item(2, start=1000, end=1800, depth=2, status="running"),
+                _timeline_item(3, start=2500, end=3000, status="cancelled"),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "simple"
+        assert view["peak_concurrency"] == 2
+        assert render_subagent_timeline_html(event) is None
+
+        html = render_html_default(event)
+        assert "子任务执行" in html
+        assert html.count('<li class="subagent-item') == 4
+        assert "depth-2" in html
+        assert "并行" in html
+        assert "已完成" in html
+        assert "失败" in html
+        assert "进行中" in html
+        assert "已取消" in html
+        assert "1 秒" in html
+        assert "+1秒" in html
+        assert "详细时间线见附图" not in html
+
+    def test_auxiliary_smartfetch_is_excluded_from_visual_counts_and_names(self):
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=1000, name="explorer"),
+                _timeline_item(
+                    1,
+                    start=0,
+                    end=500,
+                    name="smartfetch-secondary",
+                    agent="smartfetch-secondary",
+                ),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["item_count"] == 1
+        assert view["observed_count"] == 1
+        html = render_html_default(event)
+        assert "explorer" in html
+        assert "smartfetch-secondary" not in html
+
+    def test_complexity_is_not_driven_by_count_alone(self):
+        high_concurrency = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+        deep = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=1000),
+                _timeline_item(1, start=1000, end=2000, depth=3),
+            ]
+        )
+        linear_eight = _timeline_event(
+            [
+                _timeline_item(index, start=index * 1000, end=(index + 1) * 1000)
+                for index in range(8)
+            ]
+        )
+
+        high_view = _build_subagent_timeline_view(high_concurrency)
+        deep_view = _build_subagent_timeline_view(deep)
+        linear_view = _build_subagent_timeline_view(linear_eight)
+        assert high_view is not None and high_view["mode"] == "complex"
+        assert deep_view is not None and deep_view["mode"] == "complex"
+        assert linear_view is not None and linear_view["mode"] == "simple"
+        assert render_subagent_timeline_html(high_concurrency) is not None
+        assert render_subagent_timeline_html(deep) is not None
+        assert render_subagent_timeline_html(linear_eight) is None
+
+    def test_complex_main_copy_is_accurate_without_a_timeline_attachment(
+        self, monkeypatch
+    ):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+
+        def fail_timeline_render(_event):
+            raise RuntimeError("timeline render failed")
+
+        monkeypatch.setattr(
+            "core.renderer.render_subagent_timeline_html", fail_timeline_render
+        )
+        html = render_html_default(event)
+        assert "流程较复杂，主卡仅展示关键摘要" in html
+        assert "见附图" not in html
+        assert "子任务" in html
+        assert "峰值并发" in html
+        assert "总跨度" in html
+
+    def test_complete_timeline_keeps_standard_metric_labels(self):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        assert view["timing_summary"] == "峰值并发 4 · 总跨度 2 秒"
+        assert [metric["label"] for metric in view["metrics"]] == [
+            "子任务",
+            "峰值并发",
+            "总跨度",
+        ]
+
+        main_html = render_html_default(event)
+        timeline_html = render_subagent_timeline_html(event)
+        assert timeline_html is not None
+        assert "已观测峰值并发" not in main_html
+        assert "已观测跨度" not in main_html
+        assert "峰值并发" in timeline_html
+        assert "总跨度" in timeline_html
+
+    @pytest.mark.parametrize("truncated", [False, True])
+    def test_partial_or_truncated_timeline_uses_observed_metric_labels(self, truncated):
+        items = [
+            _timeline_item(index, start=0, end=2000, depth=3 if index == 0 else 1)
+            for index in range(4)
+        ]
+        reasons = ["truncated"] if truncated else ["clamped"]
+        if not truncated:
+            items[0] = _timeline_item(
+                0,
+                start=0,
+                end=2000,
+                depth=3,
+                timing_quality="partial",
+            )
+        event = _timeline_event(
+            items,
+            partial=True,
+            partial_reasons=reasons,
+            truncated=truncated,
+            observed_count=6 if truncated else None,
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        assert "已观测峰值并发" in view["timing_summary"]
+        assert "已观测跨度" in view["timing_summary"]
+        assert [metric["label"] for metric in view["metrics"]] == [
+            "子任务",
+            "已观测峰值并发",
+            "已观测跨度",
+        ]
+
+        main_html = render_html_default(event)
+        timeline_html = render_subagent_timeline_html(event)
+        assert timeline_html is not None
+        for html in (main_html, timeline_html):
+            assert "已观测峰值并发" in html
+            assert "已观测跨度" in html
+        assert "指标按已观测范围计算" in timeline_html
+
+    def test_missing_ratio_over_limit_degrades_and_boundary_can_render_gantt(self):
+        degraded_items = [
+            _timeline_item(index, start=index * 1000, end=(index + 1) * 1000)
+            for index in range(3)
+        ] + [_timeline_item(3), _timeline_item(4)]
+        degraded = _timeline_event(
+            degraded_items,
+            partial=True,
+            partial_reasons=["missing_start", "missing_end"],
+        )
+        degraded_view = _build_subagent_timeline_view(degraded)
+        assert degraded_view is not None
+        assert degraded_view["missing_ratio"] == pytest.approx(0.4)
+        assert degraded_view["mode"] == "degraded"
+        assert render_subagent_timeline_html(degraded) is None
+        degraded_html = render_html_default(degraded)
+        assert "部分时间数据缺失" in degraded_html
+        assert "详细时间线见附图" not in degraded_html
+
+        boundary_items = [
+            _timeline_item(0, start=0, end=4000),
+            _timeline_item(1, start=1000, end=2000, depth=3, status="failed"),
+            _timeline_item(2, start=2000, end=3000),
+            _timeline_item(3),
+        ]
+        boundary = _timeline_event(
+            boundary_items,
+            partial=True,
+            partial_reasons=["missing_start", "missing_end"],
+        )
+        boundary_view = _build_subagent_timeline_view(boundary)
+        assert boundary_view is not None
+        assert boundary_view["missing_ratio"] == pytest.approx(0.25)
+        assert boundary_view["mode"] == "complex"
+        gantt = render_subagent_timeline_html(boundary)
+        assert gantt is not None
+        assert "left: 25%; width: 25%;" in gantt
+        assert "bar failed" in gantt
+        assert "峰值并发" in gantt
+        assert "未定位任务" in gantt
+
+    def test_main_card_detail_is_bounded_to_eight_items(self):
+        items = [
+            _timeline_item(index, start=index * 1000, end=(index + 1) * 1000)
+            for index in range(7)
+        ] + [_timeline_item(index) for index in range(7, 10)]
+        event = _timeline_event(
+            items,
+            partial=True,
+            partial_reasons=["missing_start", "missing_end"],
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "degraded"
+        assert len(view["main_items"]) == SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT
+        assert view["main_hidden_count"] == 2
+
+        html = render_html_default(event)
+        assert html.count('<li class="subagent-item') == 8
+        assert "另有 2 项未展开" in html
+
+    def test_gantt_has_adaptive_axis_status_bars_and_twenty_four_row_limit(self):
+        items = [
+            _timeline_item(index, start=index * 10, end=10_000) for index in range(29)
+        ]
+        items.append(_timeline_item(29, name="unlocated-child"))
+        event = _timeline_event(
+            items,
+            partial=True,
+            partial_reasons=["missing_start", "missing_end", "truncated"],
+            truncated=True,
+            observed_count=36,
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        assert len(view["gantt_items"]) + len(view["unlocated_items"]) == (
+            SUBAGENT_TIMELINE_GANTT_ROW_LIMIT
+        )
+        assert view["remaining_count"] == 12
+
+        html = render_subagent_timeline_html(event)
+        assert html is not None
+        assert html.count('<div class="row timeline-row">') == 23
+        assert "unlocated-child" in html
+        assert "其余 12 项未展开" in html
+        assert "记录已截断" in html
+        assert "10秒" in html
+        assert "bar completed" in html
+        assert "最大" not in html
+
+    def test_partial_clamped_interval_uses_pattern_without_exact_duration(self):
+        items = [
+            _timeline_item(0, start=0, end=4000),
+            _timeline_item(
+                1,
+                start=1000,
+                end=3000,
+                depth=3,
+                timing_quality="partial",
+                name="clamped-child",
+            ),
+            _timeline_item(2, start=3000, end=4000),
+        ]
+        event = _timeline_event(items, partial=True, partial_reasons=["clamped"])
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        clamped = next(
+            item for item in view["gantt_items"] if item["name"] == "clamped-child"
+        )
+        assert clamped["partial_interval"] is True
+        assert clamped["timing_label"] == "区间不完整"
+        assert "2 秒" not in clamped["meta_labels"]
+
+        html = render_subagent_timeline_html(event)
+        assert html is not None
+        assert "bar completed partial" in html
+        assert "区间不完整" in html
+
+    def test_timeline_html_escapes_names_and_never_surfaces_sensitive_structure(self):
+        ref = "a" * 32
+        path = "/Users/alice/private/task.txt"
+        items = [
+            _timeline_item(
+                0,
+                start=0,
+                end=3000,
+                depth=3,
+                name="<b>unsafe child</b>",
+                agent="worker<&>",
+            ),
+            _timeline_item(1, start=1000, end=2000, name=path),
+            _timeline_item(2, start=2000, end=3000, name=ref, agent='{"raw":1}'),
+        ]
+        event = _timeline_event(items)
+        html = render_subagent_timeline_html(event)
+        assert html is not None
+        assert "&lt;b&gt;unsafe child&lt;/b&gt;" in html
+        assert "worker&lt;&amp;&gt;" in html
+        assert "<b>unsafe child</b>" not in html
+        assert path not in html
+        assert ref not in html
+        assert '{"raw":1}' not in html
+        assert "未命名子任务" in html
+        for forbidden in (
+            "parentRef",
+            "rootRef",
+            "startOffsetMs",
+            "endOffsetMs",
+            "durationMs",
+        ):
+            assert forbidden not in html
 
 
 class TestDisplayLocalization:

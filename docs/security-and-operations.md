@@ -131,6 +131,20 @@ AstrBot Endpoint 创建时可显式选择：
 
 Plugin 只发送 `opencode.session_idle`、`opencode.session_error`、`opencode.permission_asked` 和 `opencode.question_asked` 四类 V1 envelope。原始 session ID 使用带上下文前缀的 SHA-256 截断值作为匿名 `session.ref`；名称会移除危险 Unicode、控制字符并限制长度。title 使用会话名，缺失时使用 `OpenCode Session <匿名 ref>`；`source.name` 按 `instanceDisplayName` > `OpenCode` 选择。项目路径只按 `worktree`、`project.worktree`、`directory` 优先级取最后一级作为 `projectName`，不发送完整路径；卡片详细字段始终包含 `sessionName`，有项目名时增加“项目”行。会话 `time.created` 只形成 `startedAt`；`session_idle` 优先使用本轮 busy→idle 的插件接收时间形成 `taskStartedAt`/`endedAt` 和 task duration，只有缺少可靠 busy 周期时间时才 fallback 到 Assistant 的 `info.time.created/completed`；`session.time.updated` 不参与其中。Permission/Question 在发送前按同一 Session、同一类型固定 150ms 聚合，raw session ID 只作本地内存 key；Permission 与 Question、不同 Session 永不合并。
 
+### `subagentTimeline` 的发送白名单
+
+`subagentTimeline` 是唯一附加在 root completion 上的 timeline 字段：只允许出现在 `opencode.session_idle` 且 `session.scope=root` 的 envelope。其他 event 或 scope 携带它会被 Python strict adapter 拒绝；它不是独立通知、独立模板或新配置项。
+
+允许的 timeline shape 为 `version=1`、`timeBasis=root_cycle`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 和 `items`。每个 item 使用 `ref`、`parentRef`、可选 `name`/`agent`、`status`、`startOffsetMs`/`endOffsetMs`/`durationMs`、`timingQuality`、`depth`、`attempt`。`ref`/`parentRef` 是匿名 hash 图引用，不是 raw Session ID；默认 renderer 与 Sender 不展示它们。限制为 items≤64、timeline JSON≤24 KiB、body≤64 KiB、depth≤8。offset 是相对 root busy→idle cycle 的观测偏移，不表示调度依赖；重叠只说明同时运行。
+
+缺失、超限、截断或 clamped 数据必须保留 `partial`/`partialReasons`/`truncated`/timing quality 语义。`auxiliary`（包括 `smartfetch-secondary`）不进入 timeline；`focused` 仍过滤成功完成的 subagent/auxiliary 独立通知，但 root completion 可以汇总 timeline。
+
+### Timeline 渲染与模板风险
+
+默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 主卡摘要加同一 MessageChain 的独立横向甘特图，最多 24 行。start/end 缺失比例超过 25% 不画甘特图；partial/clamped 不展示假精确 duration；未定位任务不画假 bar。
+
+Sender 最多发 1～2 张图。附图生成、校验或构造失败只发主卡；实际发送失败后不自动重试主卡，避免造成重复通知。自定义模板如直接访问 `event.subagent_timeline`，不得渲染 `ref`、`parentRef` 或依赖其作为用户可见 ID；应使用 `render_html_data()` 生成的安全派生 `event.subagent_timeline_view`。该 view 与 built-in renderer 一样不暴露 raw Session ID、path、tool args 或 raw JSON。模板作者仍须遵守最小披露原则，不能通过自定义模板绕过服务端 allowlist。
+
 Question/Permission 的 `actionContentMode` 默认为 `strict`，只保留 Permission item 的 category 与 Question 的 count/optionCount 计数；`summary` 只发送清洗、截断摘要；`full` 才发送显式 allowlist 中完整（仍受上限约束）的问题文本、选项 label/description/推荐信息、权限标题/描述/操作目标或 patterns。Permission 使用 `count/items`，最多 16 个 item；Question 最多 8 个问题、每题 12 个选项。回复事件只按 request ID 撤销尚未 flush 的成员，已发送通知不撤回。`full` 必须由调用方明确 opt-in，因为它可能把业务文本和目标路径外发。它与服务端 `notification_mode` 正交，不能混用解释。
 
 服务端 `notification_mode` 只有 `focused` 和 `all`：`focused` 只抑制成功完成的 `subagent` 与 `auxiliary`，root 的 completed/failed/action_required、辅助或 subagent 的 failed/action_required、unknown scope 以及未知未来状态全部放行；`all` 保持全部通知。默认 auxiliary 只精确匹配清洗后的 `smartfetch-secondary`，非空 `parentID` 始终优先为 `subagent`。unknown fail-open。被过滤事件返回 HTTP 200 `message=skipped`，并明确返回 `scope` 与 `reason`，不调用 renderer、HTML/T2I 或 sender。
@@ -145,6 +159,7 @@ Client 复用已有 `input.client.session.get()` 判断 scope：非空字符串 
 
 - 原始 session ID、cwd、完整本地路径、prompt、消息、tool、command 和 diff；
 - `parentID` 值；它只在 Client 内部参与 scope 判断，诊断最多记录 `parentIDState`，不能进入请求、服务端存储或渲染；
+- `subagentTimeline` 的 `ref`/`parentRef` 不得当作 raw Session ID、用户账号或可读路径输出；它们只能作为内部匿名图关联值，safe view 也不向用户暴露；
 - strict 模式下 permission 标题、描述、目标路径，以及 question 正文、选项正文；full 模式也不得通过未列入 allowlist 的键绕过边界；
 - error message、response body、Token、URL 和未列入 allowlist 的字段。
 
@@ -153,6 +168,10 @@ Client 复用已有 `input.client.session.get()` 判断 scope：非空字符串 
 ### OpenCode retry 与恢复
 
 单次请求默认 timeout 为 10 秒，最多 3 次尝试。network error、timeout、429 和 5xx 可重试；401、403、413 及其他 4xx 不重试。该链路是 at-least-once 风格的尽力投递，不是 exactly-once；超时发生在服务端已接收之后可能造成重复，调用方应按稳定 `id` 去重。
+
+服务端会把 OpenCode Envelope 顶层 `id` 纳入幂等键，并在严格解析、通知过滤和全私聊 preflight 之后执行进程内 single-flight。幂等状态保留 10 分钟、最多 2048 项；已完成的重复请求返回 HTTP 200 `message=skipped`、`skip_reason=idempotency_replay`、`deduplicated=true`，不会再次渲染或发送。过滤和全私聊 skip 不占 cache。该状态不持久化，服务重启、崩溃或未来多实例之间不保证共享幂等；不要将其理解为远端 exactly-once。
+
+HTML 图片模式建议将客户端 `timeoutMs` 配置为至少 15000 毫秒，以给服务端渲染和平台发送留出余量；TypeScript 插件默认 10000 毫秒，仓库示例使用 15000 毫秒。
 
 Token 失效或 Endpoint 配置错误时不要在 URL 中嵌入新 Token。回到同一平台的 AstrBot 私聊执行 `token rotate <名称>`，并安全更新 OpenCode 的 env/file 配置。OpenCode Plugin 的配置缺少 URL/Token 时会安全禁用，不应通过降低鉴权或扩大白名单恢复。
 

@@ -8,7 +8,7 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context
 
 from core.models import EndpointRecord, TargetAlias
-from core.sender import Sender
+from core.sender import DeliveryAttemptTracker, Sender
 
 
 def _make_endpoint(
@@ -158,7 +158,181 @@ class TestSendImage:
         endpoint = _make_endpoint(targets=[TargetAlias(name="test", umo="test:Msg:1")])
         results = await sender.send_image("https://example.com/img.png", endpoint)
         assert results[0]["ok"] is False
-        assert "connection lost" in results[0].get("error", "")
+        assert results[0]["error"] == "send_failed"
+
+
+class TestSendImages:
+    """send_images 真实消息链与发送次数回归。"""
+
+    @pytest.mark.asyncio
+    async def test_one_image_is_compatible_and_disables_t2i(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            targets=[TargetAlias(name="default", umo="test:Msg:1")]
+        )
+
+        results = await sender.send_images(["https://example.com/main.png"], endpoint)
+
+        assert results == [{"name": "default", "ok": True, "error": None}]
+        assert len(ctx._sent_messages) == 1
+        _, chain = ctx._sent_messages[0]
+        assert len(chain.chain) == 1
+        assert isinstance(chain.chain[0], Image)
+        assert chain.chain[0].file == "https://example.com/main.png"
+        assert chain.get_use_t2i() is False
+
+    @pytest.mark.asyncio
+    async def test_two_images_share_ordered_message_chain(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            targets=[
+                TargetAlias(name="default", umo="test:Msg:1"),
+                TargetAlias(name="backup", umo="test:Msg:2"),
+            ]
+        )
+
+        results = await sender.send_images(
+            ["https://example.com/main.png", "https://example.com/timeline.png"],
+            endpoint,
+        )
+
+        assert results[0]["ok"] is True
+        assert len(ctx._sent_messages) == 2
+        _, chain = ctx._sent_messages[0]
+        assert ctx._sent_messages[1][1] is chain
+        assert len(chain.chain) == 2
+        assert [component.file for component in chain.chain] == [
+            "https://example.com/main.png",
+            "https://example.com/timeline.png",
+        ]
+        assert all(isinstance(component, Image) for component in chain.chain)
+        assert chain.get_use_t2i() is False
+
+    @pytest.mark.asyncio
+    async def test_targets_alias_and_private_policy_send_once_per_target(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            targets=[
+                TargetAlias(name="group_a", umo="test:Group:1"),
+                TargetAlias(name="group_b", umo="test:Group:2"),
+            ]
+        )
+
+        results = await sender.send_images(["https://example.com/main.png"], endpoint)
+        assert [result["name"] for result in results] == ["group_a", "group_b"]
+        assert len(ctx._sent_messages) == 2
+        assert [umo for umo, _ in ctx._sent_messages] == [
+            "test:Group:1",
+            "test:Group:2",
+        ]
+
+        ctx.clear_sent()
+        alias_results = await sender.send_images(
+            ["https://example.com/main.png"], endpoint, target_alias="group_b"
+        )
+        assert alias_results == [{"name": "group_b", "ok": True, "error": None}]
+        assert len(ctx._sent_messages) == 1
+        assert ctx._sent_messages[0][0] == "test:Group:2"
+
+        private_endpoint = _make_endpoint(
+            targets=[TargetAlias(name="private", umo="test:FriendMessage:1")]
+        )
+        ctx.clear_sent()
+        skipped = await sender.send_images(
+            ["https://example.com/main.png"], private_endpoint
+        )
+        assert skipped[0]["skipped"] is True
+        assert ctx._sent_messages == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "image_results",
+        [[], ["a", "b", "c"], ["https://example.com/main.png", object()]],
+    )
+    async def test_invalid_image_batches_fail_before_any_send(self, image_results):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            targets=[
+                TargetAlias(name="group_a", umo="test:Group:1"),
+                TargetAlias(name="group_b", umo="test:Group:2"),
+            ]
+        )
+
+        results = await sender.send_images(image_results, endpoint)  # type: ignore[arg-type]
+
+        assert len(ctx._sent_messages) == 0
+        assert results[0]["ok"] is False
+        assert results[0]["error"] in {
+            "invalid_image_count",
+            "unsupported_image_result",
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raises", [False, True])
+    async def test_send_failure_attempts_each_target_once_without_retry(self, raises):
+        ctx = Context()
+        calls: list[str] = []
+
+        async def failing_send(umo, chain):
+            calls.append(umo)
+            if raises:
+                raise RuntimeError("backend secret: /private/path")
+            return False
+
+        ctx.send_message = failing_send  # type: ignore[assignment]
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            targets=[
+                TargetAlias(name="group_a", umo="test:Group:1"),
+                TargetAlias(name="group_b", umo="test:Group:2"),
+            ]
+        )
+
+        results = await sender.send_images(["https://example.com/main.png"], endpoint)
+
+        assert calls == ["test:Group:1", "test:Group:2"]
+        assert len(results) == 2
+        assert all(result["ok"] is False for result in results)
+        if raises:
+            assert all(result["error"] == "send_failed" for result in results)
+        else:
+            assert all(result["error"] == "session_not_found" for result in results)
+
+    @pytest.mark.asyncio
+    async def test_send_image_is_a_thin_send_images_wrapper(self, monkeypatch):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            targets=[TargetAlias(name="default", umo="test:Msg:1")]
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_send_images(
+            image_results,
+            actual_endpoint,
+            target_alias=None,
+            delivery_attempt_callback=None,
+        ):
+            captured["image_results"] = image_results
+            captured["endpoint"] = actual_endpoint
+            captured["target_alias"] = target_alias
+            return [{"name": "default", "ok": True, "error": None}]
+
+        monkeypatch.setattr(sender, "send_images", fake_send_images)
+        result = await sender.send_image(
+            "https://example.com/main.png", endpoint, target_alias="default"
+        )
+
+        assert result[0]["ok"] is True
+        assert captured == {
+            "image_results": ["https://example.com/main.png"],
+            "endpoint": endpoint,
+            "target_alias": "default",
+        }
 
 
 class TestBuildImageComponent:
@@ -333,3 +507,71 @@ class TestPrivateNotificationPolicy:
         results = await sender.send_text("hello", endpoint)
 
         assert results == [{"name": "group", "ok": True, "error": None}]
+
+
+@pytest.mark.asyncio
+async def test_delivery_attempt_callback_marks_immediately_before_platform_call():
+    ctx = Context()
+    tracker = DeliveryAttemptTracker()
+    observed: list[bool] = []
+
+    async def send_message(umo, chain):
+        observed.append(tracker.attempted)
+        return True
+
+    ctx.send_message = send_message  # type: ignore[assignment]
+    sender = Sender(ctx)
+    endpoint = _make_endpoint([TargetAlias(name="default", umo="test:Msg:1")])
+
+    await sender.send_text("hello", endpoint, delivery_attempt_callback=tracker)
+
+    assert observed == [True]
+    assert tracker.attempted is True
+
+
+@pytest.mark.asyncio
+async def test_unsupported_image_does_not_mark_delivery_attempt_callback():
+    ctx = Context()
+    tracker = DeliveryAttemptTracker()
+    sender = Sender(ctx)
+    endpoint = _make_endpoint([TargetAlias(name="default", umo="test:Msg:1")])
+
+    results = await sender.send_image(
+        "not-an-image", endpoint, delivery_attempt_callback=tracker
+    )
+
+    assert results[0]["error"] == "unsupported_image_result"
+    assert tracker.attempted is False
+    assert ctx.get_last_sent() is None
+
+
+@pytest.mark.asyncio
+async def test_multi_target_delivery_attempt_callback_marks_every_platform_call():
+    ctx = Context()
+    callback_count = 0
+    observed_counts: list[int] = []
+
+    def mark_attempt() -> None:
+        nonlocal callback_count
+        callback_count += 1
+
+    async def send_message(umo, chain):
+        observed_counts.append(callback_count)
+        return True
+
+    ctx.send_message = send_message  # type: ignore[assignment]
+    endpoint = _make_endpoint(
+        [
+            TargetAlias(name="first", umo="test:Group:1"),
+            TargetAlias(name="second", umo="test:Group:2"),
+        ]
+    )
+
+    await Sender(ctx).send_images(
+        ["https://example.com/main.png"],
+        endpoint,
+        delivery_attempt_callback=mark_attempt,
+    )
+
+    assert callback_count == 2
+    assert observed_counts == [1, 2]

@@ -43,10 +43,36 @@ class TestEnvelopeSchemaCompatibility:
         "event": "opencode.session_idle",
         "version": 1,
         "emittedAt": "2026-07-22T12:00:00.000Z",
-        "session": {"ref": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "name": "My Session"},
+        "session": {
+            "ref": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+            "name": "My Session",
+            "scope": "root",
+        },
         "agent": "my-agent",
         "model": "gpt-5",
         "durationMs": 15000,
+        "subagentTimeline": {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [
+                {
+                    "ref": "0123456789abcdef0123456789abcdef",
+                    "parentRef": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+                    "status": "completed",
+                    "startOffsetMs": 100,
+                    "endOffsetMs": 400,
+                    "durationMs": 300,
+                    "timingQuality": "observed",
+                    "depth": 1,
+                    "attempt": 1,
+                }
+            ],
+        },
     }
 
     ERROR_EVENT = {

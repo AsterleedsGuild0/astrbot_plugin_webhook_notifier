@@ -4,7 +4,7 @@ import re
 import math
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NoReturn
 
 from .models import NormalizedEvent
 from .notification_policy import SessionScope
@@ -29,6 +29,13 @@ _MAX_ACTION_COUNT = 1_000_000
 _MAX_PAYLOAD_BYTES = 64 * 1024
 _MAX_DURATION_MS = 604800000  # 7 days
 _MIN_DURATION_MS = 0
+_MAX_TIMELINE_BYTES = 24 * 1024
+_MAX_TIMELINE_ITEMS = 64
+_MAX_TIMELINE_OBSERVED_ITEMS = 4096
+_MAX_TIMELINE_DEPTH = 8
+_MAX_TIMELINE_ATTEMPT = 1_000_000
+_MAX_TIMELINE_REASONS = 6
+_MAX_TIMELINE_NUMBER = 2**53 - 1
 
 # ─── 允许字段 ──────────────────────────────────────────────
 
@@ -43,6 +50,46 @@ _QUESTION_ALLOW = frozenset({"count", "optionCount", "summary", "items"})
 _QUESTION_ITEM_ALLOW = frozenset({"text", "header", "recommended", "options"})
 _QUESTION_OPTION_ALLOW = frozenset({"label", "description", "recommended"})
 _ERROR_ALLOW = frozenset({"category", "code"})
+_TIMELINE_ALLOW = frozenset(
+    {
+        "version",
+        "partial",
+        "partialReasons",
+        "timeBasis",
+        "observedItemCount",
+        "displayedItemCount",
+        "truncated",
+        "items",
+    }
+)
+_TIMELINE_ITEM_ALLOW = frozenset(
+    {
+        "ref",
+        "parentRef",
+        "name",
+        "agent",
+        "status",
+        "startOffsetMs",
+        "endOffsetMs",
+        "durationMs",
+        "timingQuality",
+        "depth",
+        "attempt",
+    }
+)
+_TIMELINE_REASONS = (
+    "missing_parent",
+    "missing_start",
+    "missing_end",
+    "invalid_parent_graph",
+    "truncated",
+    "clamped",
+)
+_TIMELINE_STATUSES = frozenset(
+    {"running", "completed", "failed", "cancelled", "unknown"}
+)
+_TIMELINE_QUALITIES = frozenset({"observed", "fallback", "partial", "unknown"})
+_TIMELINE_REF_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # ─── 敏感字段 — 白名单自然拒绝，但列出便于可读 ───────────
 
@@ -87,6 +134,16 @@ _MSG_SECURE: dict[str, str] = {
     "error": "无效的 error 字段",
     "error.category": "无效的 error.category 字段",
     "error.code": "无效的 error.code 字段",
+    "subagentTimeline": "无效的 subagentTimeline 字段",
+    "subagentTimeline.version": "无效的 subagentTimeline.version 字段",
+    "subagentTimeline.partial": "无效的 subagentTimeline.partial 字段",
+    "subagentTimeline.partialReasons": "无效的 subagentTimeline.partialReasons 字段",
+    "subagentTimeline.timeBasis": "无效的 subagentTimeline.timeBasis 字段",
+    "subagentTimeline.observedItemCount": "无效的 subagentTimeline.observedItemCount 字段",
+    "subagentTimeline.displayedItemCount": "无效的 subagentTimeline.displayedItemCount 字段",
+    "subagentTimeline.truncated": "无效的 subagentTimeline.truncated 字段",
+    "subagentTimeline.items": "无效的 subagentTimeline.items 字段",
+    "subagentTimeline.item": "无效的 subagentTimeline item 字段",
 }
 
 
@@ -328,6 +385,247 @@ def _check_optional_timestamp(val: Any, field: str) -> str | None:
 
 def _raise_invalid(field: str) -> None:
     raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+
+
+def _timeline_invalid(field: str = "subagentTimeline") -> NoReturn:
+    raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+
+
+def _check_timeline_ref(val: Any, field: str) -> str:
+    if not isinstance(val, str) or _TIMELINE_REF_RE.fullmatch(val) is None:
+        _timeline_invalid(field)
+    return val
+
+
+def _check_timeline_number(val: Any, field: str) -> int | float:
+    if (
+        isinstance(val, bool)
+        or not isinstance(val, (int, float))
+        or not math.isfinite(val)
+        or val < 0
+        or val > _MAX_TIMELINE_NUMBER
+    ):
+        _timeline_invalid(field)
+    return val
+
+
+def _check_timeline_count(val: Any, field: str, maximum: int) -> int:
+    if not _is_strict_int(val) or val < 0 or val > maximum:
+        _timeline_invalid(field)
+    return val
+
+
+def _check_timeline_text(
+    val: Any,
+    field: str,
+    *,
+    max_length: int,
+    name_style: bool = False,
+) -> str:
+    if not isinstance(val, str) or not val or len(val) > max_length:
+        _timeline_invalid(field)
+    cleaned = (
+        _clean_session_name(val)
+        if name_style
+        else _check_action_text(val, field, max_length=max_length)
+    )
+    if cleaned is None:
+        _timeline_invalid(field)
+    return cleaned
+
+
+def _validate_subagent_timeline(raw: Any) -> dict[str, Any]:
+    """Validate and copy the Phase 1A root-session timeline envelope."""
+
+    if not isinstance(raw, dict):
+        _timeline_invalid()
+    _check_unknown_fields(raw, _TIMELINE_ALLOW, "subagentTimeline")
+    required = {
+        "version",
+        "partial",
+        "partialReasons",
+        "timeBasis",
+        "observedItemCount",
+        "displayedItemCount",
+        "truncated",
+        "items",
+    }
+    if not required.issubset(raw):
+        _timeline_invalid()
+
+    if not _is_strict_int(raw["version"]) or raw["version"] != 1:
+        _timeline_invalid("subagentTimeline.version")
+    partial = raw["partial"]
+    truncated = raw["truncated"]
+    if not isinstance(partial, bool):
+        _timeline_invalid("subagentTimeline.partial")
+    if not isinstance(truncated, bool):
+        _timeline_invalid("subagentTimeline.truncated")
+    if raw["timeBasis"] != "root_cycle":
+        _timeline_invalid("subagentTimeline.timeBasis")
+
+    raw_reasons = raw["partialReasons"]
+    if (
+        not isinstance(raw_reasons, list)
+        or len(raw_reasons) > _MAX_TIMELINE_REASONS
+        or any(reason not in _TIMELINE_REASONS for reason in raw_reasons)
+        or len(set(raw_reasons)) != len(raw_reasons)
+        or tuple(raw_reasons)
+        != tuple(reason for reason in _TIMELINE_REASONS if reason in raw_reasons)
+    ):
+        _timeline_invalid("subagentTimeline.partialReasons")
+    reasons = list(raw_reasons)
+
+    observed_count = _check_timeline_count(
+        raw["observedItemCount"],
+        "subagentTimeline.observedItemCount",
+        _MAX_TIMELINE_OBSERVED_ITEMS,
+    )
+    displayed_count = _check_timeline_count(
+        raw["displayedItemCount"],
+        "subagentTimeline.displayedItemCount",
+        _MAX_TIMELINE_ITEMS,
+    )
+    if displayed_count > observed_count:
+        _timeline_invalid("subagentTimeline.displayedItemCount")
+
+    raw_items = raw["items"]
+    if not isinstance(raw_items, list) or len(raw_items) > _MAX_TIMELINE_ITEMS:
+        _timeline_invalid("subagentTimeline.items")
+    if len(raw_items) != displayed_count:
+        _timeline_invalid("subagentTimeline.items")
+
+    if partial != bool(reasons):
+        _timeline_invalid()
+    if truncated and (not partial or "truncated" not in reasons):
+        _timeline_invalid()
+    if "truncated" in reasons and not truncated:
+        _timeline_invalid()
+    if not partial and truncated:
+        _timeline_invalid()
+
+    items: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            _timeline_invalid("subagentTimeline.item")
+        _check_unknown_fields(raw_item, _TIMELINE_ITEM_ALLOW, "subagentTimeline.item")
+        required_item = {
+            "ref",
+            "parentRef",
+            "status",
+            "timingQuality",
+            "depth",
+            "attempt",
+        }
+        if not required_item.issubset(raw_item):
+            _timeline_invalid("subagentTimeline.item")
+
+        item: dict[str, Any] = {
+            "ref": _check_timeline_ref(raw_item["ref"], "subagentTimeline.item.ref"),
+            "parentRef": _check_timeline_ref(
+                raw_item["parentRef"], "subagentTimeline.item.parentRef"
+            ),
+        }
+        status = raw_item["status"]
+        timing_quality = raw_item["timingQuality"]
+        if not isinstance(status, str) or status not in _TIMELINE_STATUSES:
+            _timeline_invalid("subagentTimeline.item.status")
+        if (
+            not isinstance(timing_quality, str)
+            or timing_quality not in _TIMELINE_QUALITIES
+        ):
+            _timeline_invalid("subagentTimeline.item.timingQuality")
+        item["status"] = status
+        item["timingQuality"] = timing_quality
+
+        depth = raw_item["depth"]
+        if not _is_strict_int(depth) or not 1 <= depth <= _MAX_TIMELINE_DEPTH:
+            _timeline_invalid("subagentTimeline.item.depth")
+        item["depth"] = depth
+
+        attempt = raw_item["attempt"]
+        if not _is_strict_int(attempt) or not 1 <= attempt <= _MAX_TIMELINE_ATTEMPT:
+            _timeline_invalid("subagentTimeline.item.attempt")
+        item["attempt"] = attempt
+
+        if "name" in raw_item:
+            item["name"] = _check_timeline_text(
+                raw_item["name"],
+                "subagentTimeline.item.name",
+                max_length=_MAX_NAME,
+                name_style=True,
+            )
+        if "agent" in raw_item:
+            item["agent"] = _check_timeline_text(
+                raw_item["agent"],
+                "subagentTimeline.item.agent",
+                max_length=_MAX_AGENT_MODEL,
+            )
+
+        offsets: dict[str, int | float] = {}
+        for key in ("startOffsetMs", "endOffsetMs", "durationMs"):
+            if key in raw_item:
+                offsets[key] = _check_timeline_number(
+                    raw_item[key], f"subagentTimeline.item.{key}"
+                )
+        start = offsets.get("startOffsetMs")
+        end = offsets.get("endOffsetMs")
+        duration = offsets.get("durationMs")
+        if start is not None and end is not None and end < start:
+            _timeline_invalid("subagentTimeline.item.endOffsetMs")
+        if duration is not None and (start is None or end is None):
+            _timeline_invalid("subagentTimeline.item.durationMs")
+        if duration is not None and timing_quality == "partial":
+            _timeline_invalid("subagentTimeline.item.durationMs")
+        if start is not None and end is not None and duration is not None:
+            if duration != end - start:
+                _timeline_invalid("subagentTimeline.item.durationMs")
+
+        has_start = start is not None
+        has_end = end is not None
+        if not has_start and not has_end and timing_quality != "unknown":
+            _timeline_invalid("subagentTimeline.item.timingQuality")
+        if has_start != has_end and timing_quality != "partial":
+            _timeline_invalid("subagentTimeline.item.timingQuality")
+        if has_start and has_end and timing_quality == "unknown":
+            _timeline_invalid("subagentTimeline.item.timingQuality")
+        if (
+            has_start
+            and has_end
+            and timing_quality == "partial"
+            and "clamped" not in reasons
+        ):
+            _timeline_invalid("subagentTimeline.item.timingQuality")
+        if not has_start and "missing_start" not in reasons:
+            _timeline_invalid()
+        if not has_end and "missing_end" not in reasons:
+            _timeline_invalid()
+
+        item.update(offsets)
+        items.append(item)
+
+    result = {
+        "version": 1,
+        "partial": partial,
+        "partialReasons": reasons,
+        "timeBasis": "root_cycle",
+        "observedItemCount": observed_count,
+        "displayedItemCount": displayed_count,
+        "truncated": truncated,
+        "items": items,
+    }
+    timeline_size = 0
+    try:
+        timeline_size = len(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        _timeline_invalid()
+    if timeline_size > _MAX_TIMELINE_BYTES:
+        _timeline_invalid()
+    return result
 
 
 # ─── Session Name 清洗 ─────────────────────────────────────
@@ -670,6 +968,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
                     "permission",
                     "question",
                     "error",
+                    "subagentTimeline",
                 }
             ),
             "payload",
@@ -697,6 +996,12 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             if "scope" in session_raw
             else SessionScope.UNKNOWN
         )
+
+        subagent_timeline: dict[str, Any] | None = None
+        if "subagentTimeline" in payload:
+            if event != "opencode.session_idle" or session_scope != SessionScope.ROOT:
+                _timeline_invalid()
+            subagent_timeline = _validate_subagent_timeline(payload["subagentTimeline"])
 
         # 5. 可选标量
         agent = _check_agent_or_model(payload.get("agent"), "agent")
@@ -802,6 +1107,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             permission_raw=permission_raw,
             question_raw=question_raw,
             error_raw=error_raw,
+            subagent_timeline=subagent_timeline,
         )
 
     @staticmethod
@@ -826,6 +1132,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         permission_raw: dict[str, Any] | None,
         question_raw: dict[str, Any] | None,
         error_raw: dict[str, Any] | None,
+        subagent_timeline: dict[str, Any] | None,
     ) -> NormalizedEvent:
         # status
         status_map = {
@@ -1053,4 +1360,5 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             fields=fields,
             links=[],
             raw={},
+            subagent_timeline=subagent_timeline,
         )
