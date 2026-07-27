@@ -3531,9 +3531,17 @@ describe("session scope contract", () => {
 });
 
 describe("subagent timeline collector/state/envelope", () => {
-  type SessionInfo = { title: string; parentID?: string | null; agent?: string };
+  type SessionInfo = {
+    title: string;
+    parentID?: string | null;
+    agent?: string;
+    model?: unknown;
+  };
 
-  async function makeTimelineServer(sessions: Record<string, SessionInfo>) {
+  async function makeTimelineServer(
+    sessions: Record<string, SessionInfo>,
+    messages: Record<string, unknown[]> = {},
+  ) {
     const bodies: any[] = [];
     globalThis.fetch = mock(async (_url: string, options: any) => {
       bodies.push(JSON.parse(options.body));
@@ -3543,6 +3551,7 @@ describe("subagent timeline collector/state/envelope", () => {
       client: {
         session: {
           get: async ({ path: { id } }: any) => ({ data: sessions[id] ?? { title: "unknown" } }),
+          messages: async ({ path: { id } }: any) => ({ data: messages[id] ?? [] }),
         },
       },
     } as any, makeConfig());
@@ -3641,6 +3650,74 @@ describe("subagent timeline collector/state/envelope", () => {
     const childBody = bodies.find((body) => body.session.ref === childRef);
     expect(childBody).toBeDefined();
     expect(childBody.subagentTimeline).toBeUndefined();
+  });
+
+  it("carries safe model metadata from session.get and messages fallback", async () => {
+    const { hooks, bodies } = await makeTimelineServer(
+      {
+        root: { title: "Root", parentID: null },
+        high: {
+          title: "High",
+          parentID: "root",
+          agent: "high-agent",
+          model: { providerID: "provider-a", modelID: "model-a", variant: "high" },
+        },
+        xhigh: {
+          title: "XHigh",
+          parentID: "root",
+          model: { providerID: "provider-b", modelID: "model-b", variant: "xhigh" },
+        },
+        defaultVariant: {
+          title: "Default",
+          parentID: "root",
+          agent: "default-agent",
+          model: { providerID: "provider-c", modelID: "model-c", variant: "default" },
+        },
+        fallback: { title: "Fallback", parentID: "root" },
+        bounded: {
+          title: "Bounded",
+          parentID: "root",
+          model: {
+            providerID: "provider-e",
+            modelID: "m".repeat(300),
+            variant: "v\u202e".repeat(300),
+          },
+        },
+      },
+      {
+        fallback: [{
+          info: {
+            role: "assistant",
+            mode: "fallback-agent",
+            providerID: "provider-d",
+            modelID: "model-d",
+            variant: "xhigh",
+          },
+        }],
+      },
+    );
+
+    await emit(hooks, "model-root-busy", "busy", "root", 1_000);
+    for (const [index, sessionId] of ["high", "xhigh", "defaultVariant", "fallback", "bounded"].entries()) {
+      const start = 1_100 + index * 200;
+      await emit(hooks, `${sessionId}-busy`, "busy", sessionId, start);
+      await emit(hooks, `${sessionId}-idle`, "idle", sessionId, start + 100);
+    }
+    await emit(hooks, "model-root-idle", "idle", "root", 2_000);
+
+    const items = rootBody(bodies).subagentTimeline.items;
+    expect(items.map((item: any) => [item.name, item.agent, item.model, item.modelVariant])).toEqual([
+      ["High", "high-agent", "provider-a/model-a", "high"],
+      ["XHigh", undefined, "provider-b/model-b", "xhigh"],
+      ["Default", "default-agent", "provider-c/model-c", "default"],
+      ["Fallback", "fallback-agent", "provider-d/model-d", "xhigh"],
+      ["Bounded", undefined, expect.any(String), expect.any(String)],
+    ]);
+    const bounded = items.find((item: any) => item.name === "Bounded");
+    expect(bounded.model.length).toBeLessThanOrEqual(129);
+    expect(bounded.modelVariant.length).toBeLessThanOrEqual(129);
+    expect(bounded.modelVariant).not.toContain("\u202e");
+    expect(JSON.stringify(rootBody(bodies))).not.toContain("reasoning_effort");
   });
 
   it("retains serial and overlapping children in stable start order", async () => {

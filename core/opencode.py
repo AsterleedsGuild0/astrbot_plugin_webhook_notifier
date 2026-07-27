@@ -68,6 +68,8 @@ _TIMELINE_ITEM_ALLOW = frozenset(
         "parentRef",
         "name",
         "agent",
+        "model",
+        "modelVariant",
         "status",
         "startOffsetMs",
         "endOffsetMs",
@@ -559,6 +561,18 @@ def _validate_subagent_timeline(raw: Any) -> dict[str, Any]:
             item["agent"] = _check_timeline_text(
                 raw_item["agent"],
                 "subagentTimeline.item.agent",
+                max_length=_MAX_AGENT_MODEL,
+            )
+        if "model" in raw_item:
+            item["model"] = _check_timeline_text(
+                raw_item["model"],
+                "subagentTimeline.item.model",
+                max_length=_MAX_AGENT_MODEL,
+            )
+        if "modelVariant" in raw_item:
+            item["modelVariant"] = _check_timeline_text(
+                raw_item["modelVariant"],
+                "subagentTimeline.item.modelVariant",
                 max_length=_MAX_AGENT_MODEL,
             )
 

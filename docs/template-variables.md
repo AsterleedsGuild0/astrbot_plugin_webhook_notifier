@@ -24,11 +24,11 @@ HTML 模板只提供一个根变量：`event`。不要使用顶层 `title`、`fi
 | `NormalizedEvent` / `to_dict()` | `subagent_timeline` | Python 内部与模板数据的 snake_case 字段；保留已通过 strict adapter 的 timeline shape |
 | `render_html_data()` 派生 | `subagent_timeline_view` | 仅 root completion 且存在可展示 item 时生成的安全展示副本；不含 `ref`、`parentRef`、raw Session ID、路径或工具参数 |
 
-当前 `render_html_data()` 返回 `{"event": data}`，其中 `data` 会保留 `event.subagent_timeline`，并在适用时增加 `event.subagent_timeline_view`。自定义模板如果直接访问 `event.subagent_timeline`，**不得渲染其中的 `ref` 或 `parentRef`**；推荐只使用 `event.subagent_timeline_view` 的展示字段。该 view 会过滤 auxiliary item（包括 `smartfetch-secondary`），并提供 `mode`（`simple`、`complex` 或 `degraded`）、摘要、状态/时间展示数据和有界的主卡/甘特图数据。
+当前 `render_html_data()` 返回 `{"event": data}`，其中 `data` 会保留 `event.subagent_timeline`，并在适用时增加 `event.subagent_timeline_view`。自定义模板如果直接访问 `event.subagent_timeline`，**不得渲染其中的 `ref` 或 `parentRef`**；推荐只使用 `event.subagent_timeline_view` 的展示字段。该 view 会过滤 auxiliary item（包括 `smartfetch-secondary`），并提供 `mode`（`simple`、`complex` 或 `degraded`）、摘要、状态/时间展示数据和有界的主卡/甘特图数据。timeline item 的安全展示身份为 `identity`，格式是 `agent · model(variant)`；variant 为 `default`、空或缺失时只显示 agent/model，任一身份字段缺失时自然降级。
 
 默认模板只读取安全派生的 `event.subagent_timeline_view`：简单流程最多展示 8 项阶段卡；复杂流程主卡展示摘要，并由服务端在同一 MessageChain 中追加独立横向甘特图。附图在 1440～2400px 内按任务数、名称与跨度动态布局，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算。缺失 start/end 比例超过 25% 时不生成甘特图；`partial` 或 `clamped` 不显示假精确 duration，未定位任务不绘制假 bar。
 
-Subagent timeline 是 root `opencode.session_idle` 的可选数据；其他 event/scope 不应假定该字段存在。没有 timeline、没有可展示 item 或不是 root completion 时，模板不会获得 timeline view。
+Subagent timeline 是 root `opencode.session_idle` 的可选数据；其他 event/scope 不应假定该字段存在。没有 timeline、没有可展示 item 或不是 root completion 时，模板不会获得 timeline view。部署兼容顺序为先升级并重载服务端，再部署新版 Client 并完全重启 OpenCode Client。
 
 ---
 

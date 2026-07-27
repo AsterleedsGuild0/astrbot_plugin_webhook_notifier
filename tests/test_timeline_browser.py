@@ -228,3 +228,50 @@ def test_real_chrome_timeline_geometry_and_screenshot(
             ),
         )
         assert min(plot_pixel) >= 232
+
+
+def test_long_timeline_identity_wraps_without_clipping_at_minimum_width(
+    tmp_path: Path,
+):
+    agent = "agent-" + "a" * 122
+    model = "provider/" + "model-" + "m" * 113
+    variant = "variant-" + "v" * 120
+    identity = f"{agent} · {model}({variant})"
+    event = _timeline_event(
+        [
+            _timeline_item(
+                index,
+                start=0,
+                end=2000,
+                name=f"task-{index}",
+                agent=agent,
+                model=model,
+                model_variant=variant,
+            )
+            for index in range(4)
+        ]
+    )
+    rendered = render_subagent_timeline(event)
+    assert rendered is not None
+    assert rendered.layout.viewport_width == 1440
+
+    geometry, _, _ = capture_timeline_browser_geometry(
+        rendered.html,
+        viewport_width=rendered.layout.viewport_width,
+        viewport_height=rendered.layout.viewport_height,
+        output_dir=tmp_path,
+        name="timeline-long-identity",
+    )
+
+    assert geometry["document"]["scrollWidth"] == 1440
+    assert geometry["document"]["scrollHeight"] <= rendered.layout.viewport_height
+    for row in geometry["rows"]:
+        metrics = row["agentMetrics"]
+        assert metrics is not None
+        assert metrics["text"] == identity
+        assert metrics["whiteSpace"] == "normal"
+        assert metrics["overflowWrap"] == "anywhere"
+        assert metrics["wordBreak"] == "normal"
+        assert metrics["scrollWidth"] <= metrics["clientWidth"]
+        assert metrics["scrollHeight"] == metrics["clientHeight"]
+        assert metrics["clientHeight"] > 40

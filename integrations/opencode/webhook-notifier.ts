@@ -103,6 +103,8 @@ interface SubagentTimelineItem {
   parentRef: string;
   name?: string;
   agent?: string;
+  model?: string;
+  modelVariant?: string;
   status: TimelineItemStatus;
   startOffsetMs?: number;
   endOffsetMs?: number;
@@ -441,6 +443,8 @@ interface TimelineRun {
   scope: SessionScope;
   name?: string;
   agent?: string;
+  model?: string;
+  modelVariant?: string;
   status: TimelineItemStatus;
   startMs?: number;
   endMs?: number;
@@ -830,6 +834,18 @@ function _updateTimelineIdentity(
   if (run && name) run.name = name;
   const agent = _sanitiseActionText(event.agent, MAX_AGENT_MODEL_LENGTH);
   if (run && agent) run.agent = agent;
+  const model = _normaliseModel(
+    event.model !== undefined
+      ? event.provider !== undefined && typeof event.model === "string"
+        ? { provider: event.provider, model: event.model }
+        : event.model
+      : event.provider !== undefined
+        ? { provider: event.provider }
+        : undefined,
+  );
+  if (run && model) run.model = model;
+  const modelVariant = _sanitiseActionText(event.modelVariant, MAX_AGENT_MODEL_LENGTH);
+  if (run && modelVariant) run.modelVariant = modelVariant;
 
   if (dropped && event.sessionScope && event.sessionScope !== "unknown") {
     dropped.scope = event.sessionScope;
@@ -1156,6 +1172,8 @@ function _timelineItem(
   };
   if (run.name) item.name = run.name;
   if (run.agent) item.agent = run.agent;
+  if (run.model) item.model = run.model;
+  if (run.modelVariant) item.modelVariant = run.modelVariant;
   if (startOffsetMs !== undefined) item.startOffsetMs = startOffsetMs;
   if (endOffsetMs !== undefined) item.endOffsetMs = endOffsetMs;
   if (!clamped && startOffsetMs !== undefined && endOffsetMs !== undefined) {

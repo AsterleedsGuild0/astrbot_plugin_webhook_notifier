@@ -8,6 +8,7 @@
 - 冻结多 Provider 通知降噪：新增全局 `notification_mode`，默认 `focused` 只抑制成功完成的 OpenCode `subagent`；`all` 保持全部通知，unknown scope/status fail-open。`actionContentMode` 与该策略正交。
 - OpenCode root `session_idle` 可选携带 `subagentTimeline`：记录相对 root busy→idle cycle 的匿名子任务图、时间质量、部分/截断状态与有界计数；不新增配置项，也不在其他 event 或 scope 携带。
 - #22：默认渲染按执行复杂度展示子任务阶段：简单流程保持最多 8 项主卡；复杂流程使用同一 MessageChain 的独立横向甘特图，按任务数、名称与跨度在 1440～2400px 内动态布局，并完整展示 payload 中最多 64 项。名称自然折行，25～64 项自动切换紧凑密度；3000px 为软高度预算。附图强制使用完整页面与动态 viewport 高度，时间刻度使用覆盖全跨度的 nice step，并采用与白色通知报告协调的浅蓝灰视觉；缺失或附图失败时仍只保留安全主卡。
+- #23：subagent timeline item 可选携带清洗后的 `model` 与 `modelVariant`，简单主卡、复杂甘特图、安全模板 view 和文本降级统一按 `agent · model(variant)` 展示；`default` variant 不追加括号，旧 payload 保持兼容。
 - OpenCode V1 新增 `session.scope`（缺失兼容为 `unknown`），Client 通过既有 `session.get()` 判断 root/subagent，永不发送 `parentID`；服务端升级必须先于 Client 重启。
 - #18：引入 Provider Adapter / Registry 与依赖注入边界，支持 `omp` 与 `opencode` provider，并保持 Endpoint provider 在创建后不可变。
 - #19：增加 OpenCode Server Adapter，接收 V1 envelope，覆盖 `session_idle`、`session_error` 与 `permission_asked` 三类事件。

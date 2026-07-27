@@ -179,6 +179,7 @@ async def _capture_with_cdp(
                   const stateLabel = row.querySelector('.state-label');
                   const bar = row.querySelector('.bar');
                   const style = getComputedStyle(name);
+                  const agentStyle = agent ? getComputedStyle(agent) : null;
                   return {
                     row: rect(row), task: rect(task), name: rect(name),
                     plot: rect(plot), state: rect(state),
@@ -202,7 +203,17 @@ async def _capture_with_cdp(
                       whiteSpace: style.whiteSpace,
                       overflowWrap: style.overflowWrap,
                       wordBreak: style.wordBreak
-                    }
+                    },
+                    agentMetrics: agent ? {
+                      text: agent.textContent,
+                      scrollWidth: agent.scrollWidth,
+                      scrollHeight: agent.scrollHeight,
+                      clientWidth: agent.clientWidth,
+                      clientHeight: agent.clientHeight,
+                      whiteSpace: agentStyle.whiteSpace,
+                      overflowWrap: agentStyle.overflowWrap,
+                      wordBreak: agentStyle.wordBreak
+                    } : null
                   };
                 })
               };

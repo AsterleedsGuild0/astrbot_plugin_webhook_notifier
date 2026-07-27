@@ -791,6 +791,20 @@ class TestSubagentTimelineContract:
             assert event.subagent_timeline == timeline
             assert event.to_dict()["subagent_timeline"] == timeline
 
+    def test_optional_model_metadata_round_trip(self):
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [_timeline_item(model="provider/model", modelVariant="xhigh")],
+        }
+        event = _parse_timeline(_timeline_payload(timeline))
+        assert event.subagent_timeline == timeline
+
     def test_missing_optional_timeline_is_compatible(self):
         event = _make_adapter().parse(
             headers=dict(_HEADERS),
@@ -867,6 +881,12 @@ class TestSubagentTimelineContract:
             lambda item: item.update(timingQuality="complete"),
             lambda item: item.update(name="x" * 201),
             lambda item: item.update(agent="x" * 129),
+            lambda item: item.update(model=123),
+            lambda item: item.update(model=""),
+            lambda item: item.update(model="x" * 129),
+            lambda item: item.update(modelVariant=123),
+            lambda item: item.update(modelVariant=" " * 2),
+            lambda item: item.update(modelVariant="x" * 129),
             lambda item: item.update(startOffsetMs=-1),
             lambda item: item.update(endOffsetMs=99, durationMs=1),
             lambda item: item.update(depth=0),
@@ -960,6 +980,32 @@ class TestSubagentTimelineContract:
                     "projectName": "x" * (65 * 1024),
                 }
             )
+
+    def test_timeline_size_limit_counts_model_metadata(self):
+        items = [
+            _timeline_item(
+                ref=_timeline_ref(f"model-size-{index}"),
+                name=f"Child {index}",
+                model="m" * 128,
+                modelVariant="v" * 128,
+                startOffsetMs=index,
+                endOffsetMs=index + 1,
+                durationMs=1,
+            )
+            for index in range(64)
+        ]
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 64,
+            "displayedItemCount": 64,
+            "truncated": False,
+            "items": items,
+        }
+        with pytest.raises(ProviderError):
+            _parse_timeline(_timeline_payload(timeline))
 
 
 def labels_index(label: str, fields: list) -> int:

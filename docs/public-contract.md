@@ -79,12 +79,13 @@ Wire JSON 使用 camelCase。以下是精简 shape，不代表可省略其中的
 }
 ```
 
-- `subagentTimeline` 的字段为 `version`、`timeBasis`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 与 `items`。item 必须有 `ref`、`parentRef`、`status`、`timingQuality`、`depth`、`attempt`，可选 `name`、`agent`、`startOffsetMs`、`endOffsetMs`、`durationMs`。
+- `subagentTimeline` 的字段为 `version`、`timeBasis`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 与 `items`。item 必须有 `ref`、`parentRef`、`status`、`timingQuality`、`depth`、`attempt`，可选 `name`、`agent`、`model`、`modelVariant`、`startOffsetMs`、`endOffsetMs`、`durationMs`。
+- `model` 与 `modelVariant` 是经过清洗和 128 字符限制的可选安全文本；展示统一使用 `agent · model(variant)`，仅非 `default` variant 追加括号，缺失字段时自然降级。`modelVariant` 只表示 OpenCode runtime variant，不命名或解释为 `reasoning_effort`。它们不改变时间、状态、排序或截断语义。
 - `partialReasons` 使用受限值：`missing_parent`、`missing_start`、`missing_end`、`invalid_parent_graph`、`truncated`、`clamped`；`timingQuality` 表示 `observed`、`fallback`、`partial` 或 `unknown` 的时间可信度。
 - `ref`/`parentRef` 是匿名 hash 图引用，仅用于建立父子关系，不是 raw Session ID；默认用户输出不展示它们。
 - offset 是相对 root busy→idle cycle 的毫秒偏移；它描述观测到的时间关系，不声明调度依赖。区间重叠只表示任务同时运行。
 - `partial` 必须反映缺失、校正或其他不完整原因；`truncated` 表示记录受上限截断。Python adapter 对未知字段、错误 scope/event、错误 shape 和超限 payload fail-closed。
-- 限制为 `items` 不超过 64 项、timeline JSON 不超过 24 KiB、整个 request body 不超过 64 KiB、`depth` 不超过 8。超限、缺失或截断时应保留 `partial`/`truncated` 语义，不把不完整数据表述为完整执行记录。
+- 限制为 `items` 不超过 64 项、timeline JSON 不超过 24 KiB、整个 request body 不超过 64 KiB、`depth` 不超过 8；新增字段计入已有序列化大小边界。超限、缺失或截断时应保留 `partial`/`truncated` 语义，不把不完整数据表述为完整执行记录。
 
 该字段不进入 `session_error`、`permission_asked`、`question_asked` 或非 root session 通知。`auxiliary`（包括 `smartfetch-secondary`）不进入 timeline；`focused` 仍独立过滤成功完成的 `subagent`/`auxiliary` 通知，但 root completion 可以汇总 timeline。
 

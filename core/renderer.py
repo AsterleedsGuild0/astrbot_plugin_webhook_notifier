@@ -831,7 +831,7 @@ DEFAULT_HTML_TEMPLATE = """\
             <div class="subagent-item-head">
               <div class="subagent-name-wrap">
                 <div class="subagent-name">{{ item.name|e }}{% if item.parallel %}<span class="subagent-parallel">并行</span>{% endif %}</div>
-                {% if item.agent %}<div class="subagent-agent">{{ item.agent|e }}</div>{% endif %}
+                {% if item.identity %}<div class="subagent-agent">{{ item.identity|e }}</div>{% endif %}
               </div>
               <div class="subagent-state-wrap"><span class="subagent-status {{ item.status_class }}">{{ item.status_symbol|e }} {{ item.status_label|e }}</span></div>
             </div>
@@ -1035,13 +1035,16 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       word-break: normal;
       hyphens: auto;
     }
-    .task-agent {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
     .task-name { font-size: var(--task-font-size); font-weight: 730; line-height: var(--task-line-height); }
-    .task-agent { margin-top: 3px; color: var(--timeline-muted); font-size: var(--agent-font-size); line-height: 1.25; }
+    .task-agent {
+      margin-top: 3px;
+      color: var(--timeline-muted);
+      font-size: var(--agent-font-size);
+      line-height: 1.25;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: normal;
+    }
     .density-dense .task-agent { display: none; }
     .bar {
       position: absolute;
@@ -1140,7 +1143,7 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
         </div>
         {% for item in event.gantt_items %}
         <div class="row timeline-row" style="min-height: {{ item.estimated_row_height }}px;">
-          <div class="task depth-{{ item.depth_class }}"><div class="task-name">{{ item.name|e }}</div>{% if item.agent %}<div class="task-agent">{{ item.agent|e }}</div>{% endif %}</div>
+          <div class="task depth-{{ item.depth_class }}"><div class="task-name">{{ item.name|e }}</div>{% if item.identity %}<div class="task-agent">{{ item.identity|e }}</div>{% endif %}</div>
           <div class="track">{% for line in event.grid_lines %}<span class="gridline" style="left: {{ line.left_px }}px;"></span>{% endfor %}<span class="bar {{ item.status_class }}{% if item.partial_interval %} partial{% endif %}{% if item.minimum_width_applied %} minimum-width{% endif %}" style="left: {{ item.left_px }}px; width: {{ item.width_px }}px;"></span></div>
           <div class="state"><span class="state-label {{ item.status_class }}">{{ item.status_symbol|e }} {{ item.status_label|e }}</span><span class="state-time">{{ item.timing_label|e }}</span></div>
         </div>
@@ -1151,7 +1154,7 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       <section class="unlocated">
         <div class="unlocated-title">未定位任务 · 缺少完整起止时间</div>
         <ul class="unlocated-list">
-          {% for item in event.unlocated_items %}<li class="unlocated-item" style="min-height: {{ item.estimated_row_height }}px;"><span class="unlocated-name">{{ item.name|e }}{% if item.agent %} · {{ item.agent|e }}{% endif %}</span><span class="unlocated-state">{{ item.status_symbol|e }} {{ item.status_label|e }} · 区间不完整</span></li>{% endfor %}
+          {% for item in event.unlocated_items %}<li class="unlocated-item" style="min-height: {{ item.estimated_row_height }}px;"><span class="unlocated-name">{{ item.name|e }}{% if item.identity %} · {{ item.identity|e }}{% endif %}</span><span class="unlocated-state">{{ item.status_symbol|e }} {{ item.status_label|e }} · 区间不完整</span></li>{% endfor %}
         </ul>
       </section>
       {% endif %}
@@ -1215,6 +1218,29 @@ def _safe_timeline_display_text(value: Any, *, fallback: str = "") -> str:
     if path_like or json_like or _TIMELINE_REF_LIKE_RE.fullmatch(text):
         return fallback
     return text
+
+
+def _timeline_identity_text(
+    agent: Any,
+    model: Any,
+    model_variant: Any,
+) -> str:
+    """Compose the bounded public identity for one timeline item."""
+
+    agent_text = _safe_timeline_display_text(agent)
+    model_text = _safe_timeline_display_text(model)
+    variant_text = _safe_timeline_display_text(model_variant)
+    if model_text and variant_text.lower() != "default":
+        model_text = f"{model_text}({variant_text})" if variant_text else model_text
+    return " · ".join(value for value in (agent_text, model_text) if value)
+
+
+def _timeline_identity_from_item(item: dict[str, Any]) -> str:
+    return _timeline_identity_text(
+        item.get("agent"),
+        item.get("model"),
+        item.get("modelVariant"),
+    )
 
 
 def _is_auxiliary_timeline_item(item: dict[str, Any]) -> bool:
@@ -1434,9 +1460,20 @@ def _build_subagent_timeline_layout(
             font_size=font_size,
             depth_class=int(item["depth_class"]),
         )
+        identity = str(item.get("identity") or "")
+        identity_lines = (
+            _timeline_estimated_lines(
+                identity,
+                column_width=name_column_width,
+                font_size=agent_font_size,
+                depth_class=int(item["depth_class"]),
+            )
+            if show_agent and identity
+            else 0
+        )
         agent_height = (
-            math.ceil(agent_font_size * 1.25) + 3
-            if show_agent and item.get("agent")
+            math.ceil(identity_lines * agent_font_size * 1.25) + 3
+            if identity_lines
             else 0
         )
         estimated_row_height = max(
@@ -1833,6 +1870,9 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         )
         name = _safe_timeline_display_text(item.get("name"), fallback="未命名子任务")
         agent = _safe_timeline_display_text(item.get("agent"))
+        model = _safe_timeline_display_text(item.get("model"))
+        model_variant = _safe_timeline_display_text(item.get("modelVariant"))
+        identity = _timeline_identity_text(agent, model, model_variant)
         depth = item.get("depth")
         depth_value = (
             depth if isinstance(depth, int) and not isinstance(depth, bool) else 1
@@ -1874,6 +1914,9 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
                 "source_index": index,
                 "name": name,
                 "agent": agent,
+                "model": model,
+                "model_variant": model_variant,
+                "identity": identity,
                 "status_class": status_class,
                 "status_label": status_label,
                 "status_symbol": status_symbol,
@@ -2271,13 +2314,13 @@ def _append_subagent_timeline_text(
     visible_items = [item for item in items if isinstance(item, dict)]
     for item in visible_items[:max_items]:
         name = _safe_timeline_display_text(item.get("name"))
-        agent = _safe_timeline_display_text(item.get("agent"))
+        identity = _timeline_identity_from_item(item)
         if name:
             label = name
-            if agent:
-                label = f"{label}（{agent}）"
-        elif agent:
-            label = agent
+            if identity:
+                label = f"{label}（{identity}）"
+        elif identity:
+            label = identity
         else:
             label = "子任务"
 

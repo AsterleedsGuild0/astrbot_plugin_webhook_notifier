@@ -147,6 +147,8 @@ def _timeline_item(
     timing_quality: str | None = None,
     name: str | None = None,
     agent: str | None = "worker",
+    model: str | None = None,
+    model_variant: str | None = None,
 ) -> dict:
     if start is None and end is None and timing_quality is None:
         timing_quality = "unknown"
@@ -163,6 +165,10 @@ def _timeline_item(
     }
     if agent is not None:
         item["agent"] = agent
+    if model is not None:
+        item["model"] = model
+    if model_variant is not None:
+        item["modelVariant"] = model_variant
     if start is not None:
         item["startOffsetMs"] = start
     if end is not None:
@@ -619,6 +625,132 @@ class TestSubagentTimelineVisuals:
         assert "1 秒" in html
         assert "+1秒" in html
         assert "详细时间线见附图" not in html
+
+    def test_timeline_identity_combines_agent_model_and_variant_with_safe_fallbacks(
+        self,
+    ):
+        event = _timeline_event(
+            [
+                _timeline_item(
+                    0,
+                    start=0,
+                    end=1000,
+                    agent="agent",
+                    model="model",
+                    model_variant="high",
+                ),
+                _timeline_item(
+                    1,
+                    start=1000,
+                    end=2000,
+                    agent="agent",
+                    model="model",
+                    model_variant="default",
+                ),
+                _timeline_item(
+                    2,
+                    start=2000,
+                    end=3000,
+                    agent="agent",
+                    model=None,
+                    model_variant="xhigh",
+                ),
+                _timeline_item(
+                    3,
+                    start=3000,
+                    end=4000,
+                    agent=None,
+                    model="model",
+                    model_variant="xhigh",
+                ),
+                _timeline_item(
+                    4,
+                    start=4000,
+                    end=5000,
+                    agent=None,
+                    model=None,
+                    model_variant="xhigh",
+                ),
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "simple"
+        assert [item["identity"] for item in view["main_items"]] == [
+            "agent · model(high)",
+            "agent · model",
+            "agent",
+            "model(xhigh)",
+            "",
+        ]
+
+        html = render_html_default(event)
+        assert "agent · model(high)" in html
+        assert "agent · model" in html
+        assert "model(xhigh)" in html
+        assert "model(default)" not in html
+
+    def test_complex_timeline_and_text_fallback_use_the_same_identity(self):
+        event = _timeline_event(
+            [
+                _timeline_item(
+                    index, start=0, end=2000, model="model", model_variant="xhigh"
+                )
+                for index in range(4)
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        assert view["gantt_items"][0]["identity"] == "worker · model(xhigh)"
+        gantt = render_subagent_timeline_html(event)
+        assert gantt is not None
+        assert "worker · model(xhigh)" in gantt
+
+        text = render_text_default(event)
+        assert "child-0（worker · model(xhigh)）" in text
+
+    def test_long_model_only_identity_contributes_to_gantt_row_height(self):
+        model = "provider/" + "model-" + "m" * 113
+        variant = "variant-" + "v" * 120
+        event = _timeline_event(
+            [
+                _timeline_item(
+                    index,
+                    start=0,
+                    end=2000,
+                    agent=None,
+                    model=model,
+                    model_variant=variant,
+                )
+                for index in range(4)
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        assert view["layout"]["viewport_width"] == SUBAGENT_TIMELINE_MIN_VIEWPORT_WIDTH
+        assert all(
+            item["estimated_row_height"] > view["layout"]["row_min_height"]
+            for item in view["gantt_items"]
+        )
+
+        html = render_subagent_timeline_html(event)
+        assert html is not None
+        assert f"{model}({variant})" in html
+        assert "text-overflow: ellipsis" not in html
+        assert "overflow-wrap: anywhere" in html
+
+    def test_timeline_model_paths_are_filtered_from_safe_view(self):
+        event = _timeline_event(
+            [
+                _timeline_item(
+                    0, start=0, end=1000, model="/private/model", model_variant="high"
+                )
+            ]
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["main_items"][0]["model"] == ""
+        assert view["main_items"][0]["identity"] == "worker"
+        assert "/private/model" not in render_html_default(event)
 
     def test_auxiliary_smartfetch_is_excluded_from_visual_counts_and_names(self):
         event = _timeline_event(

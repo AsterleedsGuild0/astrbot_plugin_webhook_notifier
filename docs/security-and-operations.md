@@ -135,7 +135,7 @@ Plugin 只发送 `opencode.session_idle`、`opencode.session_error`、`opencode.
 
 `subagentTimeline` 是唯一附加在 root completion 上的 timeline 字段：只允许出现在 `opencode.session_idle` 且 `session.scope=root` 的 envelope。其他 event 或 scope 携带它会被 Python strict adapter 拒绝；它不是独立通知、独立模板或新配置项。
 
-允许的 timeline shape 为 `version=1`、`timeBasis=root_cycle`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 和 `items`。每个 item 使用 `ref`、`parentRef`、可选 `name`/`agent`、`status`、`startOffsetMs`/`endOffsetMs`/`durationMs`、`timingQuality`、`depth`、`attempt`。`ref`/`parentRef` 是匿名 hash 图引用，不是 raw Session ID；默认 renderer 与 Sender 不展示它们。限制为 items≤64、timeline JSON≤24 KiB、body≤64 KiB、depth≤8。offset 是相对 root busy→idle cycle 的观测偏移，不表示调度依赖；重叠只说明同时运行。
+允许的 timeline shape 为 `version=1`、`timeBasis=root_cycle`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 和 `items`。每个 item 使用 `ref`、`parentRef`、可选 `name`/`agent`/`model`/`modelVariant`、`status`、`startOffsetMs`/`endOffsetMs`/`durationMs`、`timingQuality`、`depth`、`attempt`。`ref`/`parentRef` 是匿名 hash 图引用，不是 raw Session ID；默认 renderer 与 Sender 不展示它们。限制为 items≤64、timeline JSON≤24 KiB、body≤64 KiB、depth≤8；新增字符串字段同样计入 timeline 与 body 序列化大小边界。offset 是相对 root busy→idle cycle 的观测偏移，不表示调度依赖；重叠只说明同时运行。
 
 缺失、超限、截断或 clamped 数据必须保留 `partial`/`partialReasons`/`truncated`/timing quality 语义。`auxiliary`（包括 `smartfetch-secondary`）不进入 timeline；`focused` 仍过滤成功完成的 subagent/auxiliary 独立通知，但 root completion 可以汇总 timeline。
 
@@ -143,7 +143,7 @@ Plugin 只发送 `opencode.session_idle`、`opencode.session_error`、`opencode.
 
 默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 主卡摘要加同一 MessageChain 的独立横向甘特图。附图按任务数、名称与跨度在 1440～2400px 内动态布局，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算，极端长名称允许继续增高。附图不继承自定义 `full_page=false` 或固定 1200px 高度，而是强制完整页面并使用 renderer 计算的有界动态 viewport 高度；主卡仍遵守原 render options。start/end 缺失比例超过 25% 不画甘特图；partial/clamped 不展示假精确 duration；未定位任务不画假 bar。
 
-Sender 最多发 1～2 张图。附图生成、校验或构造失败只发主卡；实际发送失败后不自动重试主卡，避免造成重复通知。自定义模板如直接访问 `event.subagent_timeline`，不得渲染 `ref`、`parentRef` 或依赖其作为用户可见 ID；应使用 `render_html_data()` 生成的安全派生 `event.subagent_timeline_view`。该 view 与 built-in renderer 一样不暴露 raw Session ID、path、tool args 或 raw JSON。模板作者仍须遵守最小披露原则，不能通过自定义模板绕过服务端 allowlist。
+Sender 最多发 1～2 张图。附图生成、校验或构造失败只发主卡；实际发送失败后不自动重试主卡，避免造成重复通知。timeline 的身份显示遵循 `agent · model(variant)`：非 `default` variant 才追加括号，缺失字段自然降级。自定义模板如直接访问 `event.subagent_timeline`，不得渲染 `ref`、`parentRef` 或依赖其作为用户可见 ID；应使用 `render_html_data()` 生成的安全派生 `event.subagent_timeline_view`。该 view 与 built-in renderer 一样不暴露 raw Session ID、path、tool args 或 raw JSON。模板作者仍须遵守最小披露原则，不能通过自定义模板绕过服务端 allowlist。
 
 Question/Permission 的 `actionContentMode` 默认为 `strict`，只保留 Permission item 的 category 与 Question 的 count/optionCount 计数；`summary` 只发送清洗、截断摘要；`full` 才发送显式 allowlist 中完整（仍受上限约束）的问题文本、选项 label/description/推荐信息、权限标题/描述/操作目标或 patterns。Permission 使用 `count/items`，最多 16 个 item；Question 最多 8 个问题、每题 12 个选项。回复事件只按 request ID 撤销尚未 flush 的成员，已发送通知不撤回。`full` 必须由调用方明确 opt-in，因为它可能把业务文本和目标路径外发。它与服务端 `notification_mode` 正交，不能混用解释。
 

@@ -215,11 +215,11 @@ Envelope 只允许显式 V1 字段：`id`、`event`、`version`、`emittedAt`、
 
 `subagentTimeline` 只允许出现在 `event=opencode.session_idle` 且 `session.scope=root` 的 root completion。它不是独立事件，也不创建独立 template 或配置项；其他 event 或 scope 携带该字段会被 Python strict adapter 拒绝。
 
-其 shape 包含 `version=1`、`timeBasis=root_cycle`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 和 `items`。item 使用 `ref`、`parentRef`、可选 `name`/`agent`、状态、相对 root cycle 的 `startOffsetMs`/`endOffsetMs`/`durationMs`、`timingQuality`、`depth` 与 `attempt`。`ref`/`parentRef` 是匿名 hash 图引用，不是 raw Session ID；它们和路径、tool args 不进入 built-in 用户输出。
+其 shape 包含 `version=1`、`timeBasis=root_cycle`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 和 `items`。item 使用 `ref`、`parentRef`、可选 `name`/`agent`/`model`/`modelVariant`、状态、相对 root cycle 的 `startOffsetMs`/`endOffsetMs`/`durationMs`、`timingQuality`、`depth` 与 `attempt`。`ref`/`parentRef` 是匿名 hash 图引用，不是 raw Session ID；它们和路径、tool args 不进入 built-in 用户输出。
 
 timeline 限制为最多 64 个 item、24 KiB JSON、depth 不超过 8，并受整个 64 KiB body 限制。缺失、超限、校正或截断必须通过 `partial`、`partialReasons`、`truncated` 和 timing quality 表达。offset 是 root busy→idle cycle 的相对观测时间，不声称调度依赖；重叠只表示同时运行。`auxiliary`（包括 `smartfetch-secondary`）不进入 timeline；`focused` 仍过滤成功完成的 subagent/auxiliary 独立通知，但 root completion 可以汇总 timeline。
 
-默认图片渲染按 item 数量、depth、峰值并发/重叠以及 partial/truncated 综合判断复杂度，而不是只按 item 数：
+默认图片渲染按 item 数量、depth、峰值并发/重叠以及 partial/truncated 综合判断复杂度，而不是只按 item 数；身份统一显示为 `agent · model(variant)`，variant 为 `default`、空或缺失时不显示括号，任一字段缺失时自然降级：
 
 - simple：主卡最多 8 项阶段卡。
 - complex：主卡保留摘要，并在同一 MessageChain 追加独立横向甘特图；附图在 1440～2400px 内动态布局，完整展示 payload 中最多 64 项，名称自然折行，并按 1～24、25～48、49～64 项切换显示密度。独立甘特图默认使用与白色通知报告协调的浅蓝灰视觉；附图强制完整页面截图并使用 renderer 计算的动态 viewport 高度，不继承可能裁切内容的主卡 `full_page=false` 或固定高度。
