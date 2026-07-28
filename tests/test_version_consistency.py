@@ -202,3 +202,12 @@ def test_workflow_dispatch_tag_input_used() -> None:
     workflow = workflow_text()
     assert "inputs:" in workflow
     assert "tag:" in workflow
+
+
+def test_workflow_dispatch_checkout_uses_trigger_ref() -> None:
+    """断言 dry-run checkout 当前触发 ref，而不是尚未创建的候选 tag。"""
+    workflow = workflow_text()
+    checkout_step = workflow[workflow.index("- name: Checkout") :]
+    checkout_step = checkout_step[: checkout_step.index("- name: Set up uv")]
+    assert "ref: ${{ github.ref }}" in checkout_step
+    assert "inputs.tag" not in checkout_step
