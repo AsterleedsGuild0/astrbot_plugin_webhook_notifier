@@ -30,7 +30,13 @@ from .core.help_card import (
 )
 from .core.display import DEFAULT_DISPLAY_TIMEZONE, create_display_context
 from .core.models import EndpointStatus, ServerConfig
-from .core.notification_policy import normalize_notification_mode
+from .core.notification_policy import (
+    MIN_COMPLETION_DURATION_DEFAULT,
+    MIN_COMPLETION_DURATION_MAX,
+    MIN_COMPLETION_DURATION_MIN,
+    normalize_min_completion_duration,
+    normalize_notification_mode,
+)
 from .core.omp import OmpProviderAdapter
 from .core.opencode import OpenCodeProviderAdapter
 from .core.providers import ProviderRegistry
@@ -766,7 +772,7 @@ class WebhookNotifierPlugin(Star):
                 f"[WebhookNotifier] Registry 管理操作拒绝 sender={sender_id} "
                 f"action={action} result=private_only"
             )
-            return "❌ Registry 管理命令请在私聊中执行。"
+            return "❌ 私聊限制：管理员命令请在私聊中执行。"
 
         if not args:
             logger.warning(
@@ -774,13 +780,16 @@ class WebhookNotifierPlugin(Star):
                 "action=usage result=invalid_input"
             )
             return self._admin_command_usage(commands.short)
-        if args[0].lower() != "token":
+        action = args[0].lower()
+        if action == "config":
+            return self._handle_admin_config_command(event, args[1:], commands.short)
+        if action != "token":
             logger.warning(
                 f"[WebhookNotifier] Registry 管理操作 sender={sender_id} "
-                f"action={args[0].lower()} result=unknown_action"
+                f"action={action} result=unknown_action"
             )
             return (
-                f"❌ 未知 admin 子命令：{args[0].lower()}\n"
+                f"❌ 未知 admin 子命令：{action}\n"
                 f"发送 {commands.short} help 查看可用命令。"
             )
         if len(args) < 2:
@@ -823,7 +832,129 @@ class WebhookNotifierPlugin(Star):
             f"  {command_root} admin token list\n"
             f"  {command_root} admin token revoke-path <endpoint-path>\n"
             f"  {command_root} admin token revoke-owner <platform_id> <owner_user_id> <名称>\n"
+            f"  {command_root} admin config min-duration\n"
+            f"  {command_root} admin config min-duration <0..3600>\n"
+            f"  {command_root} admin config min-duration reset\n"
             "仅 AstrBot 全局超级管理员可用，且必须在私聊执行。"
+        )
+
+    def _handle_admin_config_command(
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        command_root: str = PLACEHOLDER_COMMAND_ROOTS.short,
+    ) -> str:
+        """处理 admin config min-duration 查询/设置/reset。"""
+        if not args or args[0].lower() != "min-duration":
+            return (
+                f"❌ 用法:\n"
+                f"  {command_root} admin config min-duration  # 查询当前值\n"
+                f"  {command_root} admin config min-duration <0..3600>  # 设置阈值\n"
+                f"  {command_root} admin config min-duration reset  # 恢复默认 {MIN_COMPLETION_DURATION_DEFAULT} 秒"
+            )
+
+        if len(args) == 1:
+            current_raw = self.config.get("min_completion_duration_seconds")
+            current = normalize_min_completion_duration(current_raw)
+            invalid_config = current_raw is not None and (
+                not isinstance(current_raw, int)
+                or isinstance(current_raw, bool)
+                or current_raw < MIN_COMPLETION_DURATION_MIN
+                or current_raw > MIN_COMPLETION_DURATION_MAX
+            )
+            if invalid_config:
+                current_info = "0 秒（检测到无效历史配置，已安全关闭过滤）"
+                rule_info = "不按耗时跳过成功完成通知"
+            elif current == 0:
+                current_info = "0 秒（过滤已关闭）"
+                rule_info = "不按耗时跳过成功完成通知"
+            else:
+                current_info = f"{current} 秒"
+                rule_info = f"成功完成耗时低于 {current} 秒时跳过通知"
+            return (
+                "📋 最短完成通知时长\n"
+                f"当前：{current_info}\n"
+                f"规则：{rule_info}\n"
+                f"默认：{MIN_COMPLETION_DURATION_DEFAULT} 秒 · "
+                f"范围：{MIN_COMPLETION_DURATION_MIN}–{MIN_COMPLETION_DURATION_MAX} 秒\n"
+                "提示：设为 0 可关闭过滤"
+            )
+
+        if len(args) != 2:
+            return (
+                "❌ 参数过多。用法：\n"
+                f"  {command_root} admin config min-duration <0..3600|reset>"
+            )
+
+        raw_arg = args[1]
+        if raw_arg.lower() == "reset":
+            new_value = MIN_COMPLETION_DURATION_DEFAULT
+            key_display = "reset"
+            is_reset = True
+        else:
+            try:
+                parsed = int(raw_arg)
+            except (ValueError, TypeError):
+                return (
+                    "❌ 非法输入：请填写 "
+                    f"{MIN_COMPLETION_DURATION_MIN}–{MIN_COMPLETION_DURATION_MAX} "
+                    "的整数，或使用 reset 恢复默认值。"
+                )
+            if (
+                parsed < MIN_COMPLETION_DURATION_MIN
+                or parsed > MIN_COMPLETION_DURATION_MAX
+            ):
+                return (
+                    "❌ 非法范围：请输入 "
+                    f"{MIN_COMPLETION_DURATION_MIN}–{MIN_COMPLETION_DURATION_MAX} 的整数。"
+                )
+            new_value = parsed
+            key_display = str(new_value)
+            is_reset = False
+
+        # 持久化前先保存旧值用于回滚
+        config_key = "min_completion_duration_seconds"
+        old_present = config_key in self.config
+        old_raw = self.config.get(config_key)
+        old_value = normalize_min_completion_duration(old_raw)
+
+        self.config[config_key] = new_value
+        try:
+            self.config.save_config()
+        except Exception as e:
+            # 保存失败：恢复旧 key
+            if old_present:
+                self.config[config_key] = old_raw
+            else:
+                self.config.pop(config_key, None)
+            logger.error(
+                "[WebhookNotifier] 持久化配置失败 "
+                f"error_type={type(e).__name__} key={config_key} value={key_display}"
+            )
+            return (
+                "❌ 配置保存失败：新值未应用，"
+                f"当前仍为 {old_value} 秒。请稍后重试或检查插件日志。"
+            )
+
+        # 保存成功，更新运行时 Server
+        if self._server is not None:
+            self._server.set_min_completion_duration_seconds(new_value)
+
+        logger.info(
+            f"[WebhookNotifier] 管理操作 sender={event.get_sender_id()}"
+            f" action=config set"
+            f" key=min_completion_duration_seconds value={key_display}"
+        )
+        if is_reset:
+            return (
+                f"✅ 已恢复默认值：{new_value} 秒。"
+                f"成功完成耗时低于 {new_value} 秒时将跳过通知。"
+            )
+        if new_value == 0:
+            return "✅ 已关闭短任务通知过滤（0 秒）。成功完成通知不再按耗时跳过。"
+        return (
+            f"✅ 已将最短完成通知时长设为 {new_value} 秒。"
+            f"成功完成耗时低于 {new_value} 秒时将跳过通知。"
         )
 
     def _handle_admin_token_list(self, sender_id: str) -> str:
@@ -1702,6 +1833,19 @@ class WebhookNotifierPlugin(Star):
             if "notification_mode" in self.config
             else normalize_notification_mode()
         )
+        min_duration_raw = self.config.get("min_completion_duration_seconds")
+        min_duration = normalize_min_completion_duration(min_duration_raw)
+        if min_duration_raw is not None and (
+            not isinstance(min_duration_raw, int)
+            or isinstance(min_duration_raw, bool)
+            or min_duration_raw < MIN_COMPLETION_DURATION_MIN
+            or min_duration_raw > MIN_COMPLETION_DURATION_MAX
+        ):
+            duration_display = "0 秒（检测到无效配置，已安全关闭过滤）"
+        elif min_duration == 0:
+            duration_display = "0 秒（过滤已关闭；不按耗时跳过通知）"
+        else:
+            duration_display = f"{min_duration} 秒（低于此时长的成功完成通知会被跳过）"
         host = self._server_config.host if self._server_config else "127.0.0.1"
         port = self._server_config.port if self._server_config else 18080
         base_path = self._server_config.base_path if self._server_config else "/webhook"
@@ -1719,6 +1863,7 @@ class WebhookNotifierPlugin(Star):
             f"渲染降级：{'开启' if fallback else '关闭'}",
             f"Webhook 私聊状态通知：{'开启' if private_notifications else '关闭'}",
             f"通知降噪模式：{notification_mode}",
+            f"最短完成通知时长：{duration_display}",
             f"展示时区：{self._display_context.timezone_name}",
             f"监听 IP：{host}",
             f"监听端口：{port}",

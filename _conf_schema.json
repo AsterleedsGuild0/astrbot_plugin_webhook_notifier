@@ -25,6 +25,14 @@
     "hint": "focused（默认）仅抑制成功完成的 subagent 通知；all 发送全部通知。未知会话范围和未知状态均放行。",
     "default": "focused"
   },
+  "min_completion_duration_seconds": {
+    "description": "短任务完成通知过滤阈值（秒）",
+    "type": "int",
+    "hint": "仅作用于成功完成通知：耗时低于阈值时跳过，达到或超过阈值时发送；无法取得可靠耗时时仍会发送。默认 15 秒；设为 0 可关闭此过滤，不再按耗时跳过通知。有效范围 0–3600。配置面板修改后需重启或 reload。",
+    "default": 15,
+    "min": 0,
+    "max": 3600
+  },
   "display_timezone": {
     "description": "通知展示时区",
     "type": "string",

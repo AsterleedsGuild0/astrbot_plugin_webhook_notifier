@@ -378,3 +378,43 @@ class TestNormalizeOmpPayload:
         assert event.raw.get("metadata.version") == "1.2.3"
         assert event.raw.get("metadata.eventName") == "session_stop"
         assert event.raw.get("round.stopHookActive") is True
+
+    def test_task_duration_ms_from_round_duration_ms(self):
+        """round.durationMs 应正确映射到 task_duration_ms。"""
+        body = {
+            "round": {
+                "durationMs": 57700,
+                "startedAt": "2026-07-08T11:59:00.000Z",
+                "endedAt": "2026-07-08T12:00:00.000Z",
+            },
+        }
+        event = normalize_omp_payload(body)
+        assert event.task_duration_ms == 57700
+
+    def test_task_duration_ms_from_started_ended_fallback(self):
+        """durationMs 缺失时使用 startedAt/endedAt 差值。"""
+        body = {
+            "round": {
+                "startedAt": "2026-07-08T11:59:00.000Z",
+                "endedAt": "2026-07-08T12:00:00.000Z",
+            },
+        }
+        event = normalize_omp_payload(body)
+        assert event.task_duration_ms == 60000
+
+    def test_task_duration_ms_none_when_missing(self):
+        """耗时数据完全缺失时 task_duration_ms 为 None。"""
+        body = {"session": {"name": "test"}}
+        event = normalize_omp_payload(body)
+        assert event.task_duration_ms is None
+
+    def test_task_duration_ms_not_in_to_dict(self):
+        """task_duration_ms 不应出现在 to_dict() 输出中。"""
+        body = {
+            "round": {
+                "durationMs": 57700,
+            },
+        }
+        event = normalize_omp_payload(body)
+        d = event.to_dict()
+        assert "task_duration_ms" not in d

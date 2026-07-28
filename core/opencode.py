@@ -1375,4 +1375,6 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             links=[],
             raw={},
             subagent_timeline=subagent_timeline,
+            # 仅使用严格校验后的 payload durationMs（busy→idle 当前任务耗时）
+            task_duration_ms=duration_ms if duration_ms is not None else None,
         )

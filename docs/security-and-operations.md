@@ -149,6 +149,8 @@ Question/Permission 的 `actionContentMode` 默认为 `strict`，只保留 Permi
 
 服务端 `notification_mode` 只有 `focused` 和 `all`：`focused` 只抑制成功完成的 `subagent` 与 `auxiliary`，root 的 completed/failed/action_required、辅助或 subagent 的 failed/action_required、unknown scope 以及未知未来状态全部放行；`all` 保持全部通知。默认 auxiliary 只精确匹配清洗后的 `smartfetch-secondary`，非空 `parentID` 始终优先为 `subagent`。unknown fail-open。被过滤事件返回 HTTP 200 `message=skipped`，并明确返回 `scope` 与 `reason`，不调用 renderer、HTML/T2I 或 sender。
 
+全局 `min_completion_duration_seconds` 与 `notification_mode` 正交，默认 15 秒；仅当 Provider 提供可靠的当前任务耗时且 canonical status 为 `completed` 时，低于阈值的事件才返回 HTTP 200 `skip_reason=completion_below_duration_threshold`。耗时缺失、非法或语义不可靠时 fail-open；failed、action_required、Permission、Question 和未知状态始终放行。设置为 `0` 可关闭耗时过滤并恢复旧行为。该策略同样在 renderer、HTML/T2I、sender 和幂等 claim 前执行；响应只包含安全的耗时与阈值数值，不包含任务正文或原始 payload。
+
 客户端还支持安全、一次性的运行时元数据诊断：`metadataDiagnostics` 默认 `off`，可设为 `once` 或 `sample`，非法值回退为 `off`。`once` 每阶段每进程最多一条；`sample` 每阶段最多 8 条，对完全相同的安全 payload 去重，超过上限静默停止。每条有 session ID 的 sample 诊断可带进程内递增 `sampleSession`，同一匿名 session 跨阶段复用，不输出 raw ID、匿名 ref/hash 或 message/parent ID。诊断只记录经过安全键名过滤的 bounded key、短字符串、响应形状、状态枚举、长度和存在性，Assistant 时间只记录 `created/completed` 的存在性或 key 名；不记录标题/名称正文、parent ID 值、消息正文、parts、路径、Token、URL、headers、response body 或异常 message。
 
 模型 variant 取证只允许 Assistant `info` 中的 `variant`、`reasoningEffort`、`reasoning_effort`，以及 `session.get` 的 nested model 和顶层对应候选。string 会清洗并限长，number/boolean 原样限界记录，对象/数组只记录类型；`reasoning` 正文、parts、provider options 和未知对象值始终不展开。nested model 的键名最多 24 个，候选字段在日志中明确区分 `model*` 与 `topLevel*`，不会加入 outgoing envelope。

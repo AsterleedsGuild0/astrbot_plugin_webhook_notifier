@@ -222,6 +222,8 @@ def normalize_omp_payload(
         fields=fields,
         links=[],
         raw=raw,
+        # round.durationMs 或 startedAt/endedAt 差值是可靠的当前 round 耗时
+        task_duration_ms=duration_ms if duration_ms is not None else None,
     )
 
 

@@ -41,6 +41,8 @@
 - 全局 `notification_mode` 仅允许 `focused`（默认）和 `all`；`focused` 只抑制 `subagent` 与 `auxiliary` 的 `completed`，unknown scope/status fail-open。策略过滤返回 HTTP 200、`message=skipped`、`scope`、`reason=notification_mode_filtered`、`skip_reason=notification_mode_filtered`、`rendered=false`、`delivered=false`、`retryable=false`，且不进入 renderer、T2I 或 sender。
 - Webhook retry 幂等：Envelope 顶层 `id` 参与幂等键；相同 endpoint/provider、event、id、session scope 与 target selector 在进程内 10 分钟、最多 2048 项 single-flight。重复请求返回 HTTP 200、`message=skipped`、`skip_reason=idempotency_replay`、`deduplicated=true`，过滤和全私聊策略 skip 不占用幂等 cache。
 
+- #24：全局 `min_completion_duration_seconds`（最短完成通知时长）：成功完成的 Webhook 事件耗时低于阈值时跳过通知（默认 15 秒），减少短任务噪音。0 关闭过滤恢复旧行为。仅 `canonical completed` 状态参与；notification_mode 过滤在 duration 之前判断。task_duration_ms 仅来自 Provider 的可靠任务耗时（OMP round.durationMs / startedAt→endedAt 差值，OpenCode payload durationMs），不对外暴露。通过 `admin config min-duration` 命令查询/设置/reset。保存失败时回滚内存值，Server 保持旧值。缺失配置默认 15；非法历史配置归一化为 0（fail-open）。skip 响应返回 HTTP 200、`message=skipped`、`skip_reason=completion_below_duration_threshold`、`rendered=false`、`delivered=false`、`retryable=false`。
+
 `actionContentMode` 与 `notification_mode` 正交：前者只控制 Question/Permission 内容隐私，后者只控制通知是否发送。
 
 聚合 bucket 只存在客户端进程内存，raw session ID 仅作本地 key；request ID 仅用于去重/撤销，不出站。`strict` 的 Permission item 仅允许 `category`，不会发送正文；`summary`/`full` 仍按 allowlist 和上限处理。

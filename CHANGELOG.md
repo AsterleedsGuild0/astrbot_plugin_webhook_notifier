@@ -4,6 +4,7 @@
 
 ## v1.1.0-rc.1 - 2026-07-23
 
+- #24：全局 `min_completion_duration_seconds`（最短完成通知时长）：成功完成的 Webhook 事件耗时长低于阈值时跳过通知，减少短任务噪音。默认 15 秒；设为 0 关闭过滤恢复旧行为。有效范围 0–3600。仅在 `canonical completed` 状态参与过滤；failed、action_required、unknown 不参与；notification_mode 过滤在 duration 之前判断。task_duration_ms 仅来自 Provider 的可靠任务耗时（OMP round.durationMs / startedAt→endedAt 差值，OpenCode payload durationMs），不对外通过 to_dict() 暴露。通过 `admin config min-duration` 命令查询/设置/reset。保存失败时回滚内存值，Server 保持旧值。
 - 修复 OpenCode `timeoutMs=5000` 在服务端渲染/投递约 5 秒以上时触发 retry、造成同一权限通知重复投递的问题：服务端新增按 Envelope 顶层 `id` 的进程内 single-flight 幂等与发送边界追踪；示例 timeout 调整为 15000 毫秒。
 - 冻结多 Provider 通知降噪：新增全局 `notification_mode`，默认 `focused` 只抑制成功完成的 OpenCode `subagent`；`all` 保持全部通知，unknown scope/status fail-open。`actionContentMode` 与该策略正交。
 - OpenCode root `session_idle` 可选携带 `subagentTimeline`：记录相对 root busy→idle cycle 的匿名子任务图、时间质量、部分/截断状态与有界计数；不新增配置项，也不在其他 event 或 scope 携带。

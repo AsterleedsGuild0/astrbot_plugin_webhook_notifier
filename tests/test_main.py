@@ -309,6 +309,301 @@ async def test_admin_command_usage_unknown_action_and_wrong_path(admin_plugin):
     assert "path 不存在" in wrong_path
 
 
+# ─── Admin config min-duration 命令测试 ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_query():
+    """查询当前默认值。"""
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration")
+    assert "最短完成通知时长" in result
+    assert "当前：15 秒" in result
+    assert "低于 15 秒时跳过通知" in result
+    assert "默认：15 秒" in result
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_query_shows_filter_disabled():
+    """查询 0 时明确说明仅关闭耗时过滤。"""
+    plugin = WebhookNotifierPlugin(
+        Context(), AstrBotConfig({"min_completion_duration_seconds": 0})
+    )
+    event = AdminEventStub(super_admin=True)
+
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration")
+
+    assert "当前：0 秒（过滤已关闭）" in result
+    assert "不按耗时跳过成功完成通知" in result
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_query_shows_invalid_config_fail_open():
+    """查询非法历史值时明确说明已按 0 安全关闭过滤。"""
+    plugin = WebhookNotifierPlugin(
+        Context(), AstrBotConfig({"min_completion_duration_seconds": "broken"})
+    )
+    event = AdminEventStub(super_admin=True)
+
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration")
+
+    assert "当前：0 秒（检测到无效历史配置，已安全关闭过滤）" in result
+    assert "不按耗时跳过成功完成通知" in result
+    assert "broken" not in result
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_set():
+    """设置有效值并持久化。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 15})
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 30")
+    assert "已将最短完成通知时长设为 30 秒" in result
+    assert "低于 30 秒时将跳过通知" in result
+    assert config.get("min_completion_duration_seconds") == 30
+    assert config.save_call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_set_zero():
+    """设置 0 关闭过滤。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 15})
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 0")
+    assert "已关闭短任务通知过滤（0 秒）" in result
+    assert "不再按耗时跳过" in result
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_reset():
+    """reset 恢复默认 15。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 100})
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(
+        event, "admin config min-duration reset"
+    )
+    assert "已恢复默认值：15 秒" in result
+    assert "低于 15 秒时将跳过通知" in result
+    assert config.get("min_completion_duration_seconds") == 15
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_invalid_input_not_saved():
+    """非法输入不保存，旧值保留。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 15})
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration abc")
+    assert "非法输入" in result
+    assert "0–3600" in result
+    assert "abc" not in result
+    assert config.get("min_completion_duration_seconds") == 15
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_out_of_range_not_saved():
+    """超出有效范围不保存。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 15})
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(
+        event, "admin config min-duration 99999"
+    )
+    assert "非法范围" in result
+    assert "0–3600" in result
+    assert config.get("min_completion_duration_seconds") == 15
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_non_admin_rejected():
+    """非超级管理员拒绝。"""
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = AdminEventStub(super_admin=False)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 30")
+    assert "仅 AstrBot 全局超级管理员" in result
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_group_chat_rejected():
+    """群聊中执行拒绝。"""
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = AdminEventStub(super_admin=True, private=False)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 30")
+    assert result == "❌ 私聊限制：管理员命令请在私聊中执行。"
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_unknown_subcommand():
+    """未知子命令显示用法。"""
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config unknown-sub")
+    assert "用法" in result
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_rejects_extra_arguments():
+    """多余参数不会被静默忽略。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 15})
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+
+    result = await plugin._dispatch_whn_command(
+        event, "admin config min-duration 30 unexpected"
+    )
+
+    assert "参数过多" in result
+    assert "<0..3600|reset>" in result
+    assert config.get("min_completion_duration_seconds") == 15
+    assert config.save_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_admin_config_save_failure_rollback():
+    """保存失败时回滚内存值。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 15})
+    config.set_fail_save(True)
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 30")
+    assert "配置保存失败" in result
+    assert "新值未应用" in result
+    assert "当前仍为 15 秒" in result
+    assert "simulated save failure" not in result
+    assert config.get("min_completion_duration_seconds") == 15
+
+
+@pytest.mark.asyncio
+async def test_admin_config_save_success_updates_server():
+    """保存成功后 Server 运行时值更新。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 15})
+    plugin = WebhookNotifierPlugin(Context(), config)
+    server_duration = None
+
+    class ServerStub:
+        def set_min_completion_duration_seconds(self, value: int) -> None:
+            nonlocal server_duration
+            server_duration = value
+
+    plugin._server = ServerStub()  # type: ignore[assignment]
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 45")
+    assert "45 秒" in result
+    assert server_duration == 45
+
+
+@pytest.mark.asyncio
+async def test_admin_config_save_failure_rollback_without_old_key():
+    """保存失败，旧 key 不存在时完全移除。"""
+    config = AstrBotConfig()  # 没有预置 key
+    config.set_fail_save(True)
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 30")
+    assert "配置保存失败" in result
+    assert "min_completion_duration_seconds" not in config
+
+
+@pytest.mark.asyncio
+async def test_admin_config_save_failure_preserves_present_none_value(caplog):
+    """保存失败时精确保留值为 None 的历史 key，且日志不泄露异常正文。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": None})
+    config.set_fail_save(True)
+    plugin = WebhookNotifierPlugin(Context(), config)
+    event = AdminEventStub(super_admin=True)
+
+    result = await plugin._dispatch_whn_command(event, "admin config min-duration 30")
+
+    assert "配置保存失败" in result
+    assert "min_completion_duration_seconds" in config
+    assert config["min_completion_duration_seconds"] is None
+    assert "simulated save failure" not in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_admin_config_reconstruct_retains_value():
+    """重新构造插件后配置值仍保留（模拟持久化生效）。"""
+    config = AstrBotConfig({"min_completion_duration_seconds": 60})
+    # 证明对象被保存
+    config.save_config()
+    plugin = WebhookNotifierPlugin(Context(), config)
+    assert plugin.config.get("min_completion_duration_seconds") == 60
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_help_includes_new_commands():
+    """admin 命令用法文本中包含新的 config 命令。"""
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = AdminEventStub(super_admin=True)
+    usage = await plugin._dispatch_whn_command(event, "admin")
+    assert "admin config min-duration" in usage
+
+
+# ─── 最短完成通知时长 Status/Schema 测试 ────────────────────────────────
+
+
+def test_min_duration_schema_defaults_to_15():
+    """_conf_schema.json 中 min_completion_duration_seconds 默认 15。"""
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    setting = schema["min_completion_duration_seconds"]
+    assert setting["type"] == "int"
+    assert setting["default"] == 15
+    assert setting["min"] == 0
+    assert setting["max"] == 3600
+    assert "低于阈值时跳过" in setting["hint"]
+    assert "0 可关闭此过滤" in setting["hint"]
+
+
+def test_min_duration_status_missing_defaults_to_15():
+    """配置缺失时状态显示 15 秒。"""
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    text = plugin._build_status_text()
+    assert "最短完成通知时长：15 秒" in text
+    assert "低于此时长的成功完成通知会被跳过" in text
+
+
+def test_min_duration_status_shows_0_as_closed():
+    """配置为 0 时状态显示已关闭。"""
+    plugin = WebhookNotifierPlugin(
+        Context(), AstrBotConfig({"min_completion_duration_seconds": 0})
+    )
+    text = plugin._build_status_text()
+    assert "0 秒（过滤已关闭" in text
+    assert "不按耗时跳过通知" in text
+
+
+def test_min_duration_status_shows_invalid_as_safe():
+    """无效历史配置在状态中显示安全关闭。"""
+    plugin = WebhookNotifierPlugin(
+        Context(), AstrBotConfig({"min_completion_duration_seconds": -1})
+    )
+    text = plugin._build_status_text()
+    assert "0 秒（检测到无效配置，已安全关闭过滤）" in text
+
+
+def test_min_duration_status_negative_value_normalized_to_0():
+    """负数归一化为 0。"""
+    plugin = WebhookNotifierPlugin(
+        Context(), AstrBotConfig({"min_completion_duration_seconds": -5})
+    )
+    assert "0 秒（检测到无效配置，已安全关闭过滤）" in (plugin._build_status_text())
+
+
+@pytest.mark.asyncio
+async def test_admin_config_min_duration_unknown_action():
+    """未知 admin action（非 token/config）显示未知子命令。"""
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    event = AdminEventStub(super_admin=True)
+    result = await plugin._dispatch_whn_command(event, "admin delete")
+    assert "未知 admin 子命令" in result
+
+
 @pytest.mark.asyncio
 async def test_admin_list_does_not_expose_secrets_or_full_umo(admin_plugin):
     plugin, active, pending, token, pending_code = admin_plugin

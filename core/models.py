@@ -83,6 +83,9 @@ class NormalizedEvent:
     raw: dict[str, Any] = field(default_factory=dict)
     model_variant: str | None = None
     subagent_timeline: dict[str, Any] | None = None
+    # 内部策略字段：Provider 能证明是当前任务/round 耗时时赋值，None 表示不可靠/缺失。
+    # 仅用于服务端时长过滤策略，不通过 to_dict() 对外暴露。
+    task_duration_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = {

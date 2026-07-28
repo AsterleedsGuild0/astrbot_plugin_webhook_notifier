@@ -25,6 +25,7 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 - Endpoint Path 与 Token 分开交付，聊天消息不会返回完整 Webhook URL。
 - 在认证后的 Plugin Page 中预览、复制、编辑、保存、应用和删除自定义 HTML 模板。
 - 为每次请求返回可观察的投递、跳过、降级与重试信息，便于调用方判断结果。
+- #24：全局最短完成通知时长阈值：成功完成的 Webhook 事件耗时低于阈值时跳过通知（默认 15 秒），减少短任务噪音。0 关闭过滤恢复旧行为。可靠耗时仅来自 Provider 特定字段，不对外暴露 task_duration_ms。通过 `admin config min-duration` 命令查询/设置/reset。
 
 ## 完整使用流程
 
@@ -174,6 +175,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 | `enabled` | `true` | 启用插件；创建可投递 endpoint 后自动启动 HTTP 服务 |
 | `render_mode` | `text` | 选择 `text` 或 `html_image` 以使用纯文本或是HTML渲染模式 |
 | `notification_mode` | `focused` | `focused` 仅抑制成功完成的 subagent/auxiliary；`all` 发送全部通知 |
+| `min_completion_duration_seconds` | `15` | 最短完成通知时长（秒）：成功完成的任务耗时低于此值跳过通知；`0` 关闭过滤恢复旧行为 |
 | `enable_private_notifications` | `false` | 是否允许 Webhook 主动投递到私聊目标 |
 | `fallback_to_text` | `true` | HTML 图片链路失败时是否降级为文本 |
 | `server` | 本地监听 | 配置 `host`、`port`、`base_path`、`public_base_url` 与请求体上限 |

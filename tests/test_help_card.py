@@ -114,6 +114,9 @@ async def test_super_admin_help_includes_private_admin_tools():
         "/whn admin token revoke-owner &lt;platform_id&gt; &lt;owner_user_id&gt; &lt;名称&gt;"
         in captured["html"]
     )
+    assert "/whn admin config min-duration" in captured["html"]
+    assert "0 关闭过滤" in captured["html"]
+    assert "恢复默认阈值 15 秒" in captured["html"]
 
 
 @pytest.mark.asyncio
@@ -210,4 +213,4 @@ def test_help_card_uses_only_syntax_placeholders_without_sensitive_examples():
     assert all(not syntax.startswith(("/", "&")) for syntax in command_syntaxes)
     assert "<数字群号>" in command_syntaxes[3]
     assert "current" in command_syntaxes[4]
-    assert "<owner_user_id>" in command_syntaxes[-1]
+    assert "<owner_user_id>" in command_syntaxes[-4]

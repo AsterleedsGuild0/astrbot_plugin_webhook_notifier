@@ -1153,6 +1153,24 @@ class TestOpenCodeProviderAdapterParseErrors:
                 headers={"x-opencode-event": "opencode.permission_asked"}, payload=p
             )
 
+    def test_task_duration_ms_from_duration_ms(self):
+        """payload durationMs 应映射到 task_duration_ms。"""
+        payload = {**_VALID_PAYLOAD, "durationMs": 15000}
+        event = self._parse(payload=payload)
+        assert event.task_duration_ms == 15000
+
+    def test_task_duration_ms_none_when_missing(self):
+        """durationMs 缺失时 task_duration_ms 为 None。"""
+        event = self._parse(payload=dict(_VALID_PAYLOAD))
+        assert event.task_duration_ms is None
+
+    def test_task_duration_ms_not_in_to_dict(self):
+        """task_duration_ms 不应出现在 to_dict() 输出中。"""
+        payload = {**_VALID_PAYLOAD, "durationMs": 15000}
+        event = self._parse(payload=payload)
+        d = event.to_dict()
+        assert "task_duration_ms" not in d
+
     def test_duration_ms_bool(self):
         with pytest.raises(ProviderError):
             self._parse(payload={**_VALID_PAYLOAD, "durationMs": True})

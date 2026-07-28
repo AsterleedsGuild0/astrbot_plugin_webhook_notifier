@@ -109,6 +109,18 @@ ADMIN_HELP_SECTION: dict[str, Any] = {
             "syntax": "admin token revoke-owner <platform_id> <owner_user_id> <名称>",
             "description": "按 owner 与名称精确撤销",
         },
+        {
+            "syntax": "admin config min-duration",
+            "description": "查看当前阈值与过滤状态",
+        },
+        {
+            "syntax": "admin config min-duration <0..3600>",
+            "description": "设置秒数；低于阈值时跳过，0 关闭过滤",
+        },
+        {
+            "syntax": "admin config min-duration reset",
+            "description": "恢复默认阈值 15 秒",
+        },
     ),
 }
 

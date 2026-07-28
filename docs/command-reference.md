@@ -40,6 +40,9 @@
 | `<唤醒词>whn admin token list` | 仅私聊 | 全局超级管理员 | `aiocqhttp`、`qq_official` | 查看 managed Endpoint 的最小管理元数据 |
 | `<唤醒词>whn admin token revoke-path <endpoint-path>` | 仅私聊 | 全局超级管理员 | `aiocqhttp`、`qq_official` | 按完整 Path 精确撤销，包括 quarantine kill switch |
 | `<唤醒词>whn admin token revoke-owner <platform_id> <owner_user_id> <名称>` | 仅私聊 | 全局超级管理员 | `aiocqhttp`、`qq_official` | 按平台、owner 与名称精确撤销 managed Endpoint |
+| `<唤醒词>whn admin config min-duration` | 仅私聊 | 全局超级管理员 | `aiocqhttp`、`qq_official` | 查询当前最短完成通知时长阈值（默认 15 秒） |
+| `<唤醒词>whn admin config min-duration <0..3600>` | 仅私聊 | 全局超级管理员 | `aiocqhttp`、`qq_official` | 设置最短完成通知时长阈值（0 关闭过滤） |
+| `<唤醒词>whn admin config min-duration reset` | 仅私聊 | 全局超级管理员 | `aiocqhttp`、`qq_official` | 恢复默认 15 秒 |
 
 ---
 
@@ -261,6 +264,22 @@
 选择器由 `platform_id + owner_user_id + 名称` 共同组成。名称按普通 Endpoint 名称规则规范化；命令不会跨平台猜测 owner，也不支持模糊匹配。
 
 管理员命令的审计日志使用安全摘要或不可逆标识，避免记录 Token、hash、验证码和完整目标 UMO。运维工单仍应主动替换真实平台身份、Path 与群信息。
+
+### 查询/设置最短完成通知时长
+
+```text
+<唤醒词>whn admin config min-duration
+<唤醒词>whn admin config min-duration <0..3600>
+<唤醒词>whn admin config min-duration reset
+```
+
+- **查询**：显示当前有效阈值（默认 15 秒），以及配置值是否异常（已安全关闭）或已关闭。
+- **设置**：接受 `0`–`3600` 的整数。`0` 关闭过滤，恢复旧行为（所有成功完成通知均发送）。
+- **reset**：恢复默认 `15` 秒。
+- 持久化到 `_conf_schema.json` 中的 `min_completion_duration_seconds`，保存成功后立即更新运行时 Server。保存失败时回滚内存值，Server 保持旧值。
+- 缺失配置默认 15 秒；非法历史配置（非 int、bool、负数、超界）归一化为 `0`（安全关闭）。
+- 该设置仅影响 `canonical completed` 状态的 Webhook 事件；`failed`、`action_required`、`unknown` 不受影响。`notification_mode` 过滤在 duration 之前独立判断。
+- 受支持 Provider 中，仅可靠耗时参与过滤：OMP 使用 `round.durationMs` 或 `startedAt`/`endedAt` 差值；OpenCode 使用 payload `durationMs`。不可靠或缺失耗时始终放行。
 
 ---
 

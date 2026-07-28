@@ -16,7 +16,12 @@ from .idempotency import (
     make_idempotency_key,
 )
 from .models import DisplayContext, EndpointRecord, NormalizedEvent, ServerConfig
-from .notification_policy import normalize_notification_mode, should_notify
+from .notification_policy import (
+    normalize_min_completion_duration,
+    normalize_notification_mode,
+    should_filter_by_duration,
+    should_notify,
+)
 from .providers import ProviderError, ProviderRegistry, ProviderRegistryError
 from .registry import EndpointRegistry
 from .renderer import (
@@ -227,6 +232,16 @@ class WebhookServer:
     def _session_scope_value(event: NormalizedEvent) -> str:
         scope = event.session_scope
         return scope.value if hasattr(scope, "value") else str(scope)
+
+    def _get_min_completion_duration_seconds(self) -> int:
+        """读取全局最短完成通知时长阈值（秒），非法配置归一化后 fail-open 为 0。"""
+        return normalize_min_completion_duration(
+            self._plugin_config.get("min_completion_duration_seconds")
+        )
+
+    def set_min_completion_duration_seconds(self, value: int) -> None:
+        """运行时更新内存中的阈值（由 main.py 持久化成功后调用）。"""
+        self._plugin_config["min_completion_duration_seconds"] = value
 
     def _get_render_options(self) -> dict[str, Any]:
         raw = self._plugin_config.get("render_options", "")
@@ -455,6 +470,33 @@ class WebhookServer:
                 provider=event.provider,
                 event_name=event.event,
                 scope=self._session_scope_value(event),
+            )
+
+        # 时长过滤：notification_mode 放行后才判断；仅 canonical completed 参与。
+        duration_threshold = self._get_min_completion_duration_seconds()
+        if should_filter_by_duration(
+            status=event.status,
+            task_duration_ms=event.task_duration_ms,
+            threshold_seconds=duration_threshold,
+        ):
+            duration_seconds = (event.task_duration_ms or 0) / 1000
+            duration_display = f"{duration_seconds:.3f}".rstrip("0").rstrip(".")
+            logger.info(
+                "[WebhookNotifier] 已跳过短任务完成通知："
+                f"Provider={event.provider}，任务耗时={duration_display} 秒，"
+                f"通知阈值={duration_threshold} 秒；"
+                f"provider={event.provider} event={event.event} "
+                f"status={event.status} "
+                f"duration_ms={event.task_duration_ms} "
+                f"threshold_seconds={duration_threshold} "
+                "reason=completion_below_duration_threshold"
+            )
+            return self._build_duration_skip_response(
+                request_id=request_id,
+                provider=event.provider,
+                event_name=event.event,
+                duration_ms=event.task_duration_ms,
+                threshold_seconds=duration_threshold,
             )
 
         logger.info(
@@ -1110,6 +1152,38 @@ class WebhookServer:
         else:
             message = "ok"
         return web.json_response({"code": 0, "message": message, "data": data})
+
+    def _build_duration_skip_response(
+        self,
+        *,
+        request_id: str,
+        provider: str,
+        event_name: str,
+        duration_ms: int | None = None,
+        threshold_seconds: int = 0,
+    ) -> web.Response:
+        """Return the non-retryable response for a duration-filtered event."""
+        render_mode = self._get_render_mode()
+        data: dict[str, Any] = {
+            "request_id": request_id,
+            "provider": provider,
+            "event": event_name,
+            "delivered": False,
+            "targets": [],
+            "render_mode": render_mode,
+            "requested_render_mode": render_mode,
+            "fallback_to_text": False,
+            "fallback_reason": None,
+            "skipped": True,
+            "skip_reason": "completion_below_duration_threshold",
+            "reason": "completion_below_duration_threshold",
+            "rendered": False,
+            "retryable": False,
+        }
+        if duration_ms is not None:
+            data["duration_ms"] = duration_ms
+        data["threshold_seconds"] = threshold_seconds
+        return web.json_response({"code": 0, "message": "skipped", "data": data})
 
     def _build_notification_mode_skip_response(
         self,
