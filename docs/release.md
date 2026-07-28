@@ -1,6 +1,6 @@
 # 发布流程
 
-本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。`v1.0.0` 是现有稳定版；当前源码准备的是尚未发布的 `v1.1.0-rc.1` 候选。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。Workflow 使用 `setup-python`、pip 与 `python` 命令；本地推荐另用 uv 锁定环境验证，两者现阶段不是同一套依赖安装路径。
+本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。`v1.0.0` 是现有稳定版；当前源码准备的是尚未发布的 `v1.1.0-rc.1` 候选。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
 
 通知降噪候选发布还必须遵循兼容部署顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `session.scope`。
 
@@ -17,47 +17,48 @@
 2. 维护本地锁定验证依赖：
 
    - `uv.lock` 必须随 `pyproject.toml` 的依赖声明一起维护并纳入提交。
-   - 当前 `[dependency-groups].dev` 显式包含 `packaging`、PyYAML、pytest、pytest-asyncio 与 Pillow，不包含 Ruff。
+   - 当前 `[dependency-groups].dev` 显式包含 `packaging`、PyYAML、pytest、pytest-asyncio、Pillow **和 Ruff**（自 #11 起引入）。
    - 依赖声明发生变化时先显式运行 `uv lock` 并审查 lockfile；普通发布验证不得隐式更新锁文件。
 
-3. 本地推荐按锁文件同步环境并运行完整测试：
+3. 本地推荐按锁文件同步环境并运行完整测试与 lint：
 
-```bash
-uv sync --frozen --group dev
-uv run --frozen pytest
-```
+   ```bash
+   uv sync --frozen --group dev
+   uv run --frozen ruff check .
+   uv run --frozen pytest
+   ```
 
-1. 构建并验证 Plugin Page：
+4. 构建并验证 Plugin Page：
 
-```bash
-npm ci --prefix frontend
-npm run build --prefix frontend
-uv run --frozen pytest tests/test_frontend_build.py
-```
+   ```bash
+   npm ci --prefix frontend
+   npm run build --prefix frontend
+   uv run --frozen pytest tests/test_frontend_build.py
+   ```
 
-1. 本地生成带时分标识的测试包：
+5. 本地生成带时分标识的测试包：
 
-```bash
-uv run --frozen python scripts/package_plugin.py --dev-version
-```
+   ```bash
+   uv run --frozen python scripts/package_plugin.py --dev-version
+   ```
 
-测试包版本和文件名使用本地时间后缀 `-test.YYYYMMDD.HHMM`，例如
-`v1.1.0-rc.1-test.20260723.0905`。同一天多次打包时可直接按小时和分钟区分。ZIP 内 `pyproject.toml` 会使用等价的合法 PEP 440 dev 版本。该开发包与下面的固定 `v1.1.0-rc.1` RC ZIP 不同，不应混称。
+   测试包版本和文件名使用本地时间后缀 `-test.YYYYMMDD.HHMM`，例如
+   `v1.1.0-rc.1-test.20260723.0905`。同一天多次打包时可直接按小时和分钟区分。ZIP 内 `pyproject.toml` 会使用等价的合法 PEP 440 dev 版本。该开发包与下面的固定 `v1.1.0-rc.1` RC ZIP 不同，不应混称。
 
-建议再添加本次测试用途标签，便于同时区分功能和生成时间：
+   建议再添加本次测试用途标签，便于同时区分功能和生成时间：
 
-```bash
-uv run --frozen python scripts/package_plugin.py --dev-version --test-label template-manager
-```
+   ```bash
+   uv run --frozen python scripts/package_plugin.py --dev-version --test-label template-manager
+   ```
 
-生成格式为 `-test.YYYYMMDD.HHMM.<label>`，例如
-`v1.1.0-rc.1-test.20260723.0905.template-manager`。标签仅允许英文字母、数字和连字符。
+   生成格式为 `-test.YYYYMMDD.HHMM.<label>`，例如
+   `v1.1.0-rc.1-test.20260723.0905.template-manager`。标签仅允许英文字母、数字和连字符。
 
-1. 本地验证正式发布包：
+6. 本地验证正式发布包：
 
-```bash
-uv run --frozen python scripts/package_plugin.py
-```
+   ```bash
+   uv run --frozen python scripts/package_plugin.py
+   ```
 
 ---
 
@@ -84,6 +85,55 @@ uv run --frozen python scripts/package_plugin.py \
 
 ---
 
+## #11 CI 改造说明
+
+本 Issue 将 Release Workflow 从 `actions/setup-python` + pip 迁移到 `astral-sh/setup-uv` + uv 锁定环境，并引入 Ruff lint 门禁。关键变更：
+
+### CI 使用技术栈
+
+| 组件 | 版本/标识 |
+| --- | --- |
+| setup-uv action | `c771a70e6277c0a99b617c7a806ffedaca235ff9` (对应的 tag `v9.0.0`) |
+| uv 版本 | `0.11.12`（固定） |
+| Python | `3.13` |
+| Node.js | `20` |
+| Ruff | dev group 依赖（当前 `0.16.0`） |
+
+### 发布 Workflow 步骤顺序
+
+1. **checkout** — `actions/checkout@v4`
+2. **setup-uv** — `astral-sh/setup-uv`，固定 SHA、Python 3.13、启用 uv cache，依赖 glob 追踪 `pyproject.toml` + `uv.lock`
+3. **setup-node** — `actions/setup-node@v4`，Node 20、npm cache
+4. **`uv lock --check`** — 验证 lockfile 一致性
+5. **`uv sync --frozen --group dev`** — 按锁文件安装全部依赖（含 dev 组 Ruff）
+6. **`uv run --frozen ruff check .`** — lint 门禁（仅 F 规则，不含 format 检查）
+7. **`npm ci --prefix frontend` + `npm run build --prefix frontend`** — 构建 Plugin Page
+8. **版本校验** — `uv run --frozen python` 内联脚本校验 tag/metadata.yaml/main.py/pyproject.toml 三源一致性
+9. **`uv run --frozen pytest`** — 运行完整测试套件
+10. **`uv run --frozen python scripts/package_plugin.py`** — 构建插件 ZIP
+11. **提取 release notes** — 从 CHANGELOG.md 提取对应 tag 的发布说明
+12. **上传 Actions artifact** — 始终上传，dry-run 与正式发布均包含
+13. **正式发布** — 仅当 `github.event_name == 'push'` 且 ref 为 `v*` tag 时调用 `softprops/action-gh-release`
+
+### workflow_dispatch（手动触发）
+
+- 始终为 **dry-run**：完整执行锁检查、Ruff、前端构建、测试、版本校验、打包和 artifact 上传。
+- **不**创建 tag、不调用 `action-gh-release`。
+- `tag` 输入仍用于版本校验和 artifact 命名，但不触发 Release 创建。
+
+### 正式发布触发
+
+- 仅 `push` v* tag 事件触发实际 GitHub Release。
+- 不会有 `workflow_dispatch` 触发的正式发布。
+
+### Ruff lint 门禁范围
+
+- 本 Issue 只启用基于 `extend-select = ["F"]` 的 fatal lint 检查（pyflakes 规则）。
+- **不启用** `ruff format --check`，避免全仓格式化噪音。
+- 后续可追加规则而不影响既有的 CI 流程。
+
+---
+
 ## 既有 v1.0.0 稳定版发布
 
 推送版本 tag 会触发 `.github/workflows/release.yml`。`v1.0.0` 已是既有稳定版；下列命令仅保留为历史流程示意，不是本轮操作：
@@ -95,25 +145,11 @@ git push origin v1.0.0
 
 正式发布时 tag 必须指向已经通过完整验证、版本三源均为目标版本的提交。本轮不执行任何 tag、push 或远端 Release 操作。
 
-当前 `.github/workflows/release.yml` 在创建 Release 前实际执行以下步骤：
-
-- 使用 `actions/setup-python@v5` 配置 Python 3.13 和 pip cache，并使用 `actions/setup-node@v4` 配置 Node.js 20。
-- 运行 `python -m pip install --upgrade pip`，再从 `requirements.txt` 并附加 `packaging pyyaml pytest pytest-asyncio pillow` 安装依赖；`packaging` 用于 PEP 440 版本比较，Pillow 用于 HTML 图片渲染与裁剪测试。
-- 使用 `npm ci --prefix frontend` 和 `npm run build --prefix frontend` 重建 Plugin Page。
-- 校验 tag、`metadata.yaml`、`main.py @register` 与 `pyproject.toml` 的版本按 PEP 440 规范化后等价。
-- 运行 `python -m pytest`。
-- 运行 `python scripts/package_plugin.py` 生成 `dist/*.zip`。
-- 从 `CHANGELOG.md` 提取对应 tag 的发布说明。
-- 根据 tag 的预发布段动态设置 Release：稳定版为 `prerelease=false`、`make_latest=true`；RC 版本为 `prerelease=true`、`make_latest=false`。
-- 创建或更新 GitHub Release，并上传插件 ZIP。
-
-当前 CI 尚未使用 `uv.lock`，也没有 Ruff 门禁；将正式 CI 改为 uv 锁定安装属于后续改造项。在该改造完成前，不应把本地 uv 验证描述为现有 Release Workflow 已执行的步骤。若本地另行运行 Ruff，应视为独立可选检查，不属于当前 dev group 或发布 Workflow。
-
 ---
 
 ## 手动触发
 
-如果目标 tag 已由授权发布流程创建，也可以在 GitHub Actions 页面手动运行 `Release` workflow，并填写目标版本。`workflow_dispatch` 与 tag push 使用同一版本校验、CHANGELOG 提取和 prerelease/latest 判定；手动触发不能绕过版本一致性和发布门槛。本轮不执行手动触发。
+如果需要在 CI 中演练完整工作流而不发布，在 GitHub Actions 页面手动运行 `Release` workflow，填写目标版本 tag。手动触发始终为 dry-run，不会创建 Release。Artifact 名称会包含目标 tag，例如 `plugin-release-v1.1.0-rc.1`。下载后可直接用于本地安装测试。
 
 ---
 
@@ -122,7 +158,7 @@ git push origin v1.0.0
 ### 发布前门槛
 
 1. `metadata.yaml`、`main.py @register`、`pyproject.toml` 和 `CHANGELOG.md` 对应 `v1.1.0-rc.1` / `1.1.0rc1`，且规范化后一致。
-2. 完整 Python 测试、Bun 测试、CLI smoke、前端 clean build/专项测试、版本与 package contract、RC ZIP 构建全部通过。
+2. 完整 Python 测试、Bun 测试、CLI smoke、前端 clean build/专项测试、版本与 package contract、RC ZIP 构建全部通过（含 Ruff lint）。
 3. RC ZIP 使用单一插件根目录，包含运行源码、OpenCode Plugin、配置示例和必要文档，不包含 `.git`、`.env`、auth/secrets、缓存、`node_modules` 或临时文件。
 4. AstrBot WebUI 手动安装、Bot Endpoint 验证和 Desktop 端到端 smoke 必须按实际执行结果记录；本 RC 准备阶段不得把它们写成已通过。
 5. 已完成的云端兼容验证必须准确表述为：卸载 v0.3.0 旧包后安装 `v1.0.0-rc.1`，同时保留原数据目录与配置数据。该结果支持卸载重装后的数据兼容性，不支持原位升级、在线更新或市场一键更新结论。
@@ -147,6 +183,7 @@ git push origin v1.0.0
 ```bash
 TARGET_TAG=v1.1.0-rc.1
 uv sync --frozen --group dev
+uv run --frozen ruff check .
 uv run --frozen pytest
 npm ci --prefix frontend
 npm run build --prefix frontend

@@ -4,6 +4,17 @@
 
 ## v1.1.0-rc.1 - 2026-07-23
 
+- #11：Release Workflow 改为 uv 锁定环境与 Ruff lint 门禁：
+  - 将 `actions/setup-python` + pip 迁移到 `astral-sh/setup-uv`（固定 SHA `c771a70e6277c0a99b617c7a806ffedaca235ff9` # v9.0.0），固定 uv 版本 `0.11.12`，Python 3.13，启用 uv cache。
+  - `pyproject.toml` dev dependency group 新增 Ruff；`uv.lock` 同步更新。
+  - 新增 `uv lock --check`、`uv sync --frozen --group dev`、`uv run --frozen ruff check .` 步骤。
+  - `uv run --frozen` 替代裸 `python` 命令运行版本校验、测试、打包。
+  - `workflow_dispatch` 始终为 dry-run：完整执行锁检查、Ruff、前端、测试、版本校验、打包和 artifact 上传，但不调用 `action-gh-release`。
+  - 正式 Release 仅在 `github.event_name == 'push'` 且 ref 为 v tag 时执行。
+  - 不启用 `ruff format --check`，避免全仓格式化噪音。
+  - `requirements.txt` 保留作为运行时依赖声明，Release Workflow 不再使用 pip。
+  - 更新 `docs/release.md` 与 CI 契约测试。
+
 - #24：全局 `min_completion_duration_seconds`（最短完成通知时长）：成功完成的 Webhook 事件耗时长低于阈值时跳过通知，减少短任务噪音。默认 15 秒；设为 0 关闭过滤恢复旧行为。有效范围 0–3600。仅在 `canonical completed` 状态参与过滤；failed、action_required、unknown 不参与；notification_mode 过滤在 duration 之前判断。task_duration_ms 仅来自 Provider 的可靠任务耗时（OMP round.durationMs / startedAt→endedAt 差值，OpenCode payload durationMs），不对外通过 to_dict() 暴露。通过 `admin config min-duration` 命令查询/设置/reset。保存失败时回滚内存值，Server 保持旧值。
 - 修复 OpenCode `timeoutMs=5000` 在服务端渲染/投递约 5 秒以上时触发 retry、造成同一权限通知重复投递的问题：服务端新增按 Envelope 顶层 `id` 的进程内 single-flight 幂等与发送边界追踪；示例 timeout 调整为 15000 毫秒。
 - 冻结多 Provider 通知降噪：新增全局 `notification_mode`，默认 `focused` 只抑制成功完成的 OpenCode `subagent`；`all` 保持全部通知，unknown scope/status fail-open。`actionContentMode` 与该策略正交。

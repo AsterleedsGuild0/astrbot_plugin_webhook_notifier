@@ -12,6 +12,11 @@ from packaging.version import Version
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TAG = "v1.1.0-rc.1"
 
+# ── setup-uv 固定 SHA ────────────────────────────────────────────────────
+# 来自 astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+SETUP_UV_PINNED_SHA = "c771a70e6277c0a99b617c7a806ffedaca235ff9"
+SETUP_UV_PINNED_VERSION = "v9.0.0"
+
 
 def load_package_module():
     spec = importlib.util.spec_from_file_location(
@@ -33,6 +38,10 @@ def read_main_register_version() -> str:
     )
     assert match
     return match.group(1)
+
+
+def workflow_text() -> str:
+    return (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
 
 def test_version_sources_are_pep440_equivalent() -> None:
@@ -57,9 +66,7 @@ def test_release_flags_distinguish_rc_and_stable_versions() -> None:
 
 
 def test_release_workflow_uses_dynamic_release_flags() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = workflow_text()
 
     assert "from packaging.version import Version" in workflow
     assert "prerelease: ${{ steps.release_contract.outputs.prerelease }}" in workflow
@@ -93,3 +100,105 @@ def test_release_notes_extract_only_stable_release_section() -> None:
     assert "首个稳定版公共契约" in notes
     assert "市场安装与更新路径" in notes
     assert "完成 Registry v2" not in notes
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #11 CI 契约测试
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_setup_uv_pinned_sha() -> None:
+    """断言 workflow 使用 astral-sh/setup-uv 且固定 SHA。"""
+    workflow = workflow_text()
+    assert "astral-sh/setup-uv@" in workflow
+    assert SETUP_UV_PINNED_SHA in workflow
+    assert SETUP_UV_PINNED_VERSION in workflow
+
+
+def test_setup_uv_python_313() -> None:
+    """断言 setup-uv 显式配置 Python 3.13。"""
+    workflow = workflow_text()
+    assert 'python-version: "3.13"' in workflow
+
+
+def test_setup_uv_enable_cache() -> None:
+    """断言 setup-uv 启用 uv cache。"""
+    workflow = workflow_text()
+    assert "enable-cache: true" in workflow
+
+
+def test_setup_uv_cache_dependency_glob() -> None:
+    """断言 setup-uv cache-dependency-glob 至少包含 pyproject.toml 和 uv.lock。"""
+    workflow = workflow_text()
+    assert "pyproject.toml" in workflow
+    assert "uv.lock" in workflow
+
+
+def test_uv_lock_check_present() -> None:
+    """断言 workflow 包含 uv lock --check。"""
+    workflow = workflow_text()
+    assert "uv lock --check" in workflow
+
+
+def test_uv_sync_frozen_group_dev() -> None:
+    """断言 workflow 使用 uv sync --frozen --group dev。"""
+    workflow = workflow_text()
+    assert "uv sync --frozen --group dev" in workflow
+
+
+def test_ruff_check_present() -> None:
+    """断言 workflow 包含 ruff check（lint 门禁）。"""
+    workflow = workflow_text()
+    assert "ruff check" in workflow
+
+
+def test_no_pip_install_in_workflow() -> None:
+    """断言 workflow 不再使用 pip install（已迁移到 uv）。"""
+    workflow = workflow_text()
+    assert "pip install" not in workflow
+    assert "setup-python" not in workflow
+
+
+def test_workflow_dispatch_is_dry_run() -> None:
+    """断言 workflow_dispatch 不会调用 action-gh-release（dry-run 条件）。"""
+    workflow = workflow_text()
+    # 更直接的断言：Publish step 有 if 条件
+    publish_step = workflow[workflow.index("Publish GitHub Release") :]
+    assert "if:" in publish_step[:200]
+    assert "github.event_name == 'push'" in publish_step
+    assert "startsWith(github.ref, 'refs/tags/v')" in publish_step
+
+
+def test_tag_push_release_condition() -> None:
+    """断言正式 Release 只在 push v* tag 时执行。"""
+    workflow = workflow_text()
+    publish_step = workflow[workflow.index("Publish GitHub Release") :]
+    assert "if:" in publish_step[:200]
+    assert "github.event_name == 'push'" in publish_step
+    assert "startsWith(github.ref, 'refs/tags/v')" in publish_step
+
+
+def test_artifact_upload_present() -> None:
+    """断言 artifact 上传仍在 release job 中。"""
+    workflow = workflow_text()
+    assert "actions/upload-artifact@v4" in workflow
+    assert "dist/*.zip" in workflow
+
+
+def test_ruff_format_check_not_enabled() -> None:
+    """断言 workflow 不启用 ruff format --check（#11 只引入 lint 门禁）。"""
+    workflow = workflow_text()
+    assert "ruff format" not in workflow
+
+
+def test_setup_uv_version_pinned() -> None:
+    """断言 setup-uv 固定了 uv 版本。"""
+    workflow = workflow_text()
+    assert 'version: "0.11.12"' in workflow
+
+
+def test_workflow_dispatch_tag_input_used() -> None:
+    """断言 workflow_dispatch 声明了 tag 输入。"""
+    workflow = workflow_text()
+    assert "inputs:" in workflow
+    assert "tag:" in workflow

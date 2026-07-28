@@ -13,4 +13,12 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
     "pillow>=12.3.0",
+    "ruff>=0.11.0",
 ]
+
+[tool.ruff.lint]
+# 仅启用 lint 门禁：只检查 fatal 级别问题，不启用 format 门禁。
+# 本 Issue (#11) 只引入 lint 检查，不执行 `ruff format --check` 以避免
+# 全仓格式化噪音。后续可在此追加规则。
+select = ["F"]  # pyflakes fatal-only
+ignore = []

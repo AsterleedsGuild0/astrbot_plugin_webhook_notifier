@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的 Git tag，例如 v0.1.0"
+        description: "要验证的 Git tag，例如 v1.1.0-rc.1；始终为 dry-run，不会创建 tag/Release"
         required: true
         type: string
 
@@ -30,11 +30,15 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
           python-version: "3.13"
-          cache: "pip"
+          version: "0.11.12"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -43,10 +47,14 @@ jobs:
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt packaging pyyaml pytest pytest-asyncio pillow
+      - name: Check lockfile consistency
+        run: uv lock --check
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run Ruff lint check
+        run: uv run --frozen ruff check .
 
       - name: Build plugin page
         run: |
@@ -58,7 +66,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          python - <<'PY'
+          uv run --frozen python - <<'PY'
           from __future__ import annotations
 
           import os
@@ -106,16 +114,16 @@ jobs:
           PY
 
       - name: Run tests
-        run: python -m pytest
+        run: uv run --frozen pytest
 
       - name: Build plugin archive
-        run: python scripts/package_plugin.py
+        run: uv run --frozen python scripts/package_plugin.py
 
       - name: Extract release notes
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          python - <<'PY'
+          uv run --frozen python - <<'PY'
           from __future__ import annotations
 
           import os
@@ -144,10 +152,11 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           body_path: release-notes.md
           files: dist/*.zip
           fail_on_unmatched_files: true
