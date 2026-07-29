@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from datetime import datetime, timezone
 from typing import Any, Callable, NoReturn
 
@@ -37,7 +38,7 @@ from .renderer import (
     validate_image_result,
 )
 from .template_registry import BUILT_IN_ID, ActiveTemplate, TemplateRegistry
-from .sender import DeliveryAttemptTracker, Sender
+from .sender import DeliveryAttemptTracker, DeliveryContext, Sender
 
 DEFAULT_RENDER_OPTIONS: dict[str, Any] = {
     "full_page": True,
@@ -648,11 +649,23 @@ class WebhookServer:
         method_name: str,
         *args: Any,
         tracker: DeliveryAttemptTracker | None,
+        delivery_context: DeliveryContext | None = None,
     ) -> list[dict[str, Any]]:
         method = getattr(self._sender, method_name)
-        if tracker is None:
+        kwargs: dict[str, Any] = {}
+        if tracker is not None:
+            kwargs["delivery_attempt_callback"] = tracker
+        if delivery_context is not None:
+            parameters = inspect.signature(method).parameters.values()
+            if any(
+                parameter.name == "delivery_context"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            ):
+                kwargs["delivery_context"] = delivery_context
+        if not kwargs:
             return await method(*args)
-        return await method(*args, delivery_attempt_callback=tracker)
+        return await method(*args, **kwargs)
 
     def _finish_idempotency_claim(
         self,
@@ -711,6 +724,11 @@ class WebhookServer:
         tracker: DeliveryAttemptTracker | None = None,
     ) -> web.Response:
         """纯文本渲染与发送。"""
+        dc = DeliveryContext(
+            request_id=request_id,
+            provider=event.provider,
+            endpoint_name=endpoint.name,
+        )
         try:
             rendered = render_text_default(event, self._display_context)
         except Exception as exc:
@@ -729,6 +747,7 @@ class WebhookServer:
             endpoint,
             target_alias,
             tracker=tracker,
+            delivery_context=dc,
         )
         return self._build_render_response(
             request_id=request_id,
@@ -812,6 +831,11 @@ class WebhookServer:
                 "action=main_image_only"
             )
 
+        dc = DeliveryContext(
+            request_id=request_id,
+            provider=event.provider,
+            endpoint_name=endpoint.name,
+        )
         try:
             if timeline_image is None:
                 send_results = await self._send_with_attempt_tracker(
@@ -820,6 +844,7 @@ class WebhookServer:
                     endpoint,
                     target_alias,
                     tracker=tracker,
+                    delivery_context=dc,
                 )
             else:
                 send_results = await self._send_with_attempt_tracker(
@@ -828,6 +853,7 @@ class WebhookServer:
                     endpoint,
                     target_alias,
                     tracker=tracker,
+                    delivery_context=dc,
                 )
         except Exception as exc:
             logger.error(
@@ -870,6 +896,7 @@ class WebhookServer:
                         endpoint,
                         target_alias,
                         tracker=tracker,
+                        delivery_context=dc,
                     )
                 except Exception as exc:
                     logger.error(
@@ -1082,12 +1109,18 @@ class WebhookServer:
                 500, "render_failed", "降级文本渲染失败", request_id
             )
 
+        dc = DeliveryContext(
+            request_id=request_id,
+            provider=event.provider,
+            endpoint_name=endpoint.name,
+        )
         send_results = await self._send_with_attempt_tracker(
             "send_text",
             rendered,
             endpoint,
             target_alias,
             tracker=tracker,
+            delivery_context=dc,
         )
 
         return self._build_render_response(

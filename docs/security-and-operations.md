@@ -364,6 +364,18 @@ adapter 实例重建或迁移后，`platform_id` 可能变化。不要通过聊�
 
 ---
 
+## 运行时投递日志
+
+Webhook 投递日志用于服务器本地排障。成功、会话不存在和发送异常会记录适用的 `request_id`、`phase=delivery`、Provider、Endpoint 名称、目标别名、稳定结果与 `elapsed_ms`，以便关联同一次请求的解析、渲染和投递阶段。
+
+意外发送异常会保留经过凭据过滤的异常消息与 traceback，包括本地文件路径、行号、函数名和非敏感诊断文本。凭据过滤失败时使用固定安全摘要，不影响原有发送结果或 Webhook 响应。
+
+运行时过滤器会将 Endpoint Token、Bearer/Token 认证值、API Key、密码、认证 Header、Cookie、URL userinfo 和常见敏感查询参数替换为 `[REDACTED]` 或 `[REDACTED_TOKEN]`。投递日志不会新增原始 Header、Webhook payload、消息正文、完整目标 UMO、任务正文、工具参数、二进制或 Base64 内容。
+
+Endpoint 名称、Provider 和目标别名属于运维定位字段，会原样保留。将服务器日志提交到公开 Issue、工单或聊天前，仍应按下方清单进行二次脱敏。
+
+---
+
 ## 日志与 Issue 脱敏清单
 
 提交日志、截图、Issue、工单或聊天记录前，删除或替换：
