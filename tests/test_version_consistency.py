@@ -81,7 +81,7 @@ def test_changelog_contains_stable_release_section() -> None:
 
 def test_changelog_contains_current_rc_section() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## v1.1.0-rc.1 - 2026-07-23" in changelog
+    assert "## v1.1.0-rc.1 - 2026-07-29" in changelog
     assert "AstrBot WebUI" in changelog
     assert "Desktop" in changelog
 

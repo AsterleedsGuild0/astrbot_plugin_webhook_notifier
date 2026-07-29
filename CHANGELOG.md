@@ -2,7 +2,7 @@
 
 ---
 
-## v1.1.0-rc.1 - 2026-07-23
+## v1.1.0-rc.1 - 2026-07-29
 
 - #11：Release Workflow 改为 uv 锁定环境与 Ruff lint 门禁：
   - 将 `actions/setup-python` + pip 迁移到 `astral-sh/setup-uv`（固定 SHA `c771a70e6277c0a99b617c7a806ffedaca235ff9` # v9.0.0），固定 uv 版本 `0.11.12`，Python 3.13，启用 uv cache。
@@ -10,12 +10,14 @@
   - 新增 `uv lock --check`、`uv sync --frozen --group dev`、`uv run --frozen ruff check .` 步骤。
   - `uv run --frozen` 替代裸 `python` 命令运行版本校验、测试、打包。
   - `workflow_dispatch` 始终为 dry-run：完整执行锁检查、Ruff、前端、测试、版本校验、打包和 artifact 上传，但不调用 `action-gh-release`。
+  - 手动 dry-run checkout 当前触发 ref，候选 tag 仅用于版本契约和 artifact 命名，不要求预先创建 tag。
   - 正式 Release 仅在 `github.event_name == 'push'` 且 ref 为 v tag 时执行。
   - 不启用 `ruff format --check`，避免全仓格式化噪音。
   - `requirements.txt` 保留作为运行时依赖声明，Release Workflow 不再使用 pip。
   - 更新 `docs/release.md` 与 CI 契约测试。
 
 - #24：全局 `min_completion_duration_seconds`（最短完成通知时长）：成功完成的 Webhook 事件耗时长低于阈值时跳过通知，减少短任务噪音。默认 15 秒；设为 0 关闭过滤恢复旧行为。有效范围 0–3600。仅在 `canonical completed` 状态参与过滤；failed、action_required、unknown 不参与；notification_mode 过滤在 duration 之前判断。task_duration_ms 仅来自 Provider 的可靠任务耗时（OMP round.durationMs / startedAt→endedAt 差值，OpenCode payload durationMs），不对外通过 to_dict() 暴露。通过 `admin config min-duration` 命令查询/设置/reset。保存失败时回滚内存值，Server 保持旧值。
+- #13：完善 Webhook 投递日志上下文与凭据过滤：成功、session 不存在和发送异常日志可关联 `request_id`、Provider、Endpoint、目标别名、投递阶段和耗时；意外异常保留经过凭据过滤的完整 traceback。过滤 Endpoint Token、Bearer/Token 认证值、Authorization/Cookie、API key/password/secret、URL userinfo 和敏感查询参数，不新增 payload、Header、消息正文或完整目标 UMO 日志；不引入聊天诊断、错误缓冲或 debug 模式。
 - 修复 OpenCode `timeoutMs=5000` 在服务端渲染/投递约 5 秒以上时触发 retry、造成同一权限通知重复投递的问题：服务端新增按 Envelope 顶层 `id` 的进程内 single-flight 幂等与发送边界追踪；示例 timeout 调整为 15000 毫秒。
 - 冻结多 Provider 通知降噪：新增全局 `notification_mode`，默认 `focused` 只抑制成功完成的 OpenCode `subagent`；`all` 保持全部通知，unknown scope/status fail-open。`actionContentMode` 与该策略正交。
 - OpenCode root `session_idle` 可选携带 `subagentTimeline`：记录相对 root busy→idle cycle 的匿名子任务图、时间质量、部分/截断状态与有界计数；不新增配置项，也不在其他 event 或 scope 携带。
@@ -26,7 +28,7 @@
 - #19：增加 OpenCode Server Adapter，接收 V1 envelope，覆盖 `session_idle`、`session_error` 与 `permission_asked` 三类事件。
 - #20：增加 OpenCode V1 Client Plugin，使用正确的 `default { id, server }` 与 `plugin` tuple，支持 env/file URL/Token 配置、状态机、timeout 和有限 retry。
 - #21：收紧 OpenCode 字段白名单与隐私边界，匿名化 session ref、清洗 name fallback，并补齐 Bun/Python 契约测试、隔离 CLI Plugin Service smoke、Desktop 安全 SKIP 与中文集成文档。
-- 本 RC 的本地验证覆盖 Python 829、Bun 221 和 OpenCode 1.18.4 CLI smoke；这不等同于已通过 RC ZIP 的 AstrBot WebUI 安装、Bot Endpoint 实际验证或 Desktop 端到端 smoke。
+- 本 RC 的发布前本地验证覆盖 Python 1018、Bun 221 和 OpenCode 1.18.4 CLI smoke；这不等同于已通过 RC ZIP 的 AstrBot WebUI 安装、Bot Endpoint 实际验证或 Desktop 端到端 smoke。
 - 使用本 RC ZIP 的 AstrBot WebUI 手动安装、Bot Endpoint 验证和 Desktop 端到端 smoke 尚待本 RC 包验证，不能据此宣称已通过或已发布 `v1.1.0`。
 
 ---
