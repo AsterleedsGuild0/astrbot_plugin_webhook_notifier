@@ -83,7 +83,17 @@ OpenCode 配置顶层的 `plugin` 必须是 tuple 数组。每一项是：
 
 `actionContentMode` 可选 `strict`（默认，仅类别/计数）、`summary`（清洗截断摘要）和 `full`（显式白名单内容）。`full` 是显式 opt-in，可能泄露业务文本或目标路径。
 
-`metadataDiagnostics` 可选 `off`（默认）、`once` 或 `sample`；非法值按 `off` 处理。启用 `once` 后，Plugin 进程生命周期内每个诊断阶段最多输出一条带统一前缀的单行安全 JSON；`sample` 每个阶段最多输出 8 条，对完全相同的安全 payload 去重，超过上限后静默停止。阶段包括 `message_updated`、`session_get`、实际调用的 `session_messages` 和最终 `outgoing_envelope`。`sample` 还会为有 session ID 的诊断分配仅存于内存的递增 `sampleSession`，同一匿名 session 在各阶段复用该数字，不输出 raw ID、匿名 ref/hash 或 message/parent ID。诊断只记录 bounded key 名、短字符串、存在性/长度、枚举状态和布尔值，不记录标题/名称正文、parent ID 值、消息正文、parts、路径、Token、URL、headers、response body 或异常 message。默认关闭时不增加诊断日志。
+`metadataDiagnostics` 可选 `off`（默认）、`once`、`sample` 或 `anomaly`；非法值按 `off` 处理。
+
+- **`once`**：Plugin 进程生命周期内每个诊断阶段最多输出一条带统一前缀的单行安全 JSON；
+- **`sample`**：每阶段最多 8 条，对完全相同的安全 payload 去重，超过上限后静默停止；
+- **`anomaly`**：全天低概率取证模式，专门用于捕获 OpenCode Desktop 内部 session 被判为 root/unknown 并产生 fallback 卡片的问题。每阶段最多 32 条候选，按同一匿名 session + 相同安全 payload 去重。与 `sample` 一样为有 session ID 的诊断分配匿名递增 `sampleSession`，便于跨阶段（如 `session_get` 与 `outgoing_envelope`）关联。`anomaly` 不增加任何 `session.get` / `session.messages` / HTTP 调用，只观测既有链路：
+  - `session_get`：仅记录 response invalid/缺失 data、parentIDState 为 empty/invalid，或 parentIDState 为 missing/null 且 title 不存在（此组合可能产生合法的 root fallback）。
+  - `outgoing_envelope`：仅记录 `sessionScope=unknown`，或 `sessionScope=root` 且 session name 为插件生成的严格 fallback 形式 `OpenCode Session <12位小写十六进制>`（附带安全布尔 `sessionNameFallback` 明确标识）。该名称判断仅为诊断信号，绝不参与通知过滤或改变通知行为。
+  - `message_updated` 不在 `anomaly` 模式产生日志；`session_messages` 不在 `anomaly` 模式产生日志。
+- **建议**：`anomaly` 适合短期（如一个完整工作日）低概率取证，采集到 root/unknown fallback 信号后应立即将配置恢复为 `off`。不在正常使用或调试中长期启用。
+
+各阶段的共同隐私规则：诊断只记录 bounded key 名、短字符串、存在性/长度、枚举状态和布尔值，不记录标题/名称正文、parent ID 值、消息正文、parts、路径、Token、URL、headers、response body 或异常 message。默认关闭时不增加诊断日志。
 
 `actionContentMode` 与服务端全局 `notification_mode` 正交：前者只控制 Question/Permission 内容隐私，后者控制是否进入通知渲染/发送链路。服务端 `notification_mode=focused` 只抑制标准状态为 `completed` 的 `subagent` 与 `auxiliary`，`failed`、`action_required`、root、unknown 和未来未知状态均放行；`all` 保持全部通知。
 

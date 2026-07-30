@@ -37,7 +37,7 @@ interface RawPluginOptions {
 }
 
 type ActionContentMode = "strict" | "summary" | "full";
-type MetadataDiagnostics = "off" | "once" | "sample";
+type MetadataDiagnostics = "off" | "once" | "sample" | "anomaly";
 
 /** Resolved, validated configuration (no {env} / {file} placeholders). */
 interface ResolvedConfig {
@@ -282,6 +282,8 @@ interface MetadataDiagnosticContext {
   mode: MetadataDiagnostics;
   log: DiagnosticLog;
   sampleSession?: number;
+  /** Anonymous session ref for anomaly-mode dedup; never written to diagnostic output. */
+  sessionRef?: string;
 }
 
 // ─── Constants ──────────────────────────────────────────────
@@ -327,8 +329,10 @@ const MAX_METADATA_DIAGNOSTIC_LENGTH = 4096;
 const MAX_METADATA_DIAGNOSTIC_ITEMS = 10;
 const MAX_METADATA_DIAGNOSTIC_MODEL_KEYS = 24;
 const MAX_METADATA_DIAGNOSTIC_SAMPLES_PER_PHASE = 8;
+const MAX_METADATA_DIAGNOSTIC_ANOMALIES_PER_PHASE = 32;
 const MAX_METADATA_SAMPLE_SESSIONS = 1000;
 const RETAIN_METADATA_SAMPLE_SESSIONS = 500;
+const FALLBACK_SESSION_NAME_RE = /^OpenCode Session [0-9a-f]{12}$/;
 const MAX_METADATA_DIAGNOSTIC_NUMBER = 1_000_000;
 const ACTION_DEBOUNCE_MS = 150;
 const MAX_ACTION_BUCKETS = 1000;
@@ -353,6 +357,8 @@ interface MetadataSampleSessionState {
 }
 
 const _metadataDiagnosticSamples = new Map<MetadataDiagnosticPhase, MetadataDiagnosticSampleState>();
+const _metadataDiagnosticAnomalyCounts = new Map<MetadataDiagnosticPhase, number>();
+const _metadataDiagnosticAnomalySeen = new Set<string>();
 const _metadataSampleSessions = new Map<string, MetadataSampleSessionState>();
 let _nextMetadataSampleSession = 1;
 
@@ -360,6 +366,8 @@ let _nextMetadataSampleSession = 1;
 function _resetMetadataDiagnostics(): void {
   _metadataDiagnosticPhases.clear();
   _metadataDiagnosticSamples.clear();
+  _metadataDiagnosticAnomalyCounts.clear();
+  _metadataDiagnosticAnomalySeen.clear();
   _metadataSampleSessions.clear();
   _nextMetadataSampleSession = 1;
 }
@@ -1585,16 +1593,16 @@ function _metadataDiagnosticContextForSessionRef(
   context: MetadataDiagnosticContext | undefined,
   sessionRef: string | undefined,
 ): MetadataDiagnosticContext | undefined {
-  if (!context || context.mode !== "sample" || !sessionRef) return context;
+  if (!context || (context.mode !== "sample" && context.mode !== "anomaly") || !sessionRef) return context;
   const existing = _metadataSampleSessions.get(sessionRef);
   if (existing) {
     _metadataSampleSessions.delete(sessionRef);
     _metadataSampleSessions.set(sessionRef, existing);
-    return { ...context, sampleSession: existing.sampleSession };
+    return { ...context, sampleSession: existing.sampleSession, sessionRef };
   }
   const created: MetadataSampleSessionState = { sampleSession: _nextMetadataSampleSession++ };
   _metadataSampleSessions.set(sessionRef, created);
-  return { ...context, sampleSession: created.sampleSession };
+  return { ...context, sampleSession: created.sampleSession, sessionRef };
 }
 
 function _cleanupMetadataSampleSessions(): void {
@@ -1621,6 +1629,14 @@ function _emitMetadataDiagnostic(
     if (context.mode === "once") {
       if (_metadataDiagnosticPhases.has(phase)) return;
       _metadataDiagnosticPhases.add(phase);
+    } else if (context.mode === "anomaly") {
+      const sessionRef = context.sessionRef ?? "";
+      const dedupKey = `${phase}:${sessionRef}:${payloadJSON}`;
+      if (_metadataDiagnosticAnomalySeen.has(dedupKey)) return;
+      const currentCount = _metadataDiagnosticAnomalyCounts.get(phase) ?? 0;
+      if (currentCount >= MAX_METADATA_DIAGNOSTIC_ANOMALIES_PER_PHASE) return;
+      _metadataDiagnosticAnomalyCounts.set(phase, currentCount + 1);
+      _metadataDiagnosticAnomalySeen.add(dedupKey);
     } else {
       let sample = _metadataDiagnosticSamples.get(phase);
       if (!sample) {
@@ -1642,6 +1658,7 @@ function _diagnoseAssistantMessage(
   info: Record<string, unknown>,
   context: MetadataDiagnosticContext | undefined,
 ): void {
+  if (context?.mode === "anomaly") return; // anomaly does not log ordinary message_updated
   if (info.role !== "assistant") return;
   _emitMetadataDiagnostic(context, "message_updated", () => {
     const fields: Record<string, unknown> = {
@@ -1735,6 +1752,18 @@ function _diagnoseSessionGet(
   response: SessionDiagnosticResponse,
   context: MetadataDiagnosticContext | undefined,
 ): void {
+  if (context?.mode === "anomaly") {
+    // Anomaly only records: response invalid, parentIDState empty/invalid,
+    // or parentIDState missing/null with no title (possible legitimate root fallback).
+    const data = response.data;
+    const title = data?.title;
+    const titlePresent = typeof title === "string" && title.length > 0;
+    const pidState = _metadataParentIDState(data);
+    const isCandidate = response.responseShape === "invalid"
+      || pidState === "empty" || pidState === "invalid"
+      || ((pidState === "missing" || pidState === "null") && !titlePresent);
+    if (!isCandidate) return;
+  }
   _emitMetadataDiagnostic(context, "session_get", () => {
     const data = response.data;
     const title = data?.title;
@@ -1792,6 +1821,7 @@ function _diagnoseSessionMessages(
   response: MessagesDiagnosticResponse,
   context: MetadataDiagnosticContext | undefined,
 ): void {
+  if (context?.mode === "anomaly") return; // anomaly does not log session_messages
   _emitMetadataDiagnostic(context, "session_messages", () => {
     const items = response.items?.slice(0, MAX_METADATA_DIAGNOSTIC_ITEMS) ?? [];
     let assistantInfo: Record<string, unknown> | undefined;
@@ -1828,10 +1858,19 @@ function _diagnoseOutgoingEnvelope(
   envelope: Envelope,
   context: MetadataDiagnosticContext | undefined,
 ): void {
+  if (context?.mode === "anomaly") {
+    // Anomaly only records: sessionScope unknown, or root with fallback name.
+    const scope = envelope.session.scope;
+    const name = envelope.session.name;
+    const isFallbackName = typeof name === "string" && FALLBACK_SESSION_NAME_RE.test(name);
+    const isCandidate = scope === "unknown" || (scope === "root" && isFallbackName);
+    if (!isCandidate) return;
+  }
   _emitMetadataDiagnostic(context, "outgoing_envelope", () => {
     const sessionName = envelope.session.name;
     const agent = _safeMetadataDiagnosticString(envelope.agent);
     const model = _safeMetadataDiagnosticString(envelope.model);
+    const isFallbackName = typeof sessionName === "string" && FALLBACK_SESSION_NAME_RE.test(sessionName);
     const fields: Record<string, unknown> = {
       event: envelope.event,
       sessionNamePresent: typeof sessionName === "string" && sessionName.length > 0,
@@ -1845,6 +1884,7 @@ function _diagnoseOutgoingEnvelope(
       permissionPresent: envelope.permission !== undefined,
       errorPresent: envelope.error !== undefined,
     };
+    if (isFallbackName) fields.sessionNameFallback = true;
     if (agent) fields.agent = agent;
     if (model) fields.model = model;
     return fields;
@@ -2624,7 +2664,7 @@ function _resolveConfig(raw: RawPluginOptions | undefined, log: DiagnosticLog): 
       : "strict";
 
   const metadataDiagnostics: MetadataDiagnostics =
-    raw.metadataDiagnostics === "once" || raw.metadataDiagnostics === "sample"
+    raw.metadataDiagnostics === "once" || raw.metadataDiagnostics === "sample" || raw.metadataDiagnostics === "anomaly"
       ? raw.metadataDiagnostics
       : "off";
 
@@ -3956,6 +3996,7 @@ export type {
   AssistantMetadata,
   CategoryInfo,
   DiagnosticLog,
+  MetadataDiagnosticContext,
   Hooks,
   PluginModule,
   PluginInput,
@@ -3996,6 +4037,9 @@ export {
   _consumeAssistantMetadata,
   _resetMetadataDiagnostics,
   _metadataDiagnosticSamples,
+  _metadataDiagnosticAnomalyCounts,
+  _metadataDiagnosticAnomalySeen,
+  _diagnoseOutgoingEnvelope,
   _metadataSampleSessions,
   _assistantMetadata,
   _timelineRuns,

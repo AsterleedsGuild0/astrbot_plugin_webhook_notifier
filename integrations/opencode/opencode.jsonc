@@ -49,9 +49,12 @@
         // "actionContentMode": "full"
         "actionContentMode": "strict",
 
-        // 可选：运行时元数据诊断：off（默认）、once 或 sample
+        // 可选：运行时元数据诊断：off（默认）、once、sample 或 anomaly
         // once：每阶段每进程最多一条；sample：每阶段最多 8 条并去重
-        // "metadataDiagnostics": "sample"
+        // anomaly：全天低概率取证模式，每阶段最多 32 条，匿名关联 session 事件，
+        // 仅记录可能导致 root/unknown fallback 卡片的候选信号；
+        // 识别后应立即恢复为 off，不长期启用。
+        // "metadataDiagnostics": "anomaly"
         "metadataDiagnostics": "off"
       }
     ]
