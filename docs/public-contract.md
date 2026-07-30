@@ -2,13 +2,13 @@
 
 ## 文档状态
 
-- 稳定版本：`v1.0.0`
+- 稳定版本：`v1.1.0`
 - 状态：Final / 1.x 稳定公共契约
-- 定稿日期：2026-07-21
-- 远端发布状态：`v1.0.0` Git tag、GitHub Release 与正式 ZIP 已发布
-- 当前源码候选：`v1.1.0-rc.1`，尚未发布
+- 定稿日期：2026-07-30
+- 远端发布状态：以 GitHub Releases 页面为准；本文档定义源码公共契约，不作为 tag、Release 或正式 ZIP 是否已创建的动态状态证明
+- 当前源码版本：`v1.1.0`
 
-`v1.0.0` 是现有稳定版。当前源码包含尚未发布的 `v1.1.0-rc.1` 候选功能；OpenCode 集成、Provider Registry/DI 与相关 smoke 应使用该候选或后续版本，不应回溯描述为 `v1.0.0` 已发布能力。AstrBot WebUI 安装、Bot Endpoint 和 Desktop 端到端 smoke 的 RC 包验证仍须按实际执行结果单独留证。
+`v1.1.0` 是当前稳定版。正式资产可用后，OpenCode 集成、Provider Registry/DI 与相关 smoke 应使用 `v1.1.0` 稳定资产，不应回溯描述为 `v1.0.0` 已发布能力。AstrBot WebUI 安装、Bot Endpoint 和 Desktop 端到端 smoke 的正式版包验证仍须按实际执行结果单独留证。
 
 ---
 
@@ -25,9 +25,9 @@
 
 ---
 
-## v1.1.0-rc.1 候选新增范围
+## v1.1.0 新增范围
 
-以下是当前源码候选新增、尚未进入已发布 `v1.0.0` 资产的范围：
+以下能力经 `v1.1.0-rc.1` 候选阶段验证后纳入 `v1.1.0` 稳定公共契约：
 
 - #18：Provider Adapter / Registry 与依赖注入边界，`omp` / `opencode` provider 选择及 Endpoint provider 不可变。
 - #19：OpenCode Server Adapter 与四类 V1 envelope。
@@ -47,7 +47,7 @@
 
 聚合 bucket 只存在客户端进程内存，raw session ID 仅作本地 key；request ID 仅用于去重/撤销，不出站。`strict` 的 Permission item 仅允许 `category`，不会发送正文；`summary`/`full` 仍按 allowlist 和上限处理。
 
-这些候选能力在 RC 包完成 AstrBot WebUI 手动安装、Bot Endpoint 和 Desktop 端到端 smoke 前，不得写成已验证发布能力。
+这些能力的 RC 与正式版验证证据应按实际执行结果分别记录；不得将源码契约、RC 验收、正式资产验证或插件市场安装/更新验证相互替代。
 
 ---
 

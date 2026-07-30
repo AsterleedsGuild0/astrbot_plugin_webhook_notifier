@@ -10,7 +10,7 @@ from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_TAG = "v1.1.0-rc.1"
+EXPECTED_TAG = "v1.1.0"
 
 # ── setup-uv 固定 SHA ────────────────────────────────────────────────────
 # 来自 astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
@@ -62,6 +62,7 @@ def test_release_flags_distinguish_rc_and_stable_versions() -> None:
 
     assert package_plugin.release_flags("v1.0.0-rc.1") == (True, False)
     assert package_plugin.release_flags("v1.1.0-rc.1") == (True, False)
+    assert package_plugin.release_flags("v1.1.0") == (False, True)
     assert package_plugin.release_flags("v1.0.0") == (False, True)
 
 
@@ -77,6 +78,7 @@ def test_release_workflow_uses_dynamic_release_flags() -> None:
 def test_changelog_contains_stable_release_section() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "## v1.0.0 - 2026-07-21" in changelog
+    assert "## v1.1.0 - 2026-07-30" in changelog
 
 
 def test_changelog_contains_current_rc_section() -> None:
@@ -86,20 +88,38 @@ def test_changelog_contains_current_rc_section() -> None:
     assert "Desktop" in changelog
 
 
-def test_release_notes_extract_only_stable_release_section() -> None:
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+def _extract_release_notes(changelog: str, tag: str) -> str:
     pattern = re.compile(
-        rf"^##\s+{re.escape('v1.0.0')}(?:\s+-\s+[^\n]+)?\n"
+        rf"^##\s+{re.escape(tag)}(?:\s+-\s+[^\n]+)?\n"
         r"(?P<body>.*?)(?=\n---\n\n##\s+|\n##\s+v|\Z)",
         re.MULTILINE | re.DOTALL,
     )
-
     match = pattern.search(changelog)
-    assert match
-    notes = match.group("body")
+    assert match, f"Cannot find {tag} section in CHANGELOG.md"
+    return match.group("body")
+
+
+def test_release_notes_extract_only_stable_release_section() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    notes = _extract_release_notes(changelog, "v1.0.0")
     assert "首个稳定版公共契约" in notes
     assert "市场安装与更新路径" in notes
     assert "完成 Registry v2" not in notes
+
+
+def test_v110_release_notes_extract_without_rc_content() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    notes = _extract_release_notes(changelog, "v1.1.0")
+    assert "定稿为 v1.1.0" in notes
+    assert "prerelease=false" in notes
+    assert "make_latest=true" in notes
+    assert "AstrBot v4.26.7" in notes
+    assert "1018 Python tests" in notes
+    # Must not contain RC chapter content or RC-only phrases
+    assert "AstrBot WebUI" not in notes
+    assert "Desktop" not in notes
 
 
 # ══════════════════════════════════════════════════════════════════════════

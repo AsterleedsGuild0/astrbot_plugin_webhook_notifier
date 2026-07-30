@@ -2,6 +2,18 @@
 
 ---
 
+## v1.1.0 - 2026-07-30
+
+- 将 v1.1.0-rc.1 已验证范围定稿为 v1.1.0，不新增业务功能。
+- RC 验证范围：
+  - uv/Ruff Release CI、1018 Python tests、前端构建、正式 RC ZIP 契约均已通过。
+  - 用户已将本地 rc-smoke 测试包部署到 AstrBot v4.26.7，最近 60 分钟约 45 个 request_id、13 次实际投递全部 message_sent；session_not_found、send_failed、4xx/5xx、重复投递均为 0。
+  - 新增 delivery 日志字段在线生效，未发现凭据、payload、正文或完整 UMO 泄露。
+- 稳定版发布前完整门禁通过 1019 项 Python 测试、全仓 Ruff、前端构建与 `v1.1.0` ZIP 三源版本校验。
+- `v1.1.0` 作为稳定版，Release workflow 应计算 `prerelease=false`、`make_latest=true`。
+
+---
+
 ## v1.1.0-rc.1 - 2026-07-29
 
 - #11：Release Workflow 改为 uv 锁定环境与 Ruff lint 门禁：

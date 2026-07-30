@@ -1,19 +1,19 @@
 # 发布流程
 
-本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。`v1.0.0` 是现有稳定版；当前源码准备的是尚未发布的 `v1.1.0-rc.1` 候选。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
+本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。`v1.1.0` 是当前稳定版。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
 
-通知降噪候选发布还必须遵循兼容部署顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `session.scope`。
+`v1.1.0` 发布与部署必须遵循兼容顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `session.scope`。
 
 ---
 
 ## 发布前检查
 
 1. 确认目标版本号一致：
-   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本，例如本 RC 的 `v1.1.0-rc.1`。
-   - `pyproject.toml` 使用规范 PEP 440 版本，例如本 RC 的 `1.1.0rc1`。
+   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮稳定版为 `v1.1.0`。
+   - `pyproject.toml` 使用规范 PEP 440 版本；本轮稳定版为 `1.1.0`。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
-   - `CHANGELOG.md` 顶部存在对应版本小节；本 RC 应为 `## v1.1.0-rc.1 - 2026-07-23`。
-   - 本地 RC 准备不创建 `v1.1.0-rc.1` tag，也不创建或更新远端 Release。
+   - `CHANGELOG.md` 顶部存在对应版本小节；本轮应为 `## v1.1.0 - 2026-07-30`。
+   - 本地准备与 dry-run 不创建 `v1.1.0` tag，也不创建或更新远端 Release。
 2. 维护本地锁定验证依赖：
 
    - `uv.lock` 必须随 `pyproject.toml` 的依赖声明一起维护并纳入提交。
@@ -172,7 +172,7 @@ git push origin v1.0.0
 4. 正式版发布并在 AstrBot 插件市场上架后，验证市场搜索安装、从已安装版本触发的一键更新/在线更新，以及更新后的数据与配置行为。
 5. 市场更新验证完成前，文档和发布说明不得声称该路径已通过；若市场机制实际采用重装，也应按观察到的真实行为记录，不推断为原位升级。
 
-市场更新验证属于发布后检查；`v1.1.0` 是否成为稳定版以及市场安装/更新路径，必须在后续授权发布后单独留证。
+市场更新验证属于发布后检查；`v1.1.0` 的 tag、Release、正式 ZIP 以及市场安装/更新路径必须按实际结果分别留证。
 
 ---
 
@@ -181,7 +181,7 @@ git push origin v1.0.0
 如果 Actions 不可用，且已经获得明确的远端发布授权，可以使用 GitHub CLI 手动发布目标版本。以下仅为流程示意，本轮不执行：
 
 ```bash
-TARGET_TAG=v1.1.0-rc.1
+TARGET_TAG=v1.1.0
 uv sync --frozen --group dev
 uv run --frozen ruff check .
 uv run --frozen pytest
