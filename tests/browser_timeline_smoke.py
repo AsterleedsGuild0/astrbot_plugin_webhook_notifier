@@ -144,6 +144,8 @@ async def _capture_with_cdp(
               const body = document.body;
               const root = document.documentElement;
               const card = document.querySelector('.card');
+              const overview = document.querySelector('.overview');
+              const metrics = [...document.querySelectorAll('.metric')];
               const timeline = document.querySelector('.timeline');
               const axis = document.querySelector('.axis');
               const axisTrack = document.querySelector('.axis-track');
@@ -162,6 +164,19 @@ async def _capture_with_cdp(
                   clientHeight: body.clientHeight
                 },
                 card: rect(card),
+                overview: rect(overview),
+                metrics: metrics.map((metric) => {
+                  const label = metric.querySelector('.metric-label');
+                  const value = metric.querySelector('.metric-value');
+                  return {
+                    metric: rect(metric), label: label.textContent,
+                    value: value.textContent,
+                    scrollWidth: metric.scrollWidth,
+                    clientWidth: metric.clientWidth,
+                    labelScrollWidth: label.scrollWidth,
+                    labelClientWidth: label.clientWidth
+                  };
+                }),
                 timeline: rect(timeline),
                 styles: {
                   body: visualStyle(body),

@@ -729,6 +729,25 @@ class TestOpenCodeFormatting:
 
 
 class TestSubagentTimelineContract:
+    def test_root_cycle_duration_and_timeline_round_trip_together(self):
+        timeline = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [_timeline_item()],
+        }
+        payload = _timeline_payload(timeline)
+        payload["durationMs"] = 15000
+
+        event = _parse_timeline(payload)
+
+        assert event.task_duration_ms == 15000
+        assert event.subagent_timeline == timeline
+
     def test_direct_nested_partial_and_truncated_round_trip(self):
         timelines = [
             {

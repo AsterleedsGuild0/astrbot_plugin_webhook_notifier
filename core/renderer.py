@@ -662,7 +662,8 @@ DEFAULT_HTML_TEMPLATE = """\
     }
 
     .subagent-complex {
-      display: table;
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       width: calc(100% - 28px);
       margin: 12px 14px 14px;
       overflow: hidden;
@@ -672,14 +673,21 @@ DEFAULT_HTML_TEMPLATE = """\
     }
 
     .subagent-metric {
-      display: table-cell;
-      width: 33.333%;
+      grid-column: span 2;
+      min-width: 0;
       padding: 11px 8px;
       border-left: 1px solid rgba(60, 60, 67, 0.12);
       text-align: center;
     }
 
-    .subagent-metric:first-child {
+    .subagent-metric:nth-child(4),
+    .subagent-metric:nth-child(5) {
+      grid-column: span 3;
+      border-top: 1px solid rgba(60, 60, 67, 0.12);
+    }
+
+    .subagent-metric:first-child,
+    .subagent-metric:nth-child(4) {
       border-left: 0;
     }
 
@@ -697,6 +705,7 @@ DEFAULT_HTML_TEMPLATE = """\
       color: #8a8a8e;
       font-size: 12px;
       line-height: 1.3;
+      overflow-wrap: anywhere;
     }
 
     .meta {
@@ -951,7 +960,8 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     h1 { margin: 0; font-size: 31px; line-height: 1.18; letter-spacing: -.025em; }
     .subtitle { margin-top: 8px; color: #6e6e73; font-size: 16px; line-height: 1.45; }
     .overview {
-      display: table;
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       width: 100%;
       margin-top: 16px;
       overflow: hidden;
@@ -960,15 +970,19 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       background: rgba(245,245,247,.54);
     }
     .metric {
-      display: table-cell;
-      width: 33.333%;
+      grid-column: span 2;
+      min-width: 0;
       padding: 11px 8px;
       border-left: 1px solid rgba(60,60,67,.12);
       text-align: center;
     }
-    .metric:first-child { border-left: 0; }
+    .metric:nth-child(4), .metric:nth-child(5) {
+      grid-column: span 3;
+      border-top: 1px solid rgba(60,60,67,.12);
+    }
+    .metric:first-child, .metric:nth-child(4) { border-left: 0; }
     .metric-value { display: block; font-size: 18px; font-weight: 780; }
-    .metric-label { display: block; margin-top: 3px; color: #8a8a8e; font-size: 12px; }
+    .metric-label { display: block; margin-top: 3px; color: #8a8a8e; font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; }
     .flags { margin-top: 10px; }
     .flag { margin: 0 6px 4px 0; padding: 3px 8px; color: #6e6e73; font-size: 12px; font-weight: 700; }
     .section-label { margin: 20px 0 8px; color: #8a8a8e; font-size: 13px; font-weight: 750; letter-spacing: .12em; }
@@ -1296,6 +1310,57 @@ def _timeline_peak_concurrency(intervals: list[tuple[float, float]]) -> int:
     return peak
 
 
+def _timeline_coverage_union_ms(
+    intervals: list[tuple[float, float]], total_duration_ms: Any
+) -> float | None:
+    """Return the clipped union of complete, reliable subagent intervals."""
+
+    if not _is_finite_timeline_number(total_duration_ms):
+        return None
+    total_duration = float(total_duration_ms)
+    clipped: list[tuple[float, float]] = []
+    for start, end in intervals:
+        if (
+            not _is_finite_timeline_number(start)
+            or not _is_finite_timeline_number(end)
+            or end < start
+        ):
+            continue
+        clipped_start = min(total_duration, max(0.0, float(start)))
+        clipped_end = min(total_duration, max(0.0, float(end)))
+        if clipped_end > clipped_start:
+            clipped.append((clipped_start, clipped_end))
+    if not clipped:
+        return 0.0
+
+    union_ms = 0.0
+    clipped.sort()
+    current_start, current_end = clipped[0]
+    for start, end in clipped[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        union_ms += current_end - current_start
+        current_start, current_end = start, end
+    union_ms += current_end - current_start
+    return min(total_duration, max(0.0, union_ms))
+
+
+def _format_timeline_percentage(value: float) -> str:
+    bounded = min(100.0, max(0.0, value))
+    rounded = round(bounded, 1)
+    text = str(int(rounded)) if rounded.is_integer() else f"{rounded:.1f}"
+    return f"{text}%"
+
+
+def _timeline_coverage_rate(
+    coverage_union_ms: float | None, total_duration_ms: float | None
+) -> float | None:
+    if coverage_union_ms is None or total_duration_ms is None or total_duration_ms <= 0:
+        return None
+    return min(100.0, max(0.0, coverage_union_ms / total_duration_ms * 100))
+
+
 def _timeline_overlap_data(
     intervals: list[tuple[int, float, float]],
 ) -> tuple[set[int], int]:
@@ -1489,7 +1554,7 @@ def _build_subagent_timeline_layout(
         else:
             unlocated_height += estimated_row_height
 
-    vertical_chrome_height = 470 + int(density_view["axis_height"])
+    vertical_chrome_height = 620 + int(density_view["axis_height"])
     estimated_height = vertical_chrome_height + located_height
     if unlocated_height:
         estimated_height += 60 + unlocated_height
@@ -1828,11 +1893,17 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         [(start, end) for _, start, end in all_intervals]
     )
     reliable_peak = _timeline_peak_concurrency(reliable_intervals)
-    reliable_span_ms = None
-    if reliable_intervals:
-        reliable_span_ms = max(end for _, end in reliable_intervals) - min(
-            start for start, _ in reliable_intervals
-        )
+    raw_total_duration_ms = event.task_duration_ms
+    total_duration_ms = (
+        float(raw_total_duration_ms)
+        if raw_total_duration_ms is not None
+        and _is_finite_timeline_number(raw_total_duration_ms)
+        else None
+    )
+    coverage_union_ms = _timeline_coverage_union_ms(
+        reliable_intervals, total_duration_ms
+    )
+    coverage_rate = _timeline_coverage_rate(coverage_union_ms, total_duration_ms)
 
     complexity_score = max(0, item_count - SUBAGENT_TIMELINE_SIMPLE_BASE_ITEMS)
     complexity_score += 2 * max(0, max_depth - SUBAGENT_TIMELINE_SIMPLE_MAX_DEPTH)
@@ -1981,16 +2052,46 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     if status_parts:
         summary_text += " · " + " · ".join(status_parts)
 
-    observation_limited = partial or truncated
+    observation_limited = (
+        partial
+        or truncated
+        or observed_count > item_count
+        or len(reliable_intervals) < item_count
+    )
     peak_metric_label = "已观测峰值并发" if observation_limited else "峰值并发"
-    span_metric_label = "已观测跨度" if observation_limited else "总跨度"
+    coverage_duration_label = (
+        "已观测子任务覆盖时长" if observation_limited else "子任务覆盖时长"
+    )
+    coverage_rate_label = (
+        "已观测子任务覆盖率" if observation_limited else "子任务覆盖率"
+    )
     timing_parts: list[str] = []
     if reliable_peak:
         timing_parts.append(f"{peak_metric_label} {reliable_peak}")
-    if reliable_span_ms is not None:
-        timing_parts.append(
-            f"{span_metric_label} {format_duration_ms(reliable_span_ms)}"
+    timing_parts.append(
+        "总任务时长 "
+        + (
+            format_duration_ms(total_duration_ms)
+            if total_duration_ms is not None
+            else "不可用"
         )
+    )
+    timing_parts.append(
+        f"{coverage_duration_label} "
+        + (
+            format_duration_ms(coverage_union_ms)
+            if coverage_union_ms is not None
+            else "不可用"
+        )
+    )
+    timing_parts.append(
+        f"{coverage_rate_label} "
+        + (
+            _format_timeline_percentage(coverage_rate)
+            if coverage_rate is not None
+            else "不可用"
+        )
+    )
     timing_summary = " · ".join(timing_parts)
 
     flags: list[str] = []
@@ -2016,20 +2117,29 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
 
     main_items = item_views[:SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT]
     main_hidden_count = max(0, observed_count - len(main_items))
-    reliable_span_label = (
-        format_duration_ms(reliable_span_ms)
-        if isinstance(reliable_span_ms, (int, float))
-        else "不可用"
-    )
     metrics = [
-        {"value": str(observed_count), "label": "子任务"},
+        {"value": str(observed_count), "label": "子任务数"},
         {
             "value": str(reliable_peak) if reliable_peak else "—",
             "label": peak_metric_label,
         },
         {
-            "value": reliable_span_label,
-            "label": span_metric_label,
+            "value": format_duration_ms(total_duration_ms)
+            if total_duration_ms is not None
+            else "不可用",
+            "label": "总任务时长",
+        },
+        {
+            "value": format_duration_ms(coverage_union_ms)
+            if coverage_union_ms is not None
+            else "不可用",
+            "label": coverage_duration_label,
+        },
+        {
+            "value": _format_timeline_percentage(coverage_rate)
+            if coverage_rate is not None
+            else "不可用",
+            "label": coverage_rate_label,
         },
     ]
 
@@ -2046,6 +2156,10 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         "observed_count": observed_count,
         "max_depth": max_depth,
         "peak_concurrency": observed_peak,
+        "reliable_peak_concurrency": reliable_peak,
+        "total_duration_ms": total_duration_ms,
+        "coverage_union_ms": coverage_union_ms,
+        "coverage_rate": coverage_rate,
         "missing_count": missing_count,
         "missing_ratio": missing_ratio,
         "partial": partial,

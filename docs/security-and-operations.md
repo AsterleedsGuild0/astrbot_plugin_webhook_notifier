@@ -141,7 +141,7 @@ Plugin 只发送 `opencode.session_idle`、`opencode.session_error`、`opencode.
 
 ### Timeline 渲染与模板风险
 
-默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 主卡摘要加同一 MessageChain 的独立横向甘特图。附图按任务数、名称与跨度在 1440～2400px 内动态布局，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算，极端长名称允许继续增高。附图不继承自定义 `full_page=false` 或固定 1200px 高度，而是强制完整页面并使用 renderer 计算的有界动态 viewport 高度；主卡仍遵守原 render options。start/end 缺失比例超过 25% 不画甘特图；partial/clamped 不展示假精确 duration；未定位任务不画假 bar。
+默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 主卡摘要加同一 MessageChain 的独立横向甘特图，甘特图仍只包含 subagent，不增加 root 行。顶部统计固定为“子任务数”“峰值并发”“总任务时长”“子任务覆盖时长”“子任务覆盖率”：总任务时长只使用 root busy→idle 周期的可靠 `durationMs`；子任务覆盖时长只合并 timing quality 为 `observed`/`fallback` 且具有完整起止 offset 的区间，并先裁剪到 `[0, 总任务时长]`，重叠或相邻区间按并集计时；覆盖率为该并集时长除以总任务时长并限制在 0～100%。总任务时长缺失时覆盖时长与覆盖率显示不可用，总任务时长为 0 时覆盖时长为 0、覆盖率显示不可用，不对未覆盖区间作 root 或其他执行归因。partial、truncated、unknown timing、clamped 或记录数量不完整时只统计可靠完整区间，并将相关峰值与覆盖指标标为“已观测”。附图按任务数、名称与跨度在 1440～2400px 内动态布局，统计区使用两行响应式网格，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算，极端长名称允许继续增高。附图不继承自定义 `full_page=false` 或固定 1200px 高度，而是强制完整页面并使用 renderer 计算的有界动态 viewport 高度；主卡仍遵守原 render options。start/end 缺失比例超过 25% 不画甘特图；partial/clamped 不展示假精确 duration；未定位任务不画假 bar。
 
 Sender 最多发 1～2 张图。附图生成、校验或构造失败只发主卡；实际发送失败后不自动重试主卡，避免造成重复通知。timeline 的身份显示遵循 `agent · model(variant)`：非 `default` variant 才追加括号，缺失字段自然降级。自定义模板如直接访问 `event.subagent_timeline`，不得渲染 `ref`、`parentRef` 或依赖其作为用户可见 ID；应使用 `render_html_data()` 生成的安全派生 `event.subagent_timeline_view`。该 view 与 built-in renderer 一样不暴露 raw Session ID、path、tool args 或 raw JSON。模板作者仍须遵守最小披露原则，不能通过自定义模板绕过服务端 allowlist。
 

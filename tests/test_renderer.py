@@ -23,6 +23,8 @@ from core.renderer import (
     _build_subagent_timeline_view,
     _expected_canvas_right,
     _scaled_right_crop_padding,
+    _timeline_coverage_rate,
+    _timeline_coverage_union_ms,
     DEFAULT_HTML_TEMPLATE,
     DEFAULT_TEXT_TEMPLATE,
     SUBAGENT_TIMELINE_HTML_TEMPLATE,
@@ -185,6 +187,7 @@ def _timeline_event(
     partial_reasons: list[str] | None = None,
     truncated: bool = False,
     observed_count: int | None = None,
+    total_duration_ms: int | None | object = ...,
 ) -> NormalizedEvent:
     event = _make_event(title="根任务已完成", fields=[])
     event.provider = "opencode"
@@ -202,6 +205,18 @@ def _timeline_event(
         "truncated": truncated,
         "items": items,
     }
+    if total_duration_ms is ...:
+        valid_ends = [
+            item["endOffsetMs"]
+            for item in items
+            if isinstance(item.get("endOffsetMs"), (int, float))
+            and not isinstance(item.get("endOffsetMs"), bool)
+        ]
+        event.task_duration_ms = int(max(valid_ends, default=0))
+    else:
+        event.task_duration_ms = (
+            total_duration_ms if isinstance(total_duration_ms, int) else None
+        )
     return event
 
 
@@ -818,28 +833,144 @@ class TestSubagentTimelineVisuals:
         assert "见附图" not in html
         assert "子任务" in html
         assert "峰值并发" in html
-        assert "总跨度" in html
+        assert "总任务时长" in html
+        assert "子任务覆盖时长" in html
+        assert "子任务覆盖率" in html
 
-    def test_complete_timeline_keeps_standard_metric_labels(self):
+    def test_complete_timeline_reports_root_duration_coverage_union_and_rate(self):
         event = _timeline_event(
-            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+            [
+                _timeline_item(0, start=0, end=2000),
+                _timeline_item(1, start=0, end=2000),
+                _timeline_item(2, start=1500, end=3000),
+                _timeline_item(3, start=3000, end=4000),
+            ],
+            total_duration_ms=5000,
         )
         view = _build_subagent_timeline_view(event)
         assert view is not None and view["mode"] == "complex"
-        assert view["timing_summary"] == "峰值并发 4 · 总跨度 2 秒"
+        assert view["total_duration_ms"] == 5000
+        assert view["coverage_union_ms"] == 4000
+        assert view["coverage_rate"] == pytest.approx(80)
+        assert view["timing_summary"] == (
+            "峰值并发 3 · 总任务时长 5 秒 · 子任务覆盖时长 4 秒 · 子任务覆盖率 80%"
+        )
         assert [metric["label"] for metric in view["metrics"]] == [
-            "子任务",
+            "子任务数",
             "峰值并发",
-            "总跨度",
+            "总任务时长",
+            "子任务覆盖时长",
+            "子任务覆盖率",
+        ]
+        assert [metric["value"] for metric in view["metrics"]] == [
+            "4",
+            "3",
+            "5 秒",
+            "4 秒",
+            "80%",
         ]
 
         main_html = render_html_default(event)
         timeline_html = render_subagent_timeline_html(event)
         assert timeline_html is not None
         assert "已观测峰值并发" not in main_html
-        assert "已观测跨度" not in main_html
+        assert "已观测子任务覆盖" not in main_html
         assert "峰值并发" in timeline_html
-        assert "总跨度" in timeline_html
+        assert "总任务时长" in timeline_html
+        assert "子任务覆盖时长" in timeline_html
+        assert "子任务覆盖率" in timeline_html
+
+    @pytest.mark.parametrize(
+        ("items", "total_duration_ms", "expected_union", "expected_rate"),
+        [
+            (
+                [
+                    _timeline_item(0, start=0, end=4000),
+                    _timeline_item(1, start=0, end=4000),
+                    _timeline_item(2, start=0, end=4000),
+                    _timeline_item(3, start=0, end=4000),
+                ],
+                4000,
+                4000,
+                100,
+            ),
+            (
+                [
+                    _timeline_item(0, start=0, end=2000),
+                    _timeline_item(1, start=1500, end=3000),
+                    _timeline_item(2, start=3000, end=3500),
+                    _timeline_item(3, start=4500, end=6000),
+                ],
+                5000,
+                4000,
+                80,
+            ),
+            (
+                [
+                    _timeline_item(0, start=0, end=1000),
+                    _timeline_item(1, start=1000, end=2000),
+                    _timeline_item(2, start=2000, end=3000),
+                    _timeline_item(3, start=3000, end=4000),
+                ],
+                4000,
+                4000,
+                100,
+            ),
+        ],
+    )
+    def test_coverage_merges_overlap_and_adjacent_intervals_and_clips_bounds(
+        self, items, total_duration_ms, expected_union, expected_rate
+    ):
+        view = _build_subagent_timeline_view(
+            _timeline_event(items, total_duration_ms=total_duration_ms)
+        )
+        assert view is not None
+        assert view["coverage_union_ms"] == expected_union
+        assert view["coverage_rate"] == pytest.approx(expected_rate)
+        assert view["coverage_rate"] <= 100
+
+    @pytest.mark.parametrize("total_duration_ms", [None, 0])
+    def test_missing_or_zero_total_duration_uses_safe_unavailable_rate(
+        self, total_duration_ms
+    ):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)],
+            total_duration_ms=total_duration_ms,
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        expected_union = None if total_duration_ms is None else 0
+        assert view["coverage_union_ms"] == expected_union
+        assert view["coverage_rate"] is None
+        values = {metric["label"]: metric["value"] for metric in view["metrics"]}
+        assert values["总任务时长"] == (
+            "不可用" if total_duration_ms is None else "0 毫秒"
+        )
+        assert values["子任务覆盖时长"] == (
+            "不可用" if total_duration_ms is None else "0 毫秒"
+        )
+        assert values["子任务覆盖率"] == "不可用"
+
+    def test_empty_timeline_stays_hidden_and_has_no_inferred_root_row(self):
+        event = _timeline_event([], total_duration_ms=5000)
+        coverage_union_ms = _timeline_coverage_union_ms([], 5000)
+        assert coverage_union_ms == 0
+        assert _timeline_coverage_rate(coverage_union_ms, 5000) == 0
+        assert _build_subagent_timeline_view(event) is None
+        assert render_subagent_timeline_html(event) is None
+
+    def test_coverage_union_ignores_invalid_intervals_defensively(self):
+        coverage_union_ms = _timeline_coverage_union_ms(
+            [
+                (-1, 1000),
+                (2000, 1000),
+                (float("nan"), 3000),
+                (3000, float("inf")),
+                (1000, 2500),
+            ],
+            5000,
+        )
+        assert coverage_union_ms == 1500
 
     @pytest.mark.parametrize("truncated", [False, True])
     def test_partial_or_truncated_timeline_uses_observed_metric_labels(self, truncated):
@@ -866,11 +997,15 @@ class TestSubagentTimelineVisuals:
         view = _build_subagent_timeline_view(event)
         assert view is not None and view["mode"] == "complex"
         assert "已观测峰值并发" in view["timing_summary"]
-        assert "已观测跨度" in view["timing_summary"]
+        assert "总任务时长" in view["timing_summary"]
+        assert "已观测子任务覆盖时长" in view["timing_summary"]
+        assert "已观测子任务覆盖率" in view["timing_summary"]
         assert [metric["label"] for metric in view["metrics"]] == [
-            "子任务",
+            "子任务数",
             "已观测峰值并发",
-            "已观测跨度",
+            "总任务时长",
+            "已观测子任务覆盖时长",
+            "已观测子任务覆盖率",
         ]
 
         main_html = render_html_default(event)
@@ -878,8 +1013,29 @@ class TestSubagentTimelineVisuals:
         assert timeline_html is not None
         for html in (main_html, timeline_html):
             assert "已观测峰值并发" in html
-            assert "已观测跨度" in html
+            assert "已观测子任务覆盖时长" in html
+            assert "已观测子任务覆盖率" in html
         assert "指标按已观测范围计算" in timeline_html
+
+    def test_unknown_or_partial_intervals_are_excluded_from_observed_coverage(self):
+        items = [
+            _timeline_item(0, start=0, end=1000),
+            _timeline_item(1, start=1000, end=2000, timing_quality="fallback"),
+            _timeline_item(2, start=2000, end=5000, timing_quality="partial"),
+            _timeline_item(3),
+        ]
+        event = _timeline_event(
+            items,
+            partial=True,
+            partial_reasons=["missing_start", "missing_end", "clamped"],
+            total_duration_ms=4000,
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["coverage_union_ms"] == 2000
+        assert view["coverage_rate"] == pytest.approx(50)
+        assert "已观测子任务覆盖时长 2 秒" in view["timing_summary"]
+        assert "已观测子任务覆盖率 50%" in view["timing_summary"]
 
     def test_missing_ratio_over_limit_degrades_and_boundary_can_render_gantt(self):
         degraded_items = [

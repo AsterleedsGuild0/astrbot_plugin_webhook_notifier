@@ -104,6 +104,8 @@ def test_real_chrome_timeline_geometry_and_screenshot(
     document = geometry["document"]
     body = geometry["body"]
     card = geometry["card"]
+    overview = geometry["overview"]
+    metrics = geometry["metrics"]
     timeline = geometry["timeline"]
     styles = geometry["styles"]
     rows = geometry["rows"]
@@ -120,6 +122,22 @@ def test_real_chrome_timeline_geometry_and_screenshot(
         + rendered.layout.state_column_width
         + 2
     )
+    assert [metric["label"] for metric in metrics] == [
+        "子任务数",
+        "峰值并发",
+        "总任务时长",
+        "子任务覆盖时长",
+        "子任务覆盖率",
+    ]
+    assert len(metrics) == 5
+    assert metrics[0]["metric"]["top"] == pytest.approx(metrics[2]["metric"]["top"])
+    assert metrics[3]["metric"]["top"] > metrics[0]["metric"]["bottom"] - 1
+    assert metrics[3]["metric"]["top"] == pytest.approx(metrics[4]["metric"]["top"])
+    for metric in metrics:
+        assert metric["metric"]["left"] >= overview["left"] - 0.1
+        assert metric["metric"]["right"] <= overview["right"] + 0.1
+        assert metric["scrollWidth"] <= metric["clientWidth"]
+        assert metric["labelScrollWidth"] <= metric["labelClientWidth"]
     assert styles["body"]["backgroundColor"] == _LIGHT_PALETTE["page"]
     assert styles["card"]["backgroundColor"] == "rgb(255, 255, 255)"
     assert styles["timeline"]["backgroundColor"] == _LIGHT_PALETTE["timeline"]
@@ -265,6 +283,12 @@ def test_long_timeline_identity_wraps_without_clipping_at_minimum_width(
 
     assert geometry["document"]["scrollWidth"] == 1440
     assert geometry["document"]["scrollHeight"] <= rendered.layout.viewport_height
+    assert len(geometry["metrics"]) == 5
+    assert geometry["overview"]["right"] <= geometry["card"]["right"] - 31
+    for metric in geometry["metrics"]:
+        assert metric["metric"]["right"] <= geometry["overview"]["right"] + 0.1
+        assert metric["scrollWidth"] <= metric["clientWidth"]
+        assert metric["labelScrollWidth"] <= metric["labelClientWidth"]
     for row in geometry["rows"]:
         metrics = row["agentMetrics"]
         assert metrics is not None
