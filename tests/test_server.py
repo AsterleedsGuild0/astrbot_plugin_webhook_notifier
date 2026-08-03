@@ -936,6 +936,51 @@ class TestHandleHtmlImage:
         assert len(server._sender.sent_texts) >= 1
         assert "会话完成" in server._sender.sent_texts[0]
 
+    async def test_html_render_failure_timeline_fallback_keeps_wait_and_residual(
+        self, server: WebhookServer
+    ):
+        async def failing_render(tmpl, data, return_url=True, options=None):
+            raise RuntimeError("T2I service unavailable")
+
+        server._html_render = failing_render
+        event = _make_complex_event()
+        event.task_duration_ms = 10_000
+        event.user_wait_timeline = {
+            "version": 1,
+            "timeBasis": "root_cycle_receipt_monotonic",
+            "partial": False,
+            "partialReasons": [],
+            "observedIntervalCount": 1,
+            "displayedIntervalCount": 1,
+            "truncated": False,
+            "intervals": [
+                {
+                    "kind": "question",
+                    "result": "replied",
+                    "intervalState": "complete",
+                    "startOffsetMs": 7000,
+                    "endOffsetMs": 8000,
+                    "durationMs": 1000,
+                }
+            ],
+        }
+
+        response = await server._handle_html_image(
+            event,
+            _make_endpoint(),
+            target_alias=None,
+            request_id="req-html-timeline-fallback",
+            fallback_to_text=True,
+        )
+        data = json.loads(response.body)
+        assert data["data"]["render_mode"] == "text"
+        assert data["data"]["fallback_reason"] == "html_render_failed"
+        assert server._sender.sent_texts
+        fallback_text = server._sender.sent_texts[-1]
+        assert "等待用户 1 秒 · 1 次" in fallback_text
+        assert "观测完整 · Question 1" in fallback_text
+        assert "未分类时间 / 占比：" in fallback_text
+
     async def test_html_render_failure_no_fallback(self, server: WebhookServer):
         """fallback 关闭时 html_render 失败应返回 500。"""
 

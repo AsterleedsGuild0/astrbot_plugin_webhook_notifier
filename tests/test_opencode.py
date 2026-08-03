@@ -84,6 +84,70 @@ def _parse_timeline(payload: dict, headers: dict | None = None):
     )
 
 
+def _wait_interval(**overrides) -> dict:
+    """合法 complete 用户等待 interval。"""
+    interval = {
+        "kind": "question",
+        "result": "replied",
+        "intervalState": "complete",
+        "startOffsetMs": 100,
+        "endOffsetMs": 500,
+        "durationMs": 400,
+    }
+    interval.update(overrides)
+    return interval
+
+
+def _wait_timeline(**overrides) -> dict:
+    """合法 userWaitTimeline envelope（含一个 complete interval）。"""
+    timeline = {
+        "version": 1,
+        "timeBasis": "root_cycle_receipt_monotonic",
+        "partial": False,
+        "partialReasons": [],
+        "observedIntervalCount": 1,
+        "displayedIntervalCount": 1,
+        "truncated": False,
+        "intervals": [_wait_interval()],
+    }
+    timeline.update(overrides)
+    return timeline
+
+
+def _wait_timeline_payload(
+    timeline: dict, *, event: str = "opencode.session_idle", scope: str = "root"
+) -> dict:
+    return {
+        **_VALID_PAYLOAD,
+        "event": event,
+        "session": {"ref": _timeline_ref("root"), "scope": scope},
+        "userWaitTimeline": timeline,
+    }
+
+
+def _wait_right_censored(**overrides) -> dict:
+    """合法 right_censored 用户等待 interval（只有 start）。"""
+    interval = {
+        "kind": "question",
+        "intervalState": "right_censored",
+        "startOffsetMs": 100,
+    }
+    interval.update(overrides)
+    return interval
+
+
+def _wait_left_censored(**overrides) -> dict:
+    """合法 left_censored 用户等待 interval（result + end，无 start/duration）。"""
+    interval = {
+        "kind": "permission",
+        "result": "replied",
+        "intervalState": "left_censored",
+        "endOffsetMs": 500,
+    }
+    interval.update(overrides)
+    return interval
+
+
 # ─── Header/Body 校验 ─────────────────────────────────────
 
 
@@ -1025,6 +1089,515 @@ class TestSubagentTimelineContract:
         }
         with pytest.raises(ProviderError):
             _parse_timeline(_timeline_payload(timeline))
+
+
+# ─── userWaitTimeline 契约 ─────────────────────────────────
+
+
+class TestUserWaitTimelineContract:
+    """userWaitTimeline 服务端兼容层（Issue #26，Phase 1 server lane）。
+
+    wire contract：顶层 camelCase ``userWaitTimeline`` → Python normalized 字段
+    ``user_wait_timeline``。旧 envelope 完全不携带该字段时兼容，不报错。
+    """
+
+    # ── 合法 payload ──────────────────────────────────────
+
+    def test_empty_timeline_is_reliable_zero(self):
+        """空 intervals + partial=false = 可靠测得 0，与字段缺失可区分。"""
+        timeline = _wait_timeline(
+            partial=False,
+            partialReasons=[],
+            observedIntervalCount=0,
+            displayedIntervalCount=0,
+            truncated=False,
+            intervals=[],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        assert event.user_wait_timeline == timeline
+        assert event.to_dict()["user_wait_timeline"] == timeline
+
+    def test_complete_interval_round_trip(self):
+        timeline = _wait_timeline()
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        assert event.user_wait_timeline == timeline
+        assert event.to_dict()["user_wait_timeline"] == timeline
+
+    def test_permission_kind_and_rejected_result_round_trip(self):
+        timeline = _wait_timeline(
+            intervals=[
+                _wait_interval(kind="permission", result="rejected"),
+            ]
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        assert event.user_wait_timeline == timeline
+
+    def test_mixed_complete_and_censored_intervals_round_trip(self):
+        """complete + right_censored + left_censored 同时出现，censored 需要 partial。"""
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["open_at_cycle_end", "orphan_resolution"],
+            observedIntervalCount=3,
+            displayedIntervalCount=3,
+            truncated=False,
+            intervals=[
+                _wait_interval(),
+                _wait_right_censored(),
+                _wait_left_censored(),
+            ],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        assert event.user_wait_timeline == timeline
+
+    def test_observed_greater_than_displayed_with_evicted_reason(self):
+        """observed>displayed 可由 evicted reason 解释，不需要 truncated。"""
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["evicted"],
+            observedIntervalCount=2,
+            displayedIntervalCount=1,
+            truncated=False,
+            intervals=[_wait_interval()],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        normalized = event.user_wait_timeline
+        assert normalized is not None
+        assert normalized["observedIntervalCount"] == 2
+        assert normalized["displayedIntervalCount"] == 1
+
+    def test_missing_timeline_is_compatible(self):
+        """旧 envelope：完全不带 userWaitTimeline 不报错，字段为 None 且不进 to_dict。"""
+        event = _make_adapter().parse(
+            headers=dict(_HEADERS),
+            payload=dict(_VALID_PAYLOAD),
+            received_at=_received_at(),
+        )
+        assert event.user_wait_timeline is None
+        assert "user_wait_timeline" not in event.to_dict()
+
+    def test_both_timelines_can_coexist_independently(self):
+        """subagentTimeline 与 userWaitTimeline 同 payload 共存，互不污染。"""
+        subagent = {
+            "version": 1,
+            "partial": False,
+            "partialReasons": [],
+            "timeBasis": "root_cycle",
+            "observedItemCount": 1,
+            "displayedItemCount": 1,
+            "truncated": False,
+            "items": [_timeline_item()],
+        }
+        user_wait = _wait_timeline()
+        payload = _wait_timeline_payload(user_wait)
+        payload["subagentTimeline"] = subagent
+        event = _parse_timeline(payload)
+        assert event.subagent_timeline == subagent
+        assert event.user_wait_timeline == user_wait
+
+    def test_offsets_beyond_root_duration_accepted(self):
+        """遵循既有 subagentTimeline 兼容模式：adapter 接受越界 offset，不校验
+        offset <= top-level durationMs；越界由 renderer 防御性裁剪到 [0, duration]。
+        （与 ``_validate_subagent_timeline`` 行为一致，避免同轴双 timeline 契约分叉。）"""
+        timeline = _wait_timeline(
+            intervals=[
+                _wait_interval(startOffsetMs=15000, endOffsetMs=16000, durationMs=1000),
+            ]
+        )
+        payload = _wait_timeline_payload(timeline)
+        payload["durationMs"] = 10000
+        event = _parse_timeline(payload)
+        assert event.task_duration_ms == 10000
+        normalized = event.user_wait_timeline
+        assert normalized is not None
+        assert normalized["intervals"][0]["endOffsetMs"] == 16000
+
+    def test_zero_duration_and_offset_boundaries(self):
+        """零值 offset、duration 合法：start=end=duration=0。"""
+        timeline = _wait_timeline(
+            intervals=[
+                _wait_interval(startOffsetMs=0, endOffsetMs=0, durationMs=0),
+            ]
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        normalized = event.user_wait_timeline
+        assert normalized is not None
+        assert normalized["intervals"][0]["durationMs"] == 0
+
+    # ── event / scope 限制 ────────────────────────────────
+
+    @pytest.mark.parametrize(
+        ("event", "scope"),
+        [
+            ("opencode.question_asked", "root"),
+            ("opencode.permission_asked", "root"),
+            ("opencode.session_error", "root"),
+            ("opencode.session_idle", "subagent"),
+            ("opencode.session_idle", "auxiliary"),
+            ("opencode.session_idle", "unknown"),
+        ],
+    )
+    def test_user_wait_timeline_is_root_idle_only(self, event, scope):
+        payload = _wait_timeline_payload(_wait_timeline(), event=event, scope=scope)
+        with pytest.raises(ProviderError):
+            _parse_timeline(payload)
+
+    # ── envelope 非法组合 ─────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            lambda t: t.update(extra=True),
+            lambda t: t.update(version=2),
+            lambda t: t.update(version=True),
+            lambda t: t.update(timeBasis="wall_clock"),
+            lambda t: t.update(partial=True, partialReasons=[]),
+            lambda t: t.update(partial=False, partialReasons=["clock_invalid"]),
+            lambda t: t.update(partialReasons=["clock_invalid", "clock_invalid"]),
+            lambda t: t.update(partialReasons=["not-a-reason"], partial=True),
+            lambda t: t.update(
+                partialReasons=["clock_invalid", "evicted"], partial=True
+            ),
+            lambda t: t.update(observedIntervalCount=-1),
+            lambda t: t.update(observedIntervalCount=1.5),
+            lambda t: t.update(observedIntervalCount=True),
+            lambda t: t.update(displayedIntervalCount=2),
+            lambda t: t.update(intervals=[]),
+            lambda t: t.update(intervals="not-a-list"),
+            lambda t: t.update(truncated=True, partial=False, partialReasons=[]),
+            lambda t: t.update(
+                truncated=True, partial=True, partialReasons=["truncated"]
+            ),
+            lambda t: t.update(
+                truncated=True,
+                partial=True,
+                partialReasons=["truncated"],
+                observedIntervalCount=1,
+                displayedIntervalCount=1,
+            ),
+            lambda t: t.update(
+                truncated=False, partial=True, partialReasons=["truncated"]
+            ),
+        ],
+    )
+    def test_invalid_user_wait_envelope_rejected(self, mutation):
+        timeline = _wait_timeline()
+        mutation(timeline)
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(timeline))
+
+    # ── interval 非法组合 ─────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            # unknown / sensitive 字段
+            lambda i: i.update(extra=True),
+            lambda i: i.update(raw="leak"),
+            lambda i: i.update(sessionId="leak"),
+            lambda i: i.update(requestId="leak"),
+            lambda i: i.update(text="leak"),
+            # kind / state / result 枚举
+            lambda i: i.update(kind="notice"),
+            lambda i: i.update(kind=123),
+            lambda i: i.update(intervalState="partial"),
+            lambda i: i.update(intervalState="censored"),
+            lambda i: i.update(result="answered"),
+            lambda i: i.update(result=123),
+            lambda i: i.update(result=None),
+            # offset 类型
+            lambda i: i.update(startOffsetMs=-1),
+            lambda i: i.update(startOffsetMs=True),
+            lambda i: i.update(startOffsetMs=1.5),
+            lambda i: i.update(startOffsetMs=math.nan),
+            lambda i: i.update(startOffsetMs=math.inf),
+            lambda i: i.update(endOffsetMs=-1),
+            lambda i: i.update(durationMs=-1),
+            lambda i: i.update(durationMs=True),
+            # 组合错误：complete
+            lambda i: i.update(startOffsetMs=200, endOffsetMs=100),
+            lambda i: i.update(durationMs=500),
+            lambda i: i.update(durationMs=999),
+            lambda i: i.update(endOffsetMs=999, durationMs=1),
+        ],
+    )
+    def test_invalid_complete_interval_rejected(self, mutation):
+        timeline = _wait_timeline()
+        mutation(timeline["intervals"][0])
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(timeline))
+
+    def test_complete_interval_requires_exact_key_set(self):
+        """complete 缺少任何 required 字段（含 result）都拒绝。"""
+        cases = [
+            _wait_interval(),
+        ]
+        for key in (
+            "kind",
+            "result",
+            "intervalState",
+            "startOffsetMs",
+            "endOffsetMs",
+            "durationMs",
+        ):
+            item = _wait_interval()
+            del item[key]
+            cases.append(item)
+        for item in cases[1:]:
+            timeline = _wait_timeline(intervals=[item])
+            with pytest.raises(ProviderError):
+                _parse_timeline(_wait_timeline_payload(timeline))
+
+    def test_right_censored_requires_only_start(self):
+        """right_censored：只允许 kind/intervalState/start，多余字段拒绝。"""
+        extra_cases = [
+            _wait_right_censored(result="replied"),
+            _wait_right_censored(endOffsetMs=500),
+            _wait_right_censored(durationMs=400),
+        ]
+        for item in extra_cases:
+            timeline = _wait_timeline(
+                partial=True,
+                partialReasons=["open_at_cycle_end"],
+                intervals=[item],
+            )
+            with pytest.raises(ProviderError):
+                _parse_timeline(_wait_timeline_payload(timeline))
+
+    def test_left_censored_requires_result_and_end(self):
+        """left_censored：必须有 result+end，多余/缺失字段拒绝。"""
+        missing_result = _wait_left_censored()
+        del missing_result["result"]
+        missing_end = _wait_left_censored()
+        del missing_end["endOffsetMs"]
+        invalid_cases = [
+            missing_result,
+            missing_end,
+            _wait_left_censored(startOffsetMs=0),
+            _wait_left_censored(durationMs=500),
+            _wait_left_censored(result=None),
+            _wait_left_censored(result="answered"),
+        ]
+        for item in invalid_cases:
+            timeline = _wait_timeline(
+                partial=True,
+                partialReasons=["orphan_resolution"],
+                intervals=[item],
+            )
+            with pytest.raises(ProviderError):
+                _parse_timeline(_wait_timeline_payload(timeline))
+
+    def test_censored_interval_requires_partial(self):
+        """censored interval 存在但 partial=false → 拒绝。"""
+        for item, reason in (
+            (_wait_right_censored(), "open_at_cycle_end"),
+            (_wait_left_censored(), "orphan_resolution"),
+        ):
+            timeline = _wait_timeline(
+                partial=False,
+                partialReasons=[],
+                observedIntervalCount=1,
+                displayedIntervalCount=1,
+                truncated=False,
+                intervals=[item],
+            )
+            with pytest.raises(ProviderError):
+                _parse_timeline(_wait_timeline_payload(timeline))
+
+    def test_reason_binding_requires_matching_censored_state(self):
+        """open_at_cycle_end → 至少一个 right_censored；orphan_resolution → 至少一个
+        left_censored；只有 complete interval 时携带这些 reason 拒绝。"""
+        # open_at_cycle_end 但只有 complete
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["open_at_cycle_end"],
+            intervals=[_wait_interval()],
+        )
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(timeline))
+        # orphan_resolution 但只有 complete
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["orphan_resolution"],
+            intervals=[_wait_interval()],
+        )
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(timeline))
+        # open_at_cycle_end 配 right_censored → 合法
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["open_at_cycle_end"],
+            intervals=[_wait_right_censored()],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        normalized = event.user_wait_timeline
+        assert normalized is not None
+        assert normalized["intervals"][0]["intervalState"] == "right_censored"
+
+    def test_truncated_allows_open_reason_without_displayed_right_censored(self):
+        """Oracle Gate1 P1：truncated=true 时 open_at_cycle_end 对应 right_censored
+        可能已被截断出 displayed 列表（observed=2/displayed=1），允许 reason 存在。"""
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["open_at_cycle_end", "truncated"],
+            observedIntervalCount=2,
+            displayedIntervalCount=1,
+            truncated=True,
+            intervals=[_wait_interval()],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        assert event.user_wait_timeline is not None
+
+    def test_truncated_allows_orphan_reason_without_displayed_left_censored(self):
+        """Oracle Gate1 P1：truncated=true 时 orphan_resolution 对应 left_censored
+        可能已被截断出 displayed 列表，允许 reason 存在。"""
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["orphan_resolution", "truncated"],
+            observedIntervalCount=2,
+            displayedIntervalCount=1,
+            truncated=True,
+            intervals=[_wait_interval()],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        assert event.user_wait_timeline is not None
+
+    def test_truncated_relaxation_not_applied_when_not_truncated(self):
+        """truncated=false 时保留严格绑定：无对应 censored 携带 open/orphan reason 拒绝
+        （同 payload 去掉 truncated reason 即回归严格）。"""
+        for reason in ("open_at_cycle_end", "orphan_resolution"):
+            timeline = _wait_timeline(
+                partial=True,
+                partialReasons=[reason],
+                observedIntervalCount=1,
+                displayedIntervalCount=1,
+                truncated=False,
+                intervals=[_wait_interval()],
+            )
+            with pytest.raises(ProviderError):
+                _parse_timeline(_wait_timeline_payload(timeline))
+
+    def test_truncated_with_displayed_censored_still_accepted(self):
+        """truncated=true 且 displayed 仍包含对应 censored interval → 依然接受。"""
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["open_at_cycle_end", "truncated"],
+            observedIntervalCount=3,
+            displayedIntervalCount=2,
+            truncated=True,
+            intervals=[_wait_right_censored(), _wait_interval()],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        normalized = event.user_wait_timeline
+        assert normalized is not None
+        assert normalized["intervals"][0]["intervalState"] == "right_censored"
+
+    def test_truncated_does_not_weaken_censored_requires_partial(self):
+        """截断放宽只作用于「reason ↔ displayed 缺失」；present censored interval
+        仍需 partial=true（无 partial reason 的 censored 依旧拒绝）。"""
+        timeline = _wait_timeline(
+            partial=False,
+            partialReasons=[],
+            observedIntervalCount=1,
+            displayedIntervalCount=1,
+            truncated=False,
+            intervals=[_wait_right_censored()],
+        )
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(timeline))
+        # truncated=true 也要求 partial=true（truncated 本身强制 partial + reason）
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["truncated"],
+            observedIntervalCount=2,
+            displayedIntervalCount=1,
+            truncated=True,
+            intervals=[_wait_right_censored()],
+        )
+        event = _parse_timeline(_wait_timeline_payload(timeline))
+        assert event.user_wait_timeline is not None
+
+    def test_reason_canonical_order_required(self):
+        """partialReasons 必须按 canonical 顺序；乱序拒绝（与 subagentTimeline 一致）。"""
+        timeline = _wait_timeline(
+            partial=True,
+            partialReasons=["clock_invalid", "evicted"],
+            observedIntervalCount=2,
+            displayedIntervalCount=1,
+            intervals=[_wait_interval()],
+        )
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(timeline))
+
+    # ── count / 数量 / 大小限制 ───────────────────────────
+
+    def test_accepts_sixty_four_intervals_and_rejects_more(self):
+        intervals = [
+            _wait_interval(
+                startOffsetMs=index,
+                endOffsetMs=index + 1,
+                durationMs=1,
+            )
+            for index in range(64)
+        ]
+        timeline = _wait_timeline(
+            observedIntervalCount=64,
+            displayedIntervalCount=64,
+            intervals=intervals,
+        )
+        assert (
+            _parse_timeline(_wait_timeline_payload(timeline)).user_wait_timeline
+            == timeline
+        )
+
+        too_many = dict(timeline)
+        too_many["observedIntervalCount"] = 65
+        too_many["displayedIntervalCount"] = 65
+        too_many["intervals"] = intervals + [_wait_interval()]
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(too_many))
+
+    def test_twelve_kib_timeline_size_limit_is_defensive(self, monkeypatch):
+        """独立 canonical JSON ≤12KiB 是防御性上限：当前严格 schema（枚举字符串 +
+        有界整数 offset）下 64 个合法 interval 的最大体积约 9.7KiB，永远无法触达
+        12KiB。因此验证方式是把上限临时收紧，确认检查机制确实生效。"""
+        import core.opencode as opencode_module
+
+        # 64 个最大体积合法 interval（16 位 offset）应被接受
+        max_int = 2**53 - 1
+        intervals = [
+            _wait_interval(
+                startOffsetMs=max_int - index,
+                endOffsetMs=max_int,
+                durationMs=index,
+            )
+            for index in range(64)
+        ]
+        timeline = _wait_timeline(
+            observedIntervalCount=64,
+            displayedIntervalCount=64,
+            intervals=intervals,
+        )
+        assert (
+            _parse_timeline(_wait_timeline_payload(timeline)).user_wait_timeline
+            is not None
+        )
+
+        # 收紧上限后，正常大小的 timeline 也应被拒绝 → 证明字节检查生效
+        monkeypatch.setattr(opencode_module, "_MAX_USER_WAIT_TIMELINE_BYTES", 100)
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(_wait_timeline()))
+
+    def test_envelope_size_limit_still_applies_with_timeline(self):
+        """整体 64KiB envelope 限制继续生效。"""
+        payload = _wait_timeline_payload(_wait_timeline())
+        payload["projectName"] = "x" * (65 * 1024)
+        with pytest.raises(ProviderError):
+            _parse_timeline(payload)
+
+    def test_observed_count_upper_bound(self):
+        timeline = _wait_timeline(observedIntervalCount=4097)
+        with pytest.raises(ProviderError):
+            _parse_timeline(_wait_timeline_payload(timeline))
 
 
 def labels_index(label: str, fields: list) -> int:

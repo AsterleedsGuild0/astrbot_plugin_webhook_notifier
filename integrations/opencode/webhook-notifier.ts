@@ -85,6 +85,7 @@ interface Envelope {
   question?: QuestionEnvelope;
   error?: { category: string; code?: string };
   subagentTimeline?: SubagentTimelineEnvelope;
+  userWaitTimeline?: UserWaitTimelineEnvelope;
 }
 
 type TimelinePartialReason =
@@ -123,6 +124,57 @@ interface SubagentTimelineEnvelope {
   displayedItemCount: number;
   truncated: boolean;
   items: SubagentTimelineItem[];
+}
+
+type UserWaitKind = "question" | "permission";
+type UserWaitResult = "replied" | "rejected";
+type UserWaitIntervalState = "complete" | "right_censored" | "left_censored";
+type UserWaitPartialReason =
+  | "open_at_cycle_end"
+  | "orphan_resolution"
+  | "missing_request_id"
+  | "evicted"
+  | "truncated"
+  | "clock_invalid";
+
+interface UserWaitInterval {
+  kind: UserWaitKind;
+  result?: UserWaitResult;
+  intervalState: UserWaitIntervalState;
+  startOffsetMs?: number;
+  endOffsetMs?: number;
+  durationMs?: number;
+}
+
+interface UserWaitTimelineEnvelope {
+  version: 1;
+  partial: boolean;
+  partialReasons: UserWaitPartialReason[];
+  timeBasis: "root_cycle_receipt_monotonic";
+  observedIntervalCount: number;
+  displayedIntervalCount: number;
+  truncated: boolean;
+  intervals: UserWaitInterval[];
+}
+
+/**
+ * Anonymous, process-local wait record. Raw session/request ids never enter
+ * this map: the key is a hashed session ref + kind + hashed request key.
+ */
+interface UserWaitRecord {
+  key: string;
+  sessionRef: string;
+  kind: UserWaitKind;
+  requestKeyHash: string;
+  askedMonoMs?: number;
+  resolvedMonoMs?: number;
+  result?: UserWaitResult;
+  state: "pending" | "resolved";
+  /** Terminal observed without a matching asked in this process lifetime. */
+  orphan?: boolean;
+  /** True once a successfully committed root idle reported this record. */
+  reported?: boolean;
+  lastAccessMonoMs: number;
 }
 
 type SessionScope = "root" | "subagent" | "auxiliary" | "unknown";
@@ -172,6 +224,10 @@ interface OpenCodeEvent {
   eventId?: string;
   /** Plugin receipt time; never copied into the outgoing envelope. */
   receivedAtMs?: number;
+  /** Monotonic receipt time captured adjacently to receivedAtMs. */
+  receivedMonoMs?: number;
+  /** Raw permission reply marker (only normalised, never serialised). */
+  reply?: string;
   /** Internal marker for a timing snapshot claimed by an idle cycle. */
   cycleTimingCaptured?: boolean;
   /** Internal marker that the claimed cycle timing passed validation. */
@@ -248,6 +304,15 @@ interface SessionState {
   cycle: number;
   /** Epoch milliseconds when the current busy cycle began. */
   cycleStartedAtMs?: number;
+  /** Monotonic milliseconds when the current busy cycle began. */
+  cycleStartedMonoMs?: number;
+  /**
+   * True only when the busy receipt carried an explicit, valid monotonic
+   * capture (hook path).  Direct/legacy callers without receivedMonoMs keep
+   * wall-clock duration fallback so API/Assistant ISO timestamps are not
+   * misrepresented as mono-observed.
+   */
+  cycleStartedMonoReliable?: boolean;
   /** Epoch milliseconds when the current cycle's idle event was received. */
   cycleEndedAtMs?: number;
   /** Event ID for a pending retry (stable across retries). */
@@ -337,6 +402,70 @@ const MAX_METADATA_DIAGNOSTIC_NUMBER = 1_000_000;
 const ACTION_DEBOUNCE_MS = 150;
 const MAX_ACTION_BUCKETS = 1000;
 const MAX_ACTION_BUCKET_REQUESTS = 1_000_000;
+const MAX_WAIT_RECORDS = 2048;
+const RETAIN_WAIT_RECORDS = 1024;
+const WAIT_RESOLVED_TTL_MS = 60 * 60 * 1000;
+const WAIT_PENDING_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_WAIT_INTERVALS = 64;
+const MAX_USER_WAIT_TIMELINE_BYTES = 12 * 1024;
+const MAX_WAIT_EVIDENCE_SESSIONS = 1000;
+const RETAIN_WAIT_EVIDENCE_SESSIONS = 500;
+const MAX_HOOK_QUEUE_DEPTH = 1024;
+
+/**
+ * Per-session FIFO for the hook's state phase (wait collector + busy/idle
+ * transition + claim freeze).  Keyed by the raw session id only as a
+ * transient, in-memory scheduling key (identical to `_actionBuckets`); it
+ * never enters the wait map, envelope, logs, or any serialised state.
+ * Enrichment and network sends run after the queue so they never block state
+ * ordering, and an exception in one task can never stall later tasks.
+ */
+const _hookQueueTails = new Map<string, Promise<void>>();
+const _hookQueueDepth = new Map<string, number>();
+
+/** Test-only delay hook fired at the start of the wait collectors. */
+let _waitCollectorTestDelay: (() => Promise<void>) | undefined;
+
+function _setWaitCollectorTestDelay(delay?: () => Promise<void>): void {
+  _waitCollectorTestDelay = delay;
+}
+
+/** One-shot test delay consumed by the first collector call only. */
+async function _consumeWaitCollectorTestDelay(): Promise<void> {
+  if (!_waitCollectorTestDelay) return;
+  const delay = _waitCollectorTestDelay;
+  _waitCollectorTestDelay = undefined;
+  await delay();
+}
+
+function _enqueueSessionState(sessionId: string, task: () => Promise<void>): Promise<void> {
+  const depth = _hookQueueDepth.get(sessionId) ?? 0;
+  if (depth >= MAX_HOOK_QUEUE_DEPTH) {
+    // Fail-closed saturation: never bypass the queue out of order (that would
+    // let a later event's collector/claim jump ahead of an earlier one).  The
+    // state phase is dropped, and because we cannot safely derive the
+    // anonymous session ref here, we set the process-lifetime fail-closed
+    // overflow flag so no future timeline can ever claim a "reliable zero".
+    _waitEvidenceOverflow = true;
+    _log.warn("[webhook-notifier] hook state queue saturated; dropped state phase (fail-closed)");
+    return Promise.resolve();
+  }
+  _hookQueueDepth.set(sessionId, depth + 1);
+  const previous = _hookQueueTails.get(sessionId) ?? Promise.resolve();
+  const next = previous.then(task, task);
+  _hookQueueTails.set(sessionId, next);
+  const settle = (): void => {
+    const remaining = (_hookQueueDepth.get(sessionId) ?? 1) - 1;
+    if (remaining <= 0) {
+      _hookQueueDepth.delete(sessionId);
+      _hookQueueTails.delete(sessionId);
+    } else {
+      _hookQueueDepth.set(sessionId, remaining);
+    }
+  };
+  next.then(settle, settle);
+  return next;
+}
 
 type MetadataDiagnosticPhase =
   | "message_updated"
@@ -542,11 +671,57 @@ function _nowMs(): number {
 
 function _setClockForTests(clock?: () => number): void {
   _clock = clock ?? (() => Date.now());
+  // Legacy wall-only test helpers expect both axes to move together when a
+  // value is supplied; distinct mono control remains available through
+  // _setMonoClockForTests / _setClocksForTests.
+  _monoClock = clock ?? (() => performance.now());
+}
+
+/**
+ * Monotonic timing source for user-wait durations/offsets, the root-cycle
+ * axis of userWaitTimeline, and the wait-map TTL/LRU.  It is deliberately
+ * separate from the wall clock: wall-clock jumps (NTP, manual changes) must
+ * never corrupt wait intervals.  In production it defaults to
+ * performance.now() which is monotonic within a process.
+ */
+let _monoClock: () => number = () => performance.now();
+
+function _nowMonoMs(): number {
+  const now = _monoClock();
+  if (!Number.isFinite(now) || now < 0 || now > Number.MAX_SAFE_INTEGER) return performance.now();
+  return now;
+}
+
+function _setMonoClockForTests(clock?: () => number): void {
+  _monoClock = clock ?? (() => performance.now());
+}
+
+/** Convenience for tests that need to control both clocks together. */
+function _setClocksForTests(wall?: () => number, mono?: () => number): void {
+  _setClockForTests(wall);
+  _setMonoClockForTests(mono);
 }
 
 function _safeEpochMs(raw: unknown): number | undefined {
   if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return undefined;
   return raw;
+}
+
+/**
+ * Validate a mono value for wire use: finite, non-negative, and bounded to a
+ * safe integer.  Raw fractional values are kept for comparisons/intersection;
+ * only the final wire offsets/durations are integerised with Math.round.
+ */
+function _safeMonoValue(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return undefined;
+  if (raw > Number.MAX_SAFE_INTEGER) return undefined;
+  return raw;
+}
+
+/** Integerise a bounded, non-negative mono delta for the wire contract. */
+function _intMonoMs(value: number): number {
+  const rounded = Math.round(value);
+  return Number.isSafeInteger(rounded) && rounded >= 0 ? rounded : 0;
 }
 
 function _timelineRunKey(sessionRef: string, cycle: number): string {
@@ -1418,6 +1593,425 @@ function _cleanupTimelineRuns(force = false): void {
       _timelineParents.delete(entries[i]!);
     }
   }
+}
+
+// ─── User Wait Collection ──────────────────────────────────
+
+/**
+ * Anonymous wait records keyed by `sessionRef:kind:requestKeyHash`.
+ * Raw session/request ids exist only in the event and the current call
+ * stack; they never enter this map, the envelope, or logs.
+ */
+const _userWaits = new Map<string, UserWaitRecord>();
+/** One-shot partial evidence: events with no usable request id, per sessionRef. */
+const _waitMissingRequestIds = new Map<string, number>();
+/** One-shot partial evidence: active (pending) records evicted by capacity, per sessionRef. */
+const _waitEvicted = new Map<string, number>();
+/**
+ * Fail-closed flag: once evidence maps overflow their bounded capacity, we
+ * can no longer trust a "reliable zero" for any session, so every future
+ * timeline reports an `evicted` partial reason.  Never auto-resets.
+ */
+let _waitEvidenceOverflow = false;
+
+function _waitRequestKey(event: OpenCodeEvent): string | undefined {
+  // Only the official request id may associate an asked with its terminal.
+  // Wrapper event ids are never used: without an official request id the
+  // record is untrackable and must surface as missing_request_id rather than
+  // fabricate right+left censored intervals from distinct event ids.
+  const requestId = typeof event.requestId === "string" && event.requestId.length > 0
+    ? event.requestId
+    : undefined;
+  return requestId ?? undefined;
+}
+
+async function _hashWaitRequestKey(raw: string): Promise<string> {
+  const data = _textEncoder.encode("opencode:waitreq:" + raw);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = new Uint8Array(hashBuffer);
+  let hex = "";
+  for (let i = 0; i < 16; i++) {
+    hex += hashArray[i]!.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+function _waitKey(sessionRef: string, kind: UserWaitKind, requestKeyHash: string): string {
+  return `${sessionRef}:${kind}:${requestKeyHash}`;
+}
+
+function _recordWaitMissingRequestId(sessionRef: string): void {
+  _waitMissingRequestIds.set(sessionRef, (_waitMissingRequestIds.get(sessionRef) ?? 0) + 1);
+  _cleanupWaitEvidence();
+}
+
+function _recordWaitEvicted(sessionRef: string): void {
+  _waitEvicted.set(sessionRef, (_waitEvicted.get(sessionRef) ?? 0) + 1);
+  _cleanupWaitEvidence();
+}
+
+function _cleanupWaitEvidence(): void {
+  let dropped = false;
+  for (const map of [_waitMissingRequestIds, _waitEvicted]) {
+    if (map.size > MAX_WAIT_EVIDENCE_SESSIONS) {
+      const entries = [...map.keys()];
+      for (let i = 0; i < entries.length - RETAIN_WAIT_EVIDENCE_SESSIONS; i++) {
+        map.delete(entries[i]!);
+        dropped = true;
+      }
+    }
+  }
+  // Fail-closed: any evidence overflow means we can no longer certify a
+  // reliable zero for any session, so keep a process-lifetime evicted flag.
+  if (dropped) _waitEvidenceOverflow = true;
+}
+
+/** Test-only reset for the fail-closed overflow flag. */
+function _setWaitEvidenceOverflowForTests(value: boolean): void {
+  _waitEvidenceOverflow = value;
+}
+
+/**
+ * Record a question/permission asked. Runs before any action-notification
+ * filter so a disabled question/permission notification never produces a
+ * false zero wait statistic. Duplicate asks keep the earliest start.
+ */
+async function _recordUserWaitAsked(event: OpenCodeEvent, kind: UserWaitKind): Promise<void> {
+  await _consumeWaitCollectorTestDelay();
+  if (!event.sessionId) return;
+  const sessionRef = await _hashSessionRef(event.sessionId);
+  const rawRequestKey = _waitRequestKey(event);
+  if (!rawRequestKey) {
+    _recordWaitMissingRequestId(sessionRef);
+    return;
+  }
+  const requestKeyHash = await _hashWaitRequestKey(rawRequestKey);
+  const key = _waitKey(sessionRef, kind, requestKeyHash);
+  const monoMs = _safeMonoValue(event.receivedMonoMs) ?? _nowMonoMs();
+  const existing = _userWaits.get(key);
+  if (existing) {
+    if (existing.orphan && existing.askedMonoMs === undefined
+      && existing.resolvedMonoMs !== undefined && monoMs <= existing.resolvedMonoMs) {
+      // A late asked that precedes its already-seen terminal in receipt order:
+      // merge the orphan into a complete resolved record instead of merely
+      // refreshing recency or fabricating a second interval.
+      existing.orphan = false;
+      existing.askedMonoMs = monoMs;
+      existing.lastAccessMonoMs = monoMs;
+      _userWaits.delete(key);
+      _userWaits.set(key, existing);
+    } else {
+      // Earliest asked wins; refresh recency only.
+      existing.lastAccessMonoMs = monoMs;
+      _userWaits.delete(key);
+      _userWaits.set(key, existing);
+    }
+  } else {
+    _userWaits.set(key, {
+      key,
+      sessionRef,
+      kind,
+      requestKeyHash,
+      askedMonoMs: monoMs,
+      state: "pending",
+      lastAccessMonoMs: monoMs,
+    });
+  }
+  _cleanupUserWaits();
+}
+
+/**
+ * Record a question/permission terminal. First terminal wins; later
+ * terminals only refresh recency. A terminal without a matching asked is
+ * kept as an orphan (left-censored in the enclosing root cycle).
+ */
+async function _recordUserWaitTerminal(
+  event: OpenCodeEvent,
+  kind: UserWaitKind,
+  result: UserWaitResult,
+): Promise<void> {
+  await _consumeWaitCollectorTestDelay();
+  if (!event.sessionId) return;
+  const sessionRef = await _hashSessionRef(event.sessionId);
+  const rawRequestKey = _waitRequestKey(event);
+  if (!rawRequestKey) {
+    _recordWaitMissingRequestId(sessionRef);
+    return;
+  }
+  const requestKeyHash = await _hashWaitRequestKey(rawRequestKey);
+  const key = _waitKey(sessionRef, kind, requestKeyHash);
+  const monoMs = _safeMonoValue(event.receivedMonoMs) ?? _nowMonoMs();
+  const existing = _userWaits.get(key);
+  if (existing) {
+    if (existing.state === "pending") {
+      existing.state = "resolved";
+      existing.resolvedMonoMs = monoMs;
+      existing.result = result;
+    }
+    // First terminal wins; later terminals only refresh recency.
+    existing.lastAccessMonoMs = monoMs;
+    _userWaits.delete(key);
+    _userWaits.set(key, existing);
+  } else {
+    _userWaits.set(key, {
+      key,
+      sessionRef,
+      kind,
+      requestKeyHash,
+      resolvedMonoMs: monoMs,
+      result,
+      state: "resolved",
+      orphan: true,
+      lastAccessMonoMs: monoMs,
+    });
+  }
+  _cleanupUserWaits();
+}
+
+/**
+ * Bounded cleanup. Order: expired resolved, then oldest resolved, then
+ * oldest pending. Deleting any record that has not yet been reported by a
+ * successfully committed root idle keeps anonymous `evicted` partial
+ * evidence for the owning session, so cleanup can never silently turn into a
+ * "reliable zero".  A resolved record must not be silently TTL-dropped
+ * before its owning cycle has claimed/committed it.
+ */
+function _cleanupUserWaits(force = false): void {
+  const now = _nowMonoMs();
+  const remove = (rec: UserWaitRecord): void => {
+    _userWaits.delete(rec.key);
+    // Unreported deletions always surface as evicted evidence.  Reported
+    // records were already counted by a committed root idle, so a silent
+    // TTL drop cannot turn them into a false zero.
+    if (rec.reported !== true) _recordWaitEvicted(rec.sessionRef);
+  };
+
+  // 1. Expired resolved records first.
+  for (const [key, rec] of _userWaits) {
+    if (rec.state === "resolved" && now - rec.lastAccessMonoMs >= WAIT_RESOLVED_TTL_MS) {
+      remove(rec);
+    }
+  }
+  // 2. Capacity: oldest resolved first, then oldest pending.
+  if (_userWaits.size > MAX_WAIT_RECORDS) {
+    const removable = [..._userWaits.values()].sort((a, b) => {
+      const aPriority = a.state === "resolved" ? 0 : 1;
+      const bPriority = b.state === "resolved" ? 0 : 1;
+      return aPriority - bPriority || a.lastAccessMonoMs - b.lastAccessMonoMs;
+    });
+    for (const rec of removable) {
+      if (_userWaits.size <= RETAIN_WAIT_RECORDS) break;
+      remove(rec);
+    }
+  }
+  // 3. Pending TTL.
+  for (const [key, rec] of _userWaits) {
+    if (rec.state === "pending" && now - rec.lastAccessMonoMs >= WAIT_PENDING_TTL_MS) {
+      remove(rec);
+    }
+  }
+  _cleanupWaitEvidence();
+}
+
+function _userWaitReasonList(reasons: Set<UserWaitPartialReason>): UserWaitPartialReason[] {
+  const order: UserWaitPartialReason[] = [
+    "open_at_cycle_end",
+    "orphan_resolution",
+    "missing_request_id",
+    "evicted",
+    "truncated",
+    "clock_invalid",
+  ];
+  return order.filter((reason) => reasons.has(reason));
+}
+
+/**
+ * Compute one interval by intersecting a wait record with a frozen root
+ * cycle (monotonic axis). Returns undefined when the record does not
+ * intersect this cycle and must be re-evaluated by a later cycle.
+ */
+function _userWaitIntervalForCycle(
+  rec: UserWaitRecord,
+  rootStartMonoMs: number,
+  rootEndMonoMs: number,
+  rootDurationMs: number,
+  reasons: Set<UserWaitPartialReason>,
+): UserWaitInterval | undefined {
+  // Raw (possibly fractional) mono values are used for comparison/intersection;
+  // only the emitted offsets/duration are integerised for the wire.
+  const clamp = (value: number): number => {
+    const bounded = Math.min(rootDurationMs, Math.max(0, value));
+    return _intMonoMs(bounded);
+  };
+
+  // Orphan terminal: no asked observed → left-censored within this cycle.
+  if (rec.orphan && rec.askedMonoMs === undefined) {
+    const resolved = rec.resolvedMonoMs;
+    if (resolved === undefined) return undefined;
+    if (resolved < rootStartMonoMs || resolved > rootEndMonoMs) return undefined;
+    reasons.add("orphan_resolution");
+    return {
+      kind: rec.kind,
+      result: rec.result ?? "replied",
+      intervalState: "left_censored",
+      endOffsetMs: clamp(resolved - rootStartMonoMs),
+    };
+  }
+
+  const asked = rec.askedMonoMs;
+  if (asked === undefined) return undefined;
+  const resolved = rec.resolvedMonoMs;
+
+  // Asked after cycle end → evaluated in a later cycle.
+  if (asked > rootEndMonoMs) return undefined;
+  // Fully resolved before cycle start → already reported by an earlier cycle.
+  if (resolved !== undefined && resolved < rootStartMonoMs) return undefined;
+
+  if (resolved === undefined || resolved > rootEndMonoMs) {
+    // Still open at cycle end → right-censored.
+    reasons.add("open_at_cycle_end");
+    return {
+      kind: rec.kind,
+      intervalState: "right_censored",
+      startOffsetMs: clamp(asked - rootStartMonoMs),
+    };
+  }
+
+  // Resolved within the cycle → complete intersection.
+  if (resolved < asked) {
+    // Monotonic clock anomaly; never fabricate a negative duration.
+    reasons.add("clock_invalid");
+    return undefined;
+  }
+  const startOffsetMs = clamp(asked - rootStartMonoMs);
+  const endOffsetMs = clamp(resolved - rootStartMonoMs);
+  const durationMs = endOffsetMs - startOffsetMs;
+  if (durationMs < 0) {
+    reasons.add("clock_invalid");
+    return undefined;
+  }
+  return {
+    kind: rec.kind,
+    result: rec.result ?? "replied",
+    intervalState: "complete",
+    startOffsetMs,
+    endOffsetMs,
+    durationMs,
+  };
+}
+
+interface UserWaitFreezeResult {
+  timeline: UserWaitTimelineEnvelope;
+  /** Anonymous keys of records that produced an interval in this snapshot. */
+  includedKeys: string[];
+  /** Evidence counts observed at freeze time (committed only on success). */
+  frozenMissingCount: number;
+  frozenEvictedCount: number;
+}
+
+/**
+ * Freeze the wait snapshot for one root idle claim and build the
+ * userWaitTimeline envelope.  Called before enrichment so replies that
+ * arrive during enrichment can never enter the frozen envelope.  MVP only
+ * counts the same root session's own waits; child-session waits are never
+ * attributed to the root by time overlap alone.
+ *
+ * Evidence (missing_request_id / evicted) is read but NOT consumed here:
+ * the caller keeps the frozen counts and subtracts them only on a successful
+ * commit; a rolled-back claim leaves them intact.  This prevents a failed
+ * build/send from silently restoring a "reliable zero" for evidence that was
+ * observed.  The fail-closed overflow flag is process-lifetime and always
+ * forces `evicted` once evidence capacity was exceeded.
+ */
+function _freezeUserWaitSnapshot(
+  sessionRef: string,
+  rootStartMonoMs: number | undefined,
+  rootEndMonoMs: number | undefined,
+): UserWaitFreezeResult {
+  const reasons = new Set<UserWaitPartialReason>();
+  const intervals: UserWaitInterval[] = [];
+  const includedKeys: string[] = [];
+
+  // Frozen (not consumed) evidence counts; the claim commit will subtract.
+  const frozenMissingCount = _waitMissingRequestIds.get(sessionRef) ?? 0;
+  const frozenEvictedCount = _waitEvicted.get(sessionRef) ?? 0;
+  if (frozenMissingCount > 0) reasons.add("missing_request_id");
+  if (frozenEvictedCount > 0 || _waitEvidenceOverflow) reasons.add("evicted");
+
+  // Raw (possibly fractional) mono root cycle; integerise only the wire
+  // duration.  Comparisons/intersections below use the raw values.  A delta
+  // outside [0, MAX_DURATION_MS] is clock_invalid: we never fabricate
+  // intervals or durations on an unusable axis.
+  const start = _safeMonoValue(rootStartMonoMs);
+  const end = _safeMonoValue(rootEndMonoMs);
+  let rootDurationMs: number | undefined;
+  if (start !== undefined && end !== undefined) {
+    const duration = end - start;
+    if (duration >= 0 && duration <= MAX_DURATION_MS) {
+      rootDurationMs = _intMonoMs(duration);
+    }
+  }
+  if (rootDurationMs === undefined) {
+    reasons.add("clock_invalid");
+  }
+
+  let observedIntervalCount = 0;
+  if (rootDurationMs !== undefined && start !== undefined && end !== undefined) {
+    for (const rec of _userWaits.values()) {
+      if (rec.sessionRef !== sessionRef) continue;
+      const interval = _userWaitIntervalForCycle(rec, start, end, rootDurationMs, reasons);
+      if (!interval) continue;
+      observedIntervalCount++;
+      intervals.push(interval);
+      includedKeys.push(rec.key);
+    }
+  }
+
+  // Stable ordering: complete/right-censored by start, left-censored by end.
+  intervals.sort((a, b) => {
+    const aPos = a.startOffsetMs ?? a.endOffsetMs ?? 0;
+    const bPos = b.startOffsetMs ?? b.endOffsetMs ?? 0;
+    return aPos - bPos || a.kind.localeCompare(b.kind) || a.intervalState.localeCompare(b.intervalState);
+  });
+
+  if (intervals.length > MAX_WAIT_INTERVALS) reasons.add("truncated");
+  const displayed = intervals.slice(0, MAX_WAIT_INTERVALS);
+
+  const makeTimeline = (): UserWaitTimelineEnvelope => ({
+    version: 1,
+    partial: reasons.size > 0,
+    partialReasons: _userWaitReasonList(reasons),
+    timeBasis: "root_cycle_receipt_monotonic",
+    observedIntervalCount,
+    displayedIntervalCount: displayed.length,
+    truncated: displayed.length < observedIntervalCount,
+    intervals: [...displayed],
+  });
+
+  let timeline = makeTimeline();
+  while (
+    _textEncoder.encode(JSON.stringify(timeline)).length > MAX_USER_WAIT_TIMELINE_BYTES
+    && displayed.length > 0
+  ) {
+    displayed.pop();
+    reasons.add("truncated");
+    timeline = makeTimeline();
+  }
+  if (_textEncoder.encode(JSON.stringify(timeline)).length > MAX_USER_WAIT_TIMELINE_BYTES) {
+    displayed.length = 0;
+    reasons.add("truncated");
+    timeline = makeTimeline();
+  }
+  return { timeline, includedKeys, frozenMissingCount, frozenEvictedCount };
+}
+
+/** Test/standalone wrapper: freeze and return only the envelope. */
+function _freezeUserWaitTimeline(
+  sessionRef: string,
+  rootStartMonoMs: number | undefined,
+  rootEndMonoMs: number | undefined,
+): UserWaitTimelineEnvelope {
+  return _freezeUserWaitSnapshot(sessionRef, rootStartMonoMs, rootEndMonoMs).timeline;
 }
 
 // ─── Name Sanitisation ──────────────────────────────────────
@@ -2347,6 +2941,26 @@ interface IdleClaim {
   rootRunKey: string;
   rootStartMs?: number;
   rootEndMs?: number;
+  /** Frozen monotonic root-cycle axis for userWaitTimeline. */
+  rootStartMonoMs?: number;
+  rootEndMonoMs?: number;
+  /** Integerised monotonic root-cycle duration (wire value for durationMs). */
+  rootDurationMonoMs?: number;
+  /**
+   * True only when both busy and idle receipts carried explicit monotonic
+   * captures (production hook path).  When false, wall-derived duration is
+   * kept so legacy/direct callers never get mono-mislabeled values.
+   */
+  monoReliable?: boolean;
+  /** Frozen user-wait timeline; built before enrichment, never amended later. */
+  userWaitTimeline?: UserWaitTimelineEnvelope;
+  /** Anonymous keys of records included in the frozen timeline (commit marks reported). */
+  includedWaitKeys: string[];
+  /** Evidence counts frozen at claim time; committed only on success. */
+  frozenMissingCount: number;
+  frozenEvictedCount: number;
+  /** Internal: committed exactly once, then report/evidence are final. */
+  committed?: boolean;
 }
 
 interface ErrorClaim {
@@ -2398,12 +3012,20 @@ function _clearAssistantTiming(sessionRef: string): void {
   _assistantMetadata.set(sessionRef, retained);
 }
 
-function _startBusyCycle(state: SessionState, sessionRef: string, receivedAtMs: number): void {
+function _startBusyCycle(
+  state: SessionState,
+  sessionRef: string,
+  receivedAtMs: number,
+  receivedMonoMs?: number,
+): void {
   state.hadBusy = true;
   state.sentIdle = false;
   state.hadErrorForCycle = false;
   state.cycle++;
   state.cycleStartedAtMs = receivedAtMs;
+  const monoMs = _safeMonoValue(receivedMonoMs);
+  state.cycleStartedMonoMs = monoMs ?? _nowMonoMs();
+  state.cycleStartedMonoReliable = monoMs !== undefined;
   state.cycleEndedAtMs = undefined;
   state.pendingEventId = undefined;
   _clearAssistantTiming(sessionRef);
@@ -2470,6 +3092,24 @@ async function _claimIdleEvent(
     const endedAtMs = _safeEpochMs(event.receivedAtMs) ?? _nowMs();
     const rootCycle = state.cycle;
     const rootStartMs = _safeEpochMs(state.cycleStartedAtMs);
+    const rootStartMonoMs = _safeMonoValue(state.cycleStartedMonoMs);
+    const endedMonoMs = _safeMonoValue(event.receivedMonoMs);
+    const monoReliable = state.cycleStartedMonoReliable === true && endedMonoMs !== undefined;
+    const freeze = _freezeUserWaitSnapshot(
+      sessionRef,
+      monoReliable ? rootStartMonoMs : undefined,
+      monoReliable ? endedMonoMs : undefined,
+    );
+    let rootDurationMonoMs: number | undefined;
+    if (monoReliable && rootStartMonoMs !== undefined && endedMonoMs !== undefined) {
+      const duration = endedMonoMs - rootStartMonoMs;
+      // Aligned with the Python _MAX_DURATION_MS (7 days): only a valid,
+      // in-range delta may drive the top-level duration.  An invalid/out-of-
+      // range mono delta must NOT fall back to wall — durationMs is omitted.
+      if (duration >= 0 && duration <= MAX_DURATION_MS) {
+        rootDurationMonoMs = _intMonoMs(duration);
+      }
+    }
     claim = {
       sessionRef,
       cycle: rootCycle,
@@ -2480,6 +3120,14 @@ async function _claimIdleEvent(
       rootRunKey: _timelineRunKey(sessionRef, rootCycle),
       rootStartMs,
       rootEndMs: endedAtMs,
+      rootStartMonoMs: monoReliable ? rootStartMonoMs : undefined,
+      rootEndMonoMs: monoReliable ? endedMonoMs : undefined,
+      rootDurationMonoMs,
+      monoReliable,
+      userWaitTimeline: freeze.timeline,
+      includedWaitKeys: freeze.includedKeys,
+      frozenMissingCount: freeze.frozenMissingCount,
+      frozenEvictedCount: freeze.frozenEvictedCount,
     };
     state.sentIdle = true;
     state.pendingEventId = eventId;
@@ -2531,6 +3179,37 @@ function _rollbackErrorClaim(claim: ErrorClaim): void {
   _rollbackTimelineFailure(claim.sessionRef, claim.cycle, claim.endedAtMs);
 }
 
+/**
+ * Commit a successfully built root idle claim: permanently subtract the
+ * evidence counts frozen at claim time, and mark the included records as
+ * reported so later cleanup TTL-drops of them stay silent.  Idempotent.
+ */
+function _commitIdleClaim(claim: IdleClaim): void {
+  if (claim.committed) return;
+  claim.committed = true;
+
+  if (claim.frozenMissingCount > 0) {
+    const current = _waitMissingRequestIds.get(claim.sessionRef) ?? 0;
+    const remaining = current - claim.frozenMissingCount;
+    if (remaining <= 0) _waitMissingRequestIds.delete(claim.sessionRef);
+    else _waitMissingRequestIds.set(claim.sessionRef, remaining);
+  }
+  if (claim.frozenEvictedCount > 0) {
+    const current = _waitEvicted.get(claim.sessionRef) ?? 0;
+    const remaining = current - claim.frozenEvictedCount;
+    if (remaining <= 0) _waitEvicted.delete(claim.sessionRef);
+    else _waitEvicted.set(claim.sessionRef, remaining);
+  }
+  for (const key of claim.includedWaitKeys) {
+    const rec = _userWaits.get(key);
+    if (rec) {
+      rec.reported = true;
+      _userWaits.delete(key);
+      _userWaits.set(key, rec);
+    }
+  }
+}
+
 function _rollbackIdleClaim(claim: IdleClaim): void {
   const state = _sessions.get(claim.sessionRef);
   if (state && state.cycle === claim.cycle && state.pendingEventId === claim.eventId) {
@@ -2573,6 +3252,7 @@ function _cleanupSessions(): void {
   _cleanupAssistantMetadata();
   _cleanupMetadataSampleSessions();
   _cleanupTimelineRuns();
+  _cleanupUserWaits();
 }
 
 // ─── Config Resolution ──────────────────────────────────────
@@ -2813,6 +3493,30 @@ async function _buildEnvelope(
         rootClaim.rootRunKey,
       );
     }
+    // The user-wait timeline is always attached to a complete root
+    // completion, even when zero waits were observed (empty intervals +
+    // partial=false = reliable zero).  It was frozen at claim time; replies
+    // arriving during enrichment cannot enter this envelope.
+    if (rootClaim?.userWaitTimeline) {
+      envelope.userWaitTimeline = rootClaim.userWaitTimeline;
+    }
+    // Root duration must be the frozen monotonic value: wall-clock jumps
+    // must never distort the reported duration.  The wall clock only forms
+    // the taskStartedAt/endedAt ISO labels above; the mono duration is
+    // integerised and bounded at claim time.
+    if (rootClaim?.monoReliable === true) {
+      // Reliable mono capture present: only a valid in-range delta may set
+      // durationMs.  An invalid/out-of-range mono delta (end<start or >
+      // MAX_DURATION_MS) explicitly omits the top-level duration — it must
+      // never fall back to the wall-derived value.
+      if (rootClaim.rootDurationMonoMs !== undefined) {
+        envelope.durationMs = rootClaim.rootDurationMonoMs;
+      } else {
+        delete envelope.durationMs;
+      }
+    }
+    // Without reliable mono capture (legacy/direct callers) the wall-derived
+    // duration computed above is intentionally left intact.
   }
 
   // The individual action limits keep this deterministic; retain a final guard
@@ -2822,6 +3526,12 @@ async function _buildEnvelope(
       // Timeline is optional; never allow it to turn an otherwise valid root
       // completion into a dropped envelope.
       delete envelope.subagentTimeline;
+    }
+  }
+  if (!config?.allowOversizedAction && _serializedEnvelopeBytes(envelope) > MAX_ENVELOPE_BYTES) {
+    if (envelope.userWaitTimeline) {
+      // Same optional-treatment for the user-wait timeline.
+      delete envelope.userWaitTimeline;
     }
   }
   if (!config?.allowOversizedAction && _serializedEnvelopeBytes(envelope) > MAX_ENVELOPE_BYTES) {
@@ -3092,12 +3802,20 @@ async function _processEvent(
   const t = event.type;
 
   // Replies only mutate the local pre-flush bucket. They never enter the
-  // busy/idle state machine and never produce a webhook.
+  // busy/idle state machine and never produce a webhook.  The wait collector
+  // runs before the early return so disabled notifications never produce a
+  // false zero wait statistic.
   if (t === "permission.replied") {
+    await _recordUserWaitTerminal(
+      event,
+      "permission",
+      event.reply === "reject" ? "rejected" : "replied",
+    );
     _removeActionRequest(event, "permission");
     return null;
   }
   if (t === "question.replied" || t === "question.rejected") {
+    await _recordUserWaitTerminal(event, "question", t === "question.rejected" ? "rejected" : "replied");
     _removeActionRequest(event, "question");
     return null;
   }
@@ -3105,6 +3823,8 @@ async function _processEvent(
   // Direct callers retain the historical single-event processing behavior.
   // The V1 hook uses _queueActionEvent instead, so real notifications debounce.
   if (t === "permission.updated" || t === "permission.asked") {
+    // Wait collection must precede the events filter below.
+    await _recordUserWaitAsked(event, "permission");
     // Production V1 events must use _queueActionEvent so same-session action
     // requests get the fixed aggregation window. Keep this direct path only
     // for existing unit helpers and explicit internal callers.
@@ -3112,6 +3832,8 @@ async function _processEvent(
     return _buildEnvelope(event, _generateId(), config);
   }
   if (t === "question.asked") {
+    // Wait collection must precede the events filter below.
+    await _recordUserWaitAsked(event, "question");
     // Do not route the production hook through this immediate helper; it is a
     // compatibility path for direct tests/internal single-event processing.
     if (!config.events.has("question_asked")) return null;
@@ -3125,7 +3847,12 @@ async function _processEvent(
   // --- session.status = busy ---
   if (t === "session.status" && event.status === "busy") {
     if (!options?.statePrepared && (!st.hadBusy || st.sentIdle)) {
-      _startBusyCycle(st, sessionRef, _safeEpochMs(event.receivedAtMs) ?? _nowMs());
+      _startBusyCycle(
+        st,
+        sessionRef,
+        _safeEpochMs(event.receivedAtMs) ?? _nowMs(),
+        event.receivedMonoMs,
+      );
     }
     return null; // no webhook for busy
   }
@@ -3138,10 +3865,17 @@ async function _processEvent(
       const envelope = await _buildEnvelope(event, claim.eventId, { ...config, idleClaim: claim });
       if (!envelope) {
         // Roll back only the claimed cycle. A newer busy cycle may already
-        // have replaced this state while enrichment was in flight.
+        // have replaced this state while enrichment was in flight.  Evidence
+        // stays frozen (not consumed), so a retry can re-report it.
         _rollbackIdleClaim(claim);
         return null;
       }
+      // Commit the wait snapshot only after the envelope is successfully
+      // built (the same boundary the existing claim uses: a build failure
+      // rolls back, a successful build marks the cycle reported even if the
+      // later transport fails and never resends).  This permanently consumes
+      // the frozen evidence and marks included records as reported.
+      _commitIdleClaim(claim);
       return envelope;
     } catch (error) {
       // _onEvent is a last-resort safety net, but rollback must happen here,
@@ -3508,6 +4242,7 @@ function _normalizeWrappedEvent(wrapped: { event: Event }): OpenCodeEvent | null
         eventId: wrapped.event.id,
         requestId: typeof props.requestID === "string" ? props.requestID : undefined,
         sessionId: typeof props.sessionID === "string" ? props.sessionID : undefined,
+        reply: typeof props.reply === "string" ? props.reply : undefined,
       };
     }
 
@@ -3874,78 +4609,121 @@ const server: Plugin = async (input, options) => {
      * All errors caught and logged; no unhandled rejection.
      */
     async event(wrapped: { event: Event }): Promise<void> {
+      // Capture wall and monotonic clocks adjacently at hook entry.  The
+      // wall clock feeds existing ISO/timeline fields; the monotonic clock
+      // feeds user-wait durations/offsets and is immune to wall-clock jumps.
       const receivedAtMs = _nowMs();
+      const receivedMonoMs = _nowMonoMs();
       let idleClaim: IdleClaim | null = null;
       let errorClaim: ErrorClaim | null = null;
+      let normalized: OpenCodeEvent | null = null;
+      let isBusy = false;
+      let handled = false;
       try {
         // v1.18.4 assistant updates are metadata-only and must be consumed
         // before normalisation so they never enter the state machine/HTTP path.
         if (await _consumeAssistantMetadata(wrapped, diagnostics)) return;
 
-        const normalized = _normalizeWrappedEvent(wrapped);
-        if (!normalized) return;
-        normalized.receivedAtMs = receivedAtMs;
+        const rawSessionId = typeof wrapped.event?.properties?.sessionID === "string"
+          ? wrapped.event.properties.sessionID
+          : undefined;
+        if (!rawSessionId) return;
 
-        const actionKind: ActionKind | undefined = normalized.type === "permission.updated"
-          ? "permission"
-          : normalized.type === "question.asked"
-            ? "question"
-            : undefined;
-        if (actionKind) {
-          const enabled = actionKind === "permission"
-            ? config.events.has("permission_asked")
-            : config.events.has("question_asked");
-          if (enabled) {
-            await _queueActionEvent(normalized, input, config, diagnostics, actionKind);
+        // Per-session serial state phase: wait collector, busy/idle/error
+        // transition, and claim freeze all run strictly in hook-receipt order.
+        // The runtime may fire-and-forget, so async hashing must never let a
+        // later event's collector/claim jump ahead of an earlier one.  Raw
+        // session id is only a transient in-memory queue key (like
+        // _actionBuckets) and never leaves this process.
+        await _enqueueSessionState(rawSessionId, async () => {
+          const n = _normalizeWrappedEvent(wrapped);
+          if (!n) return;
+          n.receivedAtMs = receivedAtMs;
+          n.receivedMonoMs = receivedMonoMs;
+
+          // The wait collector runs before any action-notification filter or
+          // early return so disabled notifications never produce false zero
+          // wait statistics.  It only uses anonymous sessionRef + kind + the
+          // immediately hashed request key; raw ids never enter the map.
+          const actionKind: ActionKind | undefined = n.type === "permission.updated"
+            ? "permission"
+            : n.type === "question.asked"
+              ? "question"
+              : undefined;
+          if (actionKind) {
+            await _recordUserWaitAsked(n, actionKind);
+            const enabled = actionKind === "permission"
+              ? config.events.has("permission_asked")
+              : config.events.has("question_asked");
+            if (enabled) {
+              await _queueActionEvent(n, input, config, diagnostics, actionKind);
+            }
+            handled = true;
+            return;
           }
-          return;
-        }
 
-        if (normalized.type === "permission.replied") {
-          _removeActionRequest(normalized, "permission");
-          return;
-        }
-        if (normalized.type === "question.replied" || normalized.type === "question.rejected") {
-          _removeActionRequest(normalized, "question");
-          return;
-        }
+          if (n.type === "permission.replied") {
+            await _recordUserWaitTerminal(
+              n,
+              "permission",
+              n.reply === "reject" ? "rejected" : "replied",
+            );
+            _removeActionRequest(n, "permission");
+            handled = true;
+            return;
+          }
+          if (n.type === "question.replied" || n.type === "question.rejected") {
+            await _recordUserWaitTerminal(
+              n,
+              "question",
+              n.type === "question.rejected" ? "rejected" : "replied",
+            );
+            _removeActionRequest(n, "question");
+            handled = true;
+            return;
+          }
 
-        // Capture busy receipt time before any session.get/messages await.
-        // Keep the existing best-effort busy enrichment below because it
-        // populates scope/model caches used by later notifications.
-        const isBusy = normalized.type === "session.status" && normalized.status === "busy";
-        if (isBusy) {
-          await _onEvent(normalized, config, _log);
-        }
+          // Busy transition happens inside the serialized state phase so a
+          // later event can never claim a cycle before its busy was recorded.
+          const busy = n.type === "session.status" && n.status === "busy";
+          if (busy) {
+            isBusy = true;
+            normalized = n;
+            await _onEvent(n, config, _log);
+            return;
+          }
 
-        // Claim and freeze idle timing before enrichment. The claim remains
-        // valid even if a newer busy cycle starts while enrichment is pending.
-        const isIdle = normalized.type === "session.idle"
-          || (normalized.type === "session.status" && normalized.status === "idle");
-        if (isIdle) {
-          idleClaim = await _claimIdleEvent(normalized, config);
-          if (!idleClaim) return;
-        }
+          // Claim and freeze idle timing before enrichment. The claim remains
+          // valid even if a newer busy cycle starts while enrichment is pending.
+          const isIdle = n.type === "session.idle"
+            || (n.type === "session.status" && n.status === "idle");
+          if (isIdle) {
+            idleClaim = await _claimIdleEvent(n, config);
+            if (idleClaim) normalized = n;
+            return;
+          }
 
-        // session.error has the same pre-enrichment claim boundary as root
-        // idle.  A delayed error may finish its old cycle, but never mutate a
-        // newer busy cycle that began while session.get/messages was pending.
-        if (normalized.type === "session.error") {
-          errorClaim = await _claimErrorEvent(normalized, config);
-          if (!errorClaim) return;
-        }
+          // session.error has the same pre-enrichment claim boundary as root
+          // idle.
+          if (n.type === "session.error") {
+            errorClaim = await _claimErrorEvent(n, config);
+            if (errorClaim) normalized = n;
+            return;
+          }
+        });
 
-        // Attempt session metadata enrichment from runtime
-        if (normalized.sessionId) {
-          await _enrichEvent(
-            normalized,
-            input,
-            diagnostics,
-            config.auxiliarySessionNames,
-            idleClaim?.cycle ?? errorClaim?.cycle,
-          );
-        }
+        // The state phase is done and the queue is released.  Enrichment and
+        // network sends are deliberately NOT in the serialized queue so they
+        // never block a later event's state transition or claim freeze.
+        if (handled || !normalized?.sessionId) return;
 
+        await _enrichEvent(
+          normalized,
+          input,
+          diagnostics,
+          config.auxiliarySessionNames,
+          idleClaim?.cycle ?? errorClaim?.cycle,
+        );
         await _onEvent(
           normalized,
           config,
@@ -3991,6 +4769,13 @@ export type {
   TimelinePartialReason,
   TimelineItemStatus,
   TimelineTimingQuality,
+  UserWaitKind,
+  UserWaitResult,
+  UserWaitIntervalState,
+  UserWaitPartialReason,
+  UserWaitInterval,
+  UserWaitTimelineEnvelope,
+  UserWaitRecord,
   OpenCodeEvent,
   SessionState,
   AssistantMetadata,
@@ -4008,6 +4793,8 @@ export type {
 export {
   _hashSessionRef,
   _setClockForTests,
+  _setMonoClockForTests,
+  _setClocksForTests,
   _generateId,
   _sanitiseName,
   _projectNameFromPath,
@@ -4030,6 +4817,7 @@ export {
   _cleanupSessions,
   _claimIdleEvent,
   _rollbackIdleClaim,
+  _commitIdleClaim,
   _idleProcessing,
   _actionBuckets,
   _resetActionBuckets,
@@ -4050,4 +4838,22 @@ export {
   _cachedAssistantMetadata,
   _cleanupAssistantMetadata,
   _enrichEvent,
+  _userWaits,
+  _waitMissingRequestIds,
+  _waitEvicted,
+  _recordUserWaitAsked,
+  _recordUserWaitTerminal,
+  _cleanupUserWaits,
+  _freezeUserWaitTimeline,
+  _freezeUserWaitSnapshot,
+  _waitRequestKey,
+  _hashWaitRequestKey,
+  _userWaitIntervalForCycle,
+  _enqueueSessionState,
+  _hookQueueTails,
+  _hookQueueDepth,
+  _setWaitCollectorTestDelay,
+  _setWaitEvidenceOverflowForTests,
+  _safeMonoValue,
+  _intMonoMs,
 };

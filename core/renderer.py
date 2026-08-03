@@ -78,6 +78,22 @@ _TIMELINE_STATUS_VIEW = {
     "cancelled": ("已取消", "×"),
     "unknown": ("状态未知", "?"),
 }
+_USER_WAIT_KIND_VIEW = {
+    "question": ("Question", "问题"),
+    "permission": ("Permission", "权限"),
+}
+_USER_WAIT_RESULT_VIEW = {
+    "replied": "已响应",
+    "rejected": "已拒绝",
+}
+_USER_WAIT_REASON_VIEW = {
+    "open_at_cycle_end": "结束时仍在等待",
+    "orphan_resolution": "仅观测到等待结束",
+    "missing_request_id": "部分等待无法关联",
+    "evicted": "部分记录未保留",
+    "truncated": "等待记录已截断",
+    "clock_invalid": "时间信息不完整",
+}
 _TIMELINE_DENSITY_VIEW = {
     "comfortable": {
         "row_min_height": 54,
@@ -492,6 +508,29 @@ DEFAULT_HTML_TEMPLATE = """\
       line-height: 1.45;
     }
 
+    .user-wait-summary {
+      margin-top: 10px;
+      padding: 9px 11px;
+      border: 1px solid rgba(181, 113, 72, 0.18);
+      border-radius: 11px;
+      color: #744f39;
+      background: linear-gradient(135deg, rgba(252, 237, 224, 0.82), rgba(247, 239, 244, 0.76));
+    }
+
+    .user-wait-summary-main {
+      font-size: 15px;
+      font-weight: 750;
+      line-height: 1.4;
+    }
+
+    .user-wait-summary-detail {
+      margin-top: 2px;
+      color: #806858;
+      font-size: 13px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
     .subagent-flags {
       margin-top: 8px;
     }
@@ -681,8 +720,8 @@ DEFAULT_HTML_TEMPLATE = """\
     }
 
     .subagent-metric:nth-child(4),
-    .subagent-metric:nth-child(5) {
-      grid-column: span 3;
+    .subagent-metric:nth-child(5),
+    .subagent-metric:nth-child(6) {
       border-top: 1px solid rgba(60, 60, 67, 0.12);
     }
 
@@ -815,13 +854,17 @@ DEFAULT_HTML_TEMPLATE = """\
 
       {% set timeline = event.subagent_timeline_view|default(none) %}
       {% if timeline %}
-      <div class="section-label">子任务执行</div>
+      <div class="section-label">{{ timeline.section_label|e }}</div>
       <section class="subagent-panel">
         <div class="subagent-summary">
           <div class="subagent-summary-main">{{ timeline.summary_text|e }}</div>
           {% if timeline.timing_summary %}
           <div class="subagent-summary-meta">{{ timeline.timing_summary|e }}</div>
           {% endif %}
+          <div class="user-wait-summary">
+            <div class="user-wait-summary-main">{{ timeline.wait_summary_text|e }}</div>
+            <div class="user-wait-summary-detail">{{ timeline.wait_summary_detail|e }}</div>
+          </div>
           {% if timeline.flags %}
           <div class="subagent-flags">
             {% for flag in timeline.flags %}<span class="subagent-flag">{{ flag|e }}</span>{% endfor %}
@@ -896,6 +939,10 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       --timeline-failed: #d9878d;
       --timeline-running: #d8ad55;
       --timeline-unknown: #7f9dbe;
+      --wait-question: #d99557;
+      --wait-question-border: #ae6b32;
+      --wait-permission: #b982a5;
+      --wait-permission-border: #8d5c7e;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -976,13 +1023,26 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       border-left: 1px solid rgba(60,60,67,.12);
       text-align: center;
     }
-    .metric:nth-child(4), .metric:nth-child(5) {
-      grid-column: span 3;
+    .metric:nth-child(4), .metric:nth-child(5), .metric:nth-child(6) {
       border-top: 1px solid rgba(60,60,67,.12);
     }
     .metric:first-child, .metric:nth-child(4) { border-left: 0; }
     .metric-value { display: block; font-size: 18px; font-weight: 780; }
     .metric-label { display: block; margin-top: 3px; color: #8a8a8e; font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; }
+    .wait-overview {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(174,107,50,.18);
+      border-radius: 12px;
+      color: #704c37;
+      background: linear-gradient(135deg, rgba(252,238,225,.88), rgba(247,239,245,.82));
+    }
+    .wait-overview-main { min-width: 0; font-size: 14px; font-weight: 780; line-height: 1.4; overflow-wrap: anywhere; }
+    .wait-overview-detail { min-width: 0; color: #7c6658; font-size: 12px; line-height: 1.4; text-align: right; overflow-wrap: anywhere; }
     .flags { margin-top: 10px; }
     .flag { margin: 0 6px 4px 0; padding: 3px 8px; color: #6e6e73; font-size: 12px; font-weight: 700; }
     .section-label { margin: 20px 0 8px; color: #8a8a8e; font-size: 13px; font-weight: 750; letter-spacing: .12em; }
@@ -1028,6 +1088,70 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       min-height: var(--row-min-height);
       border-top: 1px solid rgba(148,163,184,.24);
     }
+    .wait-row {
+      min-height: 70px;
+      border-top: 1px solid rgba(148,163,184,.28);
+      background: #fffaf6;
+    }
+    .wait-row .task, .wait-row .state { background: linear-gradient(180deg, #fffaf6, #faf4f1); }
+    .wait-row .track { background: linear-gradient(180deg, #faf1e9, #f6edf1); }
+    .wait-task { display: flex; flex-direction: column; justify-content: center; gap: 6px; border-left-color: rgba(174,107,50,.46); }
+    .wait-task-name { font-size: 14px; font-weight: 780; line-height: 1.3; }
+    .wait-kind-list { display: flex; flex-wrap: wrap; gap: 5px; }
+    .wait-kind {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 7px;
+      border: 1px solid rgba(118,88,72,.16);
+      border-radius: 999px;
+      color: #775d4d;
+      background: rgba(255,255,255,.7);
+      font-size: 10px;
+      font-weight: 720;
+      white-space: nowrap;
+    }
+    .wait-kind:before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--wait-question); }
+    .wait-kind.permission:before { background: var(--wait-permission); }
+    .wait-track:after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      height: 1px;
+      background: rgba(125,90,75,.09);
+    }
+    .wait-bar {
+      position: absolute;
+      z-index: 1;
+      height: 13px;
+      border: 1px solid var(--wait-question-border);
+      border-radius: 6px;
+      background: var(--wait-question);
+      box-shadow: 0 2px 5px rgba(112,70,42,.15);
+    }
+    .wait-bar.question { top: 14px; }
+    .wait-bar.permission { top: 42px; border-color: var(--wait-permission-border); background: var(--wait-permission); }
+    .wait-bar.right-censored, .wait-bar.left-censored {
+      border-style: dashed;
+      opacity: .82;
+      background: repeating-linear-gradient(135deg, rgba(217,149,87,.58) 0, rgba(217,149,87,.58) 5px, rgba(255,250,246,.72) 5px, rgba(255,250,246,.72) 9px);
+    }
+    .wait-bar.permission.right-censored, .wait-bar.permission.left-censored {
+      background: repeating-linear-gradient(135deg, rgba(185,130,165,.58) 0, rgba(185,130,165,.58) 5px, rgba(250,244,248,.76) 5px, rgba(250,244,248,.76) 9px);
+    }
+    .wait-bar.right-censored:after, .wait-bar.left-censored:before {
+      content: "";
+      position: absolute;
+      top: -4px;
+      bottom: -4px;
+      width: 2px;
+      border-radius: 2px;
+      background: currentColor;
+    }
+    .wait-bar.right-censored:after { right: -1px; }
+    .wait-bar.left-censored:before { left: -1px; }
     .timeline-row:nth-child(odd) .task,
     .timeline-row:nth-child(odd) .state { background: var(--timeline-row-odd); }
     .timeline-row:nth-child(odd) .track { background: linear-gradient(180deg, var(--timeline-plot-odd-top), var(--timeline-plot-odd-bottom)); }
@@ -1132,6 +1256,13 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     .legend-mark.cancelled { background: #a8b3c0; border: 1px solid #7b8795; }
     .legend-mark.unknown { background: var(--timeline-unknown); border: 1px solid #5f7f9f; }
     .legend-mark.partial { background: #cbd6e2; border: 1px dashed #7e8fa3; }
+    .legend-mark.wait-question { background: var(--wait-question); border: 1px solid var(--wait-question-border); }
+    .legend-mark.wait-permission { background: var(--wait-permission); border: 1px solid var(--wait-permission-border); }
+    .legend-mark.wait-censored { background: #f1d9ca; border: 1px dashed #a47457; }
+    @media (max-width: 1500px) {
+      .wait-overview { grid-template-columns: 1fr; }
+      .wait-overview-detail { text-align: left; }
+    }
   </style>
 </head>
 <body>
@@ -1141,19 +1272,25 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
         <div class="eyebrow-wrap"><span class="eyebrow">根任务 · 相对时间</span></div>
         <div class="status-wrap"><span class="status-badge">相对时间线</span></div>
       </div>
-      <h1>子任务执行时间线</h1>
+      <h1>根任务执行时间线</h1>
       <div class="subtitle">{{ event.subtitle|e }}</div>
       <div class="overview">
         {% for metric in event.metrics %}<div class="metric"><span class="metric-value">{{ metric.value|e }}</span><span class="metric-label">{{ metric.label|e }}</span></div>{% endfor %}
       </div>
+      <div class="wait-overview"><div class="wait-overview-main">{{ event.wait_summary_text|e }}</div><div class="wait-overview-detail">{{ event.wait_summary_detail|e }}</div></div>
       {% if event.flags %}<div class="flags">{% for flag in event.flags %}<span class="flag">{{ flag|e }}</span>{% endfor %}</div>{% endif %}
 
       <div class="section-label">执行区间</div>
       <section class="timeline">
         <div class="axis">
-          <div class="axis-name">子任务</div>
+          <div class="axis-name">等待 / 子任务</div>
           <div class="axis-track">{% for tick in event.axis_ticks %}<span class="tick {{ tick.edge_class }}" style="left: {{ tick.left_px }}px;">{{ tick.label|e }}</span>{% endfor %}</div>
           <div class="axis-state">状态 / 耗时</div>
+        </div>
+        <div class="row wait-row" style="min-height: {{ event.wait_row_height }}px;">
+          <div class="task wait-task"><div class="wait-task-name">等待用户</div><div class="wait-kind-list"><span class="wait-kind question">Question · 问题</span><span class="wait-kind permission">Permission · 权限</span></div></div>
+          <div class="track wait-track">{% for line in event.grid_lines %}<span class="gridline" style="left: {{ line.left_px }}px;"></span>{% endfor %}{% for wait in event.wait_intervals %}<span class="wait-bar {{ wait.kind }} {{ wait.state_class }}" title="{{ wait.title|e }}" data-counted-duration="{{ 'true' if wait.counted_duration else 'false' }}" style="left: {{ wait.left_px }}px; width: {{ wait.width_px }}px;"></span>{% endfor %}</div>
+          <div class="state wait-state"><span class="state-label{% if event.wait_partial or event.wait_truncated %} running{% endif %}">{{ event.wait_state_label|e }}</span><span class="state-time">{{ event.wait_state_time|e }}</span></div>
         </div>
         {% for item in event.gantt_items %}
         <div class="row timeline-row" style="min-height: {{ item.estimated_row_height }}px;">
@@ -1180,6 +1317,9 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
         <span class="legend-item"><span class="legend-mark cancelled"></span>已取消</span>
         <span class="legend-item"><span class="legend-mark unknown"></span>状态未知</span>
         <span class="legend-item"><span class="legend-mark partial"></span>区间不完整</span>
+        <span class="legend-item"><span class="legend-mark wait-question"></span>Question 等待</span>
+        <span class="legend-item"><span class="legend-mark wait-permission"></span>Permission 等待</span>
+        <span class="legend-item"><span class="legend-mark wait-censored"></span>边界可见但不计时</span>
       </div>
     </div>
   </main>
@@ -1346,6 +1486,102 @@ def _timeline_coverage_union_ms(
     return min(total_duration, max(0.0, union_ms))
 
 
+def _timeline_interval_union_ms(
+    intervals: list[tuple[float, float]], *, axis_end_ms: float
+) -> float:
+    """Return the clipped union for intervals whose duration semantics are reliable."""
+
+    clipped: list[tuple[float, float]] = []
+    limit = max(0.0, axis_end_ms)
+    for start, end in intervals:
+        if (
+            not _is_finite_timeline_number(start)
+            or not _is_finite_timeline_number(end)
+            or end < start
+        ):
+            continue
+        clipped_start = min(limit, max(0.0, float(start)))
+        clipped_end = min(limit, max(0.0, float(end)))
+        if clipped_end > clipped_start:
+            clipped.append((clipped_start, clipped_end))
+    if not clipped:
+        return 0.0
+
+    clipped.sort()
+    union_ms = 0.0
+    current_start, current_end = clipped[0]
+    for start, end in clipped[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        union_ms += current_end - current_start
+        current_start, current_end = start, end
+    return min(limit, max(0.0, union_ms + current_end - current_start))
+
+
+def _user_wait_boundary(interval: dict[str, Any]) -> float | None:
+    state = interval.get("intervalState")
+    key = "startOffsetMs" if state == "right_censored" else "endOffsetMs"
+    value = interval.get(key)
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    ):
+        return float(value)
+    return None
+
+
+def _user_wait_complete_interval(
+    interval: dict[str, Any],
+) -> tuple[float, float] | None:
+    if interval.get("intervalState") != "complete":
+        return None
+    start = interval.get("startOffsetMs")
+    end = interval.get("endOffsetMs")
+    duration = interval.get("durationMs")
+    if not (
+        isinstance(start, (int, float))
+        and not isinstance(start, bool)
+        and math.isfinite(start)
+        and isinstance(end, (int, float))
+        and not isinstance(end, bool)
+        and math.isfinite(end)
+        and _is_finite_timeline_number(duration)
+    ):
+        return None
+    start_value = float(start) if isinstance(start, (int, float)) else 0.0
+    end_value = float(end) if isinstance(end, (int, float)) else 0.0
+    if end_value < start_value:
+        return None
+    return start_value, end_value
+
+
+def _timeline_clip_span(
+    start: float, end: float, *, axis_end_ms: float
+) -> tuple[float, float]:
+    limit = max(0.0, axis_end_ms)
+    clipped_start = min(limit, max(0.0, start))
+    clipped_end = min(limit, max(0.0, end))
+    if clipped_end < clipped_start:
+        clipped_end = clipped_start
+    return clipped_start, clipped_end
+
+
+def _timeline_complete_span_on_axis(
+    start: float, end: float, *, axis_end_ms: float
+) -> tuple[float, float, bool, bool]:
+    """Return clipped bounds plus intersection and clipping semantics."""
+
+    clipped_start, clipped_end = _timeline_clip_span(
+        start, end, axis_end_ms=axis_end_ms
+    )
+    zero_point_on_axis = start == end and 0 <= start <= max(0.0, axis_end_ms)
+    intersects = clipped_end > clipped_start or zero_point_on_axis
+    clipped = clipped_start != start or clipped_end != end
+    return clipped_start, clipped_end, intersects, clipped
+
+
 def _format_timeline_percentage(value: float) -> str:
     bounded = min(100.0, max(0.0, value))
     rounded = round(bounded, 1)
@@ -1456,6 +1692,7 @@ def _build_subagent_timeline_layout(
     *,
     timeline_end_ms: float,
     max_depth: int,
+    extra_located_rows_height: int = 0,
 ) -> SubagentTimelineLayout:
     item_count = len(item_views)
     density = _timeline_density(item_count)
@@ -1554,7 +1791,8 @@ def _build_subagent_timeline_layout(
         else:
             unlocated_height += estimated_row_height
 
-    vertical_chrome_height = 620 + int(density_view["axis_height"])
+    located_height += max(0, extra_located_rows_height)
+    vertical_chrome_height = 760 + int(density_view["axis_height"])
     estimated_height = vertical_chrome_height + located_height
     if unlocated_height:
         estimated_height += 60 + unlocated_height
@@ -1838,14 +2076,16 @@ def _timeline_is_root_completion(event: NormalizedEvent) -> bool:
 
 
 def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | None:
-    """Build a deterministic, display-only timeline view without raw identifiers."""
+    """Build one root-cycle view from independent subagent and user-wait data."""
+
+    if not _timeline_is_root_completion(event):
+        return None
 
     timeline = event.subagent_timeline
-    if not _timeline_is_root_completion(event) or not isinstance(timeline, dict):
-        return None
-    raw_items = timeline.get("items")
+    wait_timeline = event.user_wait_timeline
+    raw_items = timeline.get("items") if isinstance(timeline, dict) else []
     if not isinstance(raw_items, list):
-        return None
+        raw_items = []
     if len(raw_items) > SUBAGENT_TIMELINE_MAX_ITEMS:
         raise ValueError("subagent timeline items exceed renderer wire limit")
     indexed_items = [
@@ -1853,25 +2093,68 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         for index, item in enumerate(raw_items)
         if isinstance(item, dict) and not _is_auxiliary_timeline_item(item)
     ]
-    if not indexed_items:
+
+    wait_available = isinstance(wait_timeline, dict)
+    raw_wait_intervals = wait_timeline.get("intervals") if wait_available else []
+    if not isinstance(raw_wait_intervals, list):
+        raw_wait_intervals = []
+    if len(raw_wait_intervals) > SUBAGENT_TIMELINE_MAX_ITEMS:
+        raise ValueError("user wait timeline intervals exceed renderer wire limit")
+    wait_intervals = [item for item in raw_wait_intervals if isinstance(item, dict)]
+
+    if not indexed_items and not wait_available:
         return None
 
     item_count = len(indexed_items)
     excluded_count = len(raw_items) - item_count
-    observed_raw = timeline.get("observedItemCount")
+    observed_raw = (
+        timeline.get("observedItemCount") if isinstance(timeline, dict) else 0
+    )
     observed_count = (
         max(item_count, observed_raw - excluded_count)
         if isinstance(observed_raw, int) and not isinstance(observed_raw, bool)
         else item_count
     )
-    truncated = timeline.get("truncated") is True or observed_count > item_count
-    partial = timeline.get("partial") is True
+    truncated = (
+        isinstance(timeline, dict) and timeline.get("truncated") is True
+    ) or observed_count > item_count
+    partial = isinstance(timeline, dict) and timeline.get("partial") is True
+    raw_subagent_reasons = (
+        timeline.get("partialReasons") if isinstance(timeline, dict) else []
+    )
+    subagent_reasons = (
+        [reason for reason in raw_subagent_reasons if isinstance(reason, str)]
+        if isinstance(raw_subagent_reasons, list)
+        else []
+    )
+
+    wait_observed_raw = (
+        wait_timeline.get("observedIntervalCount") if wait_available else 0
+    )
+    wait_observed_count = (
+        max(len(wait_intervals), wait_observed_raw)
+        if isinstance(wait_observed_raw, int)
+        and not isinstance(wait_observed_raw, bool)
+        else len(wait_intervals)
+    )
+    wait_truncated = wait_available and (
+        wait_timeline.get("truncated") is True
+        or wait_observed_count > len(wait_intervals)
+    )
+    wait_partial = wait_available and wait_timeline.get("partial") is True
+    raw_wait_reasons = wait_timeline.get("partialReasons") if wait_available else []
+    wait_reasons = (
+        [reason for reason in raw_wait_reasons if isinstance(reason, str)]
+        if isinstance(raw_wait_reasons, list)
+        else []
+    )
 
     status_counts = {status: 0 for status in _TIMELINE_STATUSES}
     all_intervals: list[tuple[int, float, float]] = []
     reliable_intervals: list[tuple[float, float]] = []
     missing_count = 0
     max_depth = 1
+    observable_boundaries: list[float] = []
     for index, item in indexed_items:
         status_key, _, _ = _timeline_status_view(item.get("status"))
         status_counts[status_key] += 1
@@ -1883,11 +2166,27 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             missing_count += 1
         else:
             all_intervals.append((index, interval[0], interval[1]))
+            observable_boundaries.append(interval[1])
         reliable_interval = _timeline_reliable_interval(item)
         if reliable_interval is not None:
             reliable_intervals.append(reliable_interval)
 
-    missing_ratio = missing_count / item_count
+    wait_complete_candidates: list[tuple[dict[str, Any], float, float]] = []
+    wait_censored_count = 0
+    for interval in wait_intervals:
+        complete_interval = _user_wait_complete_interval(interval)
+        if complete_interval is not None:
+            wait_complete_candidates.append(
+                (interval, complete_interval[0], complete_interval[1])
+            )
+            observable_boundaries.append(complete_interval[1])
+            continue
+        boundary = _user_wait_boundary(interval)
+        if boundary is not None:
+            observable_boundaries.append(boundary)
+            wait_censored_count += 1
+
+    missing_ratio = missing_count / item_count if item_count else 0.0
     parallel_indices, overlap_pairs = _timeline_overlap_data(all_intervals)
     observed_peak = _timeline_peak_concurrency(
         [(start, end) for _, start, end in all_intervals]
@@ -1900,10 +2199,66 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         and _is_finite_timeline_number(raw_total_duration_ms)
         else None
     )
+    axis_uses_root_duration = total_duration_ms is not None
+    timeline_end_ms = (
+        total_duration_ms
+        if total_duration_ms is not None
+        else max(observable_boundaries, default=0.0)
+    )
+    plot_scale_end_ms = max(1.0, timeline_end_ms)
+    clipped_reliable_intervals: list[tuple[float, float]] = []
+    subagent_interval_clipped = False
+    for start, end in reliable_intervals:
+        clipped_start, clipped_end, intersects, clipped = (
+            _timeline_complete_span_on_axis(start, end, axis_end_ms=timeline_end_ms)
+        )
+        subagent_interval_clipped = subagent_interval_clipped or clipped
+        if intersects and clipped_end > clipped_start:
+            clipped_reliable_intervals.append((clipped_start, clipped_end))
+
+    wait_complete_intervals: list[tuple[float, float]] = []
+    wait_complete_kind_counts = {"question": 0, "permission": 0}
+    wait_interval_clipped = False
+    wait_counted_candidate_ids: set[int] = set()
+    wait_clipped_candidate_ids: set[int] = set()
+    for interval, start, end in wait_complete_candidates:
+        clipped_start, clipped_end, intersects, clipped = (
+            _timeline_complete_span_on_axis(start, end, axis_end_ms=timeline_end_ms)
+        )
+        if clipped:
+            wait_interval_clipped = True
+            wait_clipped_candidate_ids.add(id(interval))
+        if not intersects:
+            continue
+        wait_counted_candidate_ids.add(id(interval))
+        wait_complete_intervals.append((clipped_start, clipped_end))
+        kind = interval.get("kind")
+        if kind in wait_complete_kind_counts:
+            wait_complete_kind_counts[kind] += 1
     coverage_union_ms = _timeline_coverage_union_ms(
         reliable_intervals, total_duration_ms
     )
     coverage_rate = _timeline_coverage_rate(coverage_union_ms, total_duration_ms)
+    wait_union_ms = (
+        _timeline_interval_union_ms(
+            wait_complete_intervals, axis_end_ms=timeline_end_ms
+        )
+        if wait_available
+        else None
+    )
+    wait_rate = (
+        _timeline_coverage_rate(wait_union_ms, total_duration_ms)
+        if wait_union_ms is not None
+        else None
+    )
+    known_union_ms = (
+        _timeline_interval_union_ms(
+            [*clipped_reliable_intervals, *wait_complete_intervals],
+            axis_end_ms=total_duration_ms,
+        )
+        if total_duration_ms is not None and total_duration_ms > 0
+        else None
+    )
 
     complexity_score = max(0, item_count - SUBAGENT_TIMELINE_SIMPLE_BASE_ITEMS)
     complexity_score += 2 * max(0, max_depth - SUBAGENT_TIMELINE_SIMPLE_MAX_DEPTH)
@@ -1917,7 +2272,9 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     if truncated:
         complexity_score += 2
 
-    if missing_ratio > SUBAGENT_TIMELINE_MISSING_RATIO_LIMIT:
+    if item_count == 0:
+        mode = "summary"
+    elif missing_ratio > SUBAGENT_TIMELINE_MISSING_RATIO_LIMIT:
         mode = "degraded"
     else:
         hard_complex = (
@@ -1931,9 +2288,9 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             or complexity_score >= SUBAGENT_TIMELINE_COMPLEXITY_THRESHOLD
             else "simple"
         )
+    if wait_available and (wait_intervals or wait_partial or wait_truncated):
+        mode = "complex"
 
-    timeline_end_ms = max((end for _, _, end in all_intervals), default=1.0)
-    timeline_end_ms = max(1.0, timeline_end_ms)
     item_views: list[dict[str, Any]] = []
     for index, item in indexed_items:
         status_class, status_label, status_symbol = _timeline_status_view(
@@ -1972,7 +2329,6 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             meta_labels.append("区间不完整")
         else:
             meta_labels.append("时间未定位")
-
         timing_label = (
             duration_label
             if duration_label
@@ -2005,22 +2361,27 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         )
 
     item_views.sort(key=lambda item: (item["sort_start"], item["source_index"]))
+    wait_row_height = 70 if mode == "complex" else 0
     layout = _build_subagent_timeline_layout(
         item_views,
-        timeline_end_ms=timeline_end_ms,
+        timeline_end_ms=plot_scale_end_ms,
         max_depth=max_depth,
+        extra_located_rows_height=wait_row_height,
     )
-    px_per_ms = layout.plot_width / timeline_end_ms
+    px_per_ms = layout.plot_width / plot_scale_end_ms
     for item in item_views:
         interval_start = item.pop("interval_start", None)
         interval_end = item.pop("interval_end", None)
         if isinstance(interval_start, (int, float)) and isinstance(
             interval_end, (int, float)
         ):
-            actual_left_px = min(
-                float(layout.plot_width), max(0.0, interval_start * px_per_ms)
+            clipped_start, clipped_end = _timeline_clip_span(
+                float(interval_start),
+                float(interval_end),
+                axis_end_ms=timeline_end_ms,
             )
-            duration_ms = max(0.0, interval_end - interval_start)
+            actual_left_px = clipped_start * px_per_ms
+            duration_ms = clipped_end - clipped_start
             actual_width_px = duration_ms * px_per_ms
             visual_width_px = (
                 max(float(SUBAGENT_TIMELINE_MIN_BAR_WIDTH), actual_width_px)
@@ -2043,12 +2404,151 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         item.pop("sort_start", None)
         item.pop("source_index", None)
 
+    wait_interval_views: list[dict[str, Any]] = []
+    for interval in wait_intervals:
+        state = interval.get("intervalState")
+        raw_kind = interval.get("kind")
+        kind = (
+            raw_kind
+            if isinstance(raw_kind, str) and raw_kind in _USER_WAIT_KIND_VIEW
+            else "question"
+        )
+        kind_label, kind_cn = _USER_WAIT_KIND_VIEW[kind]
+        raw_result = interval.get("result")
+        result_label = (
+            _USER_WAIT_RESULT_VIEW.get(raw_result, "")
+            if isinstance(raw_result, str)
+            else ""
+        )
+        complete_interval = _user_wait_complete_interval(interval)
+        if complete_interval is not None:
+            if id(interval) not in wait_counted_candidate_ids:
+                continue
+            visual_start, visual_end = complete_interval
+            state_label = result_label or "已完成"
+            clipped_start, clipped_end = _timeline_clip_span(
+                visual_start, visual_end, axis_end_ms=timeline_end_ms
+            )
+            timing_label = format_duration_ms(clipped_end - clipped_start)
+            title = f"{kind_label}（{kind_cn}）· {state_label} · {timing_label}"
+            if id(interval) in wait_clipped_candidate_ids:
+                title += " · 按根任务边界裁剪"
+            state_class = "complete"
+        elif state == "right_censored":
+            boundary = _user_wait_boundary(interval)
+            visual_start = boundary if boundary is not None else 0.0
+            visual_end = timeline_end_ms
+            state_label = "仍在等待"
+            timing_label = "未计入时长"
+            title = (
+                f"{kind_label}（{kind_cn}）· 结束边界未知："
+                "从已观测开始延伸至时间轴尾，不计入等待时长"
+            )
+            state_class = "right-censored"
+        elif state == "left_censored":
+            boundary = _user_wait_boundary(interval)
+            visual_start = 0.0
+            visual_end = boundary if boundary is not None else 0.0
+            state_label = "仅见结束"
+            timing_label = "未计入时长"
+            title = (
+                f"{kind_label}（{kind_cn}）· 开始边界未知："
+                "仅观测到结束边界，不计入等待时长"
+            )
+            state_class = "left-censored"
+        else:
+            continue
+        clipped_start, clipped_end = _timeline_clip_span(
+            visual_start, visual_end, axis_end_ms=timeline_end_ms
+        )
+        actual_left_px = clipped_start * px_per_ms
+        visual_span_ms = clipped_end - clipped_start
+        actual_width_px = visual_span_ms * px_per_ms
+        minimum = (
+            6.0 if state_class != "complete" else float(SUBAGENT_TIMELINE_MIN_BAR_WIDTH)
+        )
+        visual_width_px = max(minimum, actual_width_px) if visual_span_ms > 0 else 4.0
+        visual_width_px = min(float(layout.plot_width), visual_width_px)
+        visual_left_px = min(
+            actual_left_px, max(0.0, layout.plot_width - visual_width_px)
+        )
+        wait_interval_views.append(
+            {
+                "kind": kind,
+                "kind_label": kind_label,
+                "state_class": state_class,
+                "state_label": state_label,
+                "timing_label": timing_label,
+                "title": title,
+                "left_px": f"{visual_left_px:.2f}".rstrip("0").rstrip("."),
+                "width_px": f"{visual_width_px:.2f}".rstrip("0").rstrip("."),
+                "counted_duration": state_class == "complete",
+            }
+        )
+
+    complete_wait_count = len(wait_complete_intervals)
+    wait_observation_limited = bool(
+        wait_partial
+        or wait_truncated
+        or wait_reasons
+        or wait_censored_count
+        or wait_interval_clipped
+    )
+    if not wait_available:
+        wait_summary_text = "等待用户：不可用"
+        wait_summary_detail = "客户端未提供等待观测"
+        wait_state_label = "信息不可用"
+        wait_state_time = "不可推断为 0"
+    elif wait_observation_limited:
+        if complete_wait_count and wait_union_ms is not None:
+            wait_summary_text = (
+                f"等待用户至少 {format_duration_ms(wait_union_ms)}"
+                f" · 至少 {complete_wait_count} 次"
+            )
+            wait_state_time = f"至少 {format_duration_ms(wait_union_ms)}"
+        else:
+            wait_summary_text = "等待用户观测不完整 · 当前展示中无可计时完整区间"
+            wait_state_time = "不显示精确总量"
+        wait_detail_parts = [
+            _USER_WAIT_REASON_VIEW.get(reason, "部分观测不可用")
+            for reason in wait_reasons
+        ]
+        if wait_interval_clipped:
+            wait_detail_parts.append("按根任务边界裁剪")
+        wait_summary_detail = (
+            " · ".join(dict.fromkeys(wait_detail_parts)) or "部分观测不可用"
+        )
+        wait_state_label = "观测不完整"
+    else:
+        wait_summary_text = (
+            f"等待用户 {format_duration_ms(wait_union_ms or 0)}"
+            f" · {complete_wait_count} 次"
+        )
+        wait_summary_detail = "观测完整"
+        wait_state_label = "观测完整"
+        wait_state_time = format_duration_ms(wait_union_ms or 0)
+
+    wait_kind_parts = [
+        f"{_USER_WAIT_KIND_VIEW[kind][0]} {count}"
+        for kind, count in wait_complete_kind_counts.items()
+        if count
+    ]
+    if wait_kind_parts:
+        wait_summary_detail += " · " + " · ".join(wait_kind_parts)
+    if wait_censored_count:
+        wait_summary_detail += f" · {wait_censored_count} 个边界区间未计时"
+    if wait_rate is not None:
+        rate_prefix = "已确认至少占" if wait_observation_limited else "占根任务"
+        wait_summary_detail += (
+            f" · {rate_prefix} {_format_timeline_percentage(wait_rate)}"
+        )
+
     status_parts = [
         f"{_TIMELINE_STATUS_VIEW[status][0]} {count}"
         for status, count in status_counts.items()
         if count
     ]
-    summary_text = f"{observed_count} 个子任务"
+    summary_text = f"{observed_count} 个子任务" if item_count else "暂无子任务记录"
     if status_parts:
         summary_text += " · " + " · ".join(status_parts)
 
@@ -2058,6 +2558,37 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         or observed_count > item_count
         or len(reliable_intervals) < item_count
     )
+    subagent_unclassified_limited = (
+        not isinstance(timeline, dict)
+        or observation_limited
+        or bool(subagent_reasons)
+        or subagent_interval_clipped
+    )
+    unclassified_observation_limited = (
+        subagent_unclassified_limited or not wait_available or wait_observation_limited
+    )
+    if (
+        total_duration_ms is not None
+        and total_duration_ms > 0
+        and known_union_ms is not None
+    ):
+        unclassified_ms = max(0.0, total_duration_ms - known_union_ms)
+        unclassified_rate = min(
+            100.0, max(0.0, unclassified_ms / total_duration_ms * 100)
+        )
+        unclassified_value = (
+            ("至多 " if unclassified_observation_limited else "")
+            + format_duration_ms(unclassified_ms)
+            + f"（{_format_timeline_percentage(unclassified_rate)}）"
+        )
+        unclassified_label = "未分类时间 / 占比"
+        if unclassified_observation_limited:
+            unclassified_label += " · 观测受限"
+    else:
+        unclassified_ms = None
+        unclassified_rate = None
+        unclassified_value = "不可计算"
+        unclassified_label = "未分类时间 / 占比"
     peak_metric_label = "已观测峰值并发" if observation_limited else "峰值并发"
     coverage_duration_label = (
         "已观测子任务覆盖时长" if observation_limited else "子任务覆盖时长"
@@ -2103,8 +2634,16 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         flags.append(f"已记录 {item_count}/{observed_count}")
     if missing_count:
         flags.append(f"{missing_count} 项时间不完整")
+    if subagent_interval_clipped:
+        flags.append("子任务区间按根任务边界裁剪")
     if max_depth > 1:
         flags.append("包含嵌套执行")
+    if not axis_uses_root_duration:
+        flags.append("时间轴仅到已观测边界")
+    if not wait_available:
+        flags.append("等待信息不可用")
+    elif wait_observation_limited:
+        flags.append("用户等待观测不完整")
 
     if mode == "degraded":
         notice = "部分时间数据缺失，以下仅按已观测信息展示。"
@@ -2141,16 +2680,41 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             else "不可用",
             "label": coverage_rate_label,
         },
+        {
+            "value": unclassified_value,
+            "label": unclassified_label,
+        },
     ]
 
     located_items = [item for item in item_views if item["located"]]
     unlocated_items = [item for item in item_views if not item["located"]]
     gantt_displayed_count = len(item_views)
     observation_subtitle = " · 指标按已观测范围计算" if observation_limited else ""
-    axis_ticks, grid_lines = _build_timeline_ticks(timeline_end_ms, layout)
+    if timeline_end_ms > 0:
+        axis_ticks, grid_lines = _build_timeline_ticks(timeline_end_ms, layout)
+    else:
+        axis_ticks = [
+            {
+                "value_ms": 0.0,
+                "left_px": "0",
+                "edge_class": "first",
+                "label": "0",
+                "label_width_px": _timeline_tick_label_width("0"),
+            }
+        ]
+        grid_lines = []
+    subtitle = (
+        f"观测 {observed_count} 个 · 本图展示 {gantt_displayed_count} 个"
+        f" · 时间相对根任务起点{observation_subtitle}"
+        if item_count
+        else "无子任务区间 · 时间相对根任务起点"
+    )
+    if wait_available:
+        subtitle += " · 含用户等待轨道"
 
     return {
         "mode": mode,
+        "section_label": "根任务时间线" if wait_available else "子任务执行",
         "complexity_score": complexity_score,
         "item_count": item_count,
         "observed_count": observed_count,
@@ -2160,6 +2724,10 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         "total_duration_ms": total_duration_ms,
         "coverage_union_ms": coverage_union_ms,
         "coverage_rate": coverage_rate,
+        "known_union_ms": known_union_ms,
+        "unclassified_ms": unclassified_ms,
+        "unclassified_rate": unclassified_rate,
+        "unclassified_observation_limited": unclassified_observation_limited,
         "missing_count": missing_count,
         "missing_ratio": missing_ratio,
         "partial": partial,
@@ -2171,17 +2739,32 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         "main_items": main_items,
         "main_hidden_count": main_hidden_count,
         "metrics": metrics,
-        "subtitle": (
-            f"观测 {observed_count} 个 · 本图展示 {gantt_displayed_count} 个"
-            f" · 时间相对根任务起点{observation_subtitle}"
-        ),
+        "subtitle": subtitle,
         "layout": layout.to_view(),
         "timeline_end_ms": timeline_end_ms,
+        "timeline_end_source": "root_duration"
+        if axis_uses_root_duration
+        else "observed_boundary",
         "px_per_ms": px_per_ms,
         "axis_ticks": axis_ticks,
         "grid_lines": grid_lines,
         "gantt_items": located_items,
         "unlocated_items": unlocated_items,
+        "wait_available": wait_available,
+        "wait_partial": wait_partial,
+        "wait_truncated": wait_truncated,
+        "wait_observation_limited": wait_observation_limited,
+        "wait_interval_clipped": wait_interval_clipped,
+        "wait_observed_count": wait_observed_count,
+        "wait_complete_count": complete_wait_count,
+        "wait_union_ms": wait_union_ms,
+        "wait_rate": wait_rate,
+        "wait_summary_text": wait_summary_text,
+        "wait_summary_detail": wait_summary_detail,
+        "wait_state_label": wait_state_label,
+        "wait_state_time": wait_state_time,
+        "wait_intervals": wait_interval_views,
+        "wait_row_height": wait_row_height,
     }
 
 
@@ -2400,12 +2983,19 @@ def _append_subagent_timeline_text(
     """Append a bounded, non-visual summary for a root OpenCode completion."""
 
     timeline = event.subagent_timeline
+    wait_timeline = event.user_wait_timeline
     scope = getattr(event.session_scope, "value", event.session_scope)
-    if (
-        event.event != "opencode.session_idle"
-        or scope != "root"
-        or not isinstance(timeline, dict)
-    ):
+    if event.event != "opencode.session_idle" or scope != "root":
+        return
+    if not isinstance(timeline, dict):
+        if not isinstance(wait_timeline, dict):
+            return
+        view = _build_subagent_timeline_view(event)
+        if view is None:
+            return
+        lines.append("")
+        lines.append("根任务时间线：")
+        _append_timeline_aggregate_text(lines, view)
         return
 
     lines.append("")
@@ -2471,6 +3061,27 @@ def _append_subagent_timeline_text(
         and observed > displayed
     ):
         lines.append(f"另有 {observed - displayed} 个任务未展示")
+
+    view = _build_subagent_timeline_view(event)
+    if view is not None:
+        _append_timeline_aggregate_text(lines, view)
+
+
+def _append_timeline_aggregate_text(lines: list[str], view: dict[str, Any]) -> None:
+    """Append bounded wait and residual-time summaries without another heading."""
+
+    lines.append(str(view["wait_summary_text"]))
+    lines.append(str(view["wait_summary_detail"]))
+    unclassified = next(
+        (
+            metric
+            for metric in view["metrics"]
+            if str(metric["label"]).startswith("未分类时间 / 占比")
+        ),
+        None,
+    )
+    if unclassified is not None:
+        lines.append(f"{unclassified['label']}：{unclassified['value']}")
 
 
 def prepare_subagent_timeline(event: NormalizedEvent) -> PreparedSubagentTimeline:

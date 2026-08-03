@@ -36,6 +36,7 @@ _MAX_TIMELINE_DEPTH = 8
 _MAX_TIMELINE_ATTEMPT = 1_000_000
 _MAX_TIMELINE_REASONS = 6
 _MAX_TIMELINE_NUMBER = 2**53 - 1
+_MAX_USER_WAIT_TIMELINE_BYTES = 12 * 1024
 
 # ─── 允许字段 ──────────────────────────────────────────────
 
@@ -93,6 +94,42 @@ _TIMELINE_STATUSES = frozenset(
 _TIMELINE_QUALITIES = frozenset({"observed", "fallback", "partial", "unknown"})
 _TIMELINE_REF_RE = re.compile(r"^[0-9a-f]{32}$")
 
+# ─── userWaitTimeline 契约 ─────────────────────────────────
+
+_USER_WAIT_ALLOW = frozenset(
+    {
+        "version",
+        "timeBasis",
+        "partial",
+        "partialReasons",
+        "observedIntervalCount",
+        "displayedIntervalCount",
+        "truncated",
+        "intervals",
+    }
+)
+_USER_WAIT_INTERVAL_ALLOW = frozenset(
+    {
+        "kind",
+        "result",
+        "intervalState",
+        "startOffsetMs",
+        "endOffsetMs",
+        "durationMs",
+    }
+)
+_USER_WAIT_REASONS = (
+    "open_at_cycle_end",
+    "orphan_resolution",
+    "missing_request_id",
+    "evicted",
+    "truncated",
+    "clock_invalid",
+)
+_USER_WAIT_KINDS = frozenset({"question", "permission"})
+_USER_WAIT_RESULTS = frozenset({"replied", "rejected"})
+_USER_WAIT_STATES = frozenset({"complete", "right_censored", "left_censored"})
+
 # ─── 敏感字段 — 白名单自然拒绝，但列出便于可读 ───────────
 
 _SENSITIVE_KEYS: frozenset[str] = frozenset()
@@ -146,6 +183,22 @@ _MSG_SECURE: dict[str, str] = {
     "subagentTimeline.truncated": "无效的 subagentTimeline.truncated 字段",
     "subagentTimeline.items": "无效的 subagentTimeline.items 字段",
     "subagentTimeline.item": "无效的 subagentTimeline item 字段",
+    "userWaitTimeline": "无效的 userWaitTimeline 字段",
+    "userWaitTimeline.version": "无效的 userWaitTimeline.version 字段",
+    "userWaitTimeline.timeBasis": "无效的 userWaitTimeline.timeBasis 字段",
+    "userWaitTimeline.partial": "无效的 userWaitTimeline.partial 字段",
+    "userWaitTimeline.partialReasons": "无效的 userWaitTimeline.partialReasons 字段",
+    "userWaitTimeline.observedIntervalCount": "无效的 userWaitTimeline.observedIntervalCount 字段",
+    "userWaitTimeline.displayedIntervalCount": "无效的 userWaitTimeline.displayedIntervalCount 字段",
+    "userWaitTimeline.truncated": "无效的 userWaitTimeline.truncated 字段",
+    "userWaitTimeline.intervals": "无效的 userWaitTimeline.intervals 字段",
+    "userWaitTimeline.interval": "无效的 userWaitTimeline interval 字段",
+    "userWaitTimeline.interval.kind": "无效的 userWaitTimeline interval.kind 字段",
+    "userWaitTimeline.interval.result": "无效的 userWaitTimeline interval.result 字段",
+    "userWaitTimeline.interval.intervalState": "无效的 userWaitTimeline interval.intervalState 字段",
+    "userWaitTimeline.interval.startOffsetMs": "无效的 userWaitTimeline interval.startOffsetMs 字段",
+    "userWaitTimeline.interval.endOffsetMs": "无效的 userWaitTimeline interval.endOffsetMs 字段",
+    "userWaitTimeline.interval.durationMs": "无效的 userWaitTimeline interval.durationMs 字段",
 }
 
 
@@ -642,6 +695,224 @@ def _validate_subagent_timeline(raw: Any) -> dict[str, Any]:
     return result
 
 
+def _user_wait_invalid(field: str = "userWaitTimeline") -> NoReturn:
+    raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
+
+
+def _check_user_wait_offset(val: Any, field: str) -> int:
+    """非负有限严格 int；bool/float/NaN/负数一律拒绝。"""
+    if not _is_strict_int(val) or val < 0 or val > _MAX_TIMELINE_NUMBER:
+        _user_wait_invalid(field)
+    return val
+
+
+def _validate_user_wait_interval(raw: Any) -> dict[str, Any]:
+    """Validate one user-wait interval against the strict state combination contract.
+
+    偏移边界决策：遵循既有 subagentTimeline 兼容模式 —— adapter 不校验 offset 是否
+    超过 top-level ``durationMs``（越界由 renderer 防御性裁剪到 ``[0, duration]``），
+    与 ``_validate_subagent_timeline`` 行为保持一致，避免同轴双 timeline 契约分叉。
+    """
+    if not isinstance(raw, dict):
+        _user_wait_invalid("userWaitTimeline.interval")
+    _check_unknown_fields(raw, _USER_WAIT_INTERVAL_ALLOW, "userWaitTimeline.interval")
+
+    kind = raw.get("kind")
+    state = raw.get("intervalState")
+    if not isinstance(kind, str) or kind not in _USER_WAIT_KINDS:
+        _user_wait_invalid("userWaitTimeline.interval.kind")
+    if not isinstance(state, str) or state not in _USER_WAIT_STATES:
+        _user_wait_invalid("userWaitTimeline.interval.intervalState")
+
+    # 可选 offset 字段：必须为严格非负有限 int（bool/float/NaN/负数拒绝）
+    offsets: dict[str, int] = {}
+    for key in ("startOffsetMs", "endOffsetMs", "durationMs"):
+        if key in raw:
+            offsets[key] = _check_user_wait_offset(
+                raw[key], f"userWaitTimeline.interval.{key}"
+            )
+
+    if state == "complete":
+        # 必须且只能包含 kind,result,intervalState,start,end,duration；result 非空枚举
+        required = {
+            "kind",
+            "result",
+            "intervalState",
+            "startOffsetMs",
+            "endOffsetMs",
+            "durationMs",
+        }
+        if set(raw) != required:
+            _user_wait_invalid("userWaitTimeline.interval")
+        result = raw["result"]
+        if not isinstance(result, str) or result not in _USER_WAIT_RESULTS:
+            _user_wait_invalid("userWaitTimeline.interval.result")
+        start = offsets["startOffsetMs"]
+        end = offsets["endOffsetMs"]
+        duration = offsets["durationMs"]
+        if end < start:
+            _user_wait_invalid("userWaitTimeline.interval.endOffsetMs")
+        if duration != end - start:
+            _user_wait_invalid("userWaitTimeline.interval.durationMs")
+        return {
+            "kind": kind,
+            "result": result,
+            "intervalState": state,
+            "startOffsetMs": start,
+            "endOffsetMs": end,
+            "durationMs": duration,
+        }
+
+    if state == "right_censored":
+        # 必须且只能包含 kind,intervalState,start；result/end/duration 省略
+        required = {"kind", "intervalState", "startOffsetMs"}
+        if set(raw) != required:
+            _user_wait_invalid("userWaitTimeline.interval")
+        return {
+            "kind": kind,
+            "intervalState": state,
+            "startOffsetMs": offsets["startOffsetMs"],
+        }
+
+    # left_censored：必须且只能包含 kind,result,intervalState,end；result 非空枚举
+    required = {"kind", "result", "intervalState", "endOffsetMs"}
+    if set(raw) != required:
+        _user_wait_invalid("userWaitTimeline.interval")
+    result = raw["result"]
+    if not isinstance(result, str) or result not in _USER_WAIT_RESULTS:
+        _user_wait_invalid("userWaitTimeline.interval.result")
+    return {
+        "kind": kind,
+        "result": result,
+        "intervalState": state,
+        "endOffsetMs": offsets["endOffsetMs"],
+    }
+
+
+def _validate_user_wait_timeline(raw: Any) -> dict[str, Any]:
+    """Validate and copy the user-wait timeline envelope (strict contract).
+
+    顶层输入 ``userWaitTimeline``；可选缺失表示旧 client，空完整 timeline 表示可靠 0。
+    """
+    if not isinstance(raw, dict):
+        _user_wait_invalid()
+    _check_unknown_fields(raw, _USER_WAIT_ALLOW, "userWaitTimeline")
+    required = {
+        "version",
+        "timeBasis",
+        "partial",
+        "partialReasons",
+        "observedIntervalCount",
+        "displayedIntervalCount",
+        "truncated",
+        "intervals",
+    }
+    if not required.issubset(raw):
+        _user_wait_invalid()
+
+    if not _is_strict_int(raw["version"]) or raw["version"] != 1:
+        _user_wait_invalid("userWaitTimeline.version")
+    if raw["timeBasis"] != "root_cycle_receipt_monotonic":
+        _user_wait_invalid("userWaitTimeline.timeBasis")
+    partial = raw["partial"]
+    truncated = raw["truncated"]
+    if not isinstance(partial, bool):
+        _user_wait_invalid("userWaitTimeline.partial")
+    if not isinstance(truncated, bool):
+        _user_wait_invalid("userWaitTimeline.truncated")
+
+    raw_reasons = raw["partialReasons"]
+    if (
+        not isinstance(raw_reasons, list)
+        or len(raw_reasons) > _MAX_TIMELINE_REASONS
+        or any(reason not in _USER_WAIT_REASONS for reason in raw_reasons)
+        or len(set(raw_reasons)) != len(raw_reasons)
+        or tuple(raw_reasons)
+        != tuple(reason for reason in _USER_WAIT_REASONS if reason in raw_reasons)
+    ):
+        _user_wait_invalid("userWaitTimeline.partialReasons")
+    reasons = list(raw_reasons)
+
+    observed_count = _check_timeline_count(
+        raw["observedIntervalCount"],
+        "userWaitTimeline.observedIntervalCount",
+        _MAX_TIMELINE_OBSERVED_ITEMS,
+    )
+    displayed_count = _check_timeline_count(
+        raw["displayedIntervalCount"],
+        "userWaitTimeline.displayedIntervalCount",
+        _MAX_TIMELINE_ITEMS,
+    )
+    if displayed_count > observed_count:
+        _user_wait_invalid("userWaitTimeline.displayedIntervalCount")
+
+    raw_intervals = raw["intervals"]
+    if not isinstance(raw_intervals, list) or len(raw_intervals) > _MAX_TIMELINE_ITEMS:
+        _user_wait_invalid("userWaitTimeline.intervals")
+    if len(raw_intervals) != displayed_count:
+        _user_wait_invalid("userWaitTimeline.intervals")
+
+    # 一致性：partial 与不完整证据双向绑定
+    if partial != bool(reasons):
+        _user_wait_invalid()
+    if truncated and (not partial or "truncated" not in reasons):
+        _user_wait_invalid()
+    if "truncated" in reasons and not truncated:
+        _user_wait_invalid()
+    if truncated and not (observed_count > displayed_count):
+        _user_wait_invalid()
+
+    intervals: list[dict[str, Any]] = []
+    has_right_censored = False
+    has_left_censored = False
+    for raw_interval in raw_intervals:
+        interval = _validate_user_wait_interval(raw_interval)
+        state = interval["intervalState"]
+        if state == "right_censored":
+            has_right_censored = True
+        elif state == "left_censored":
+            has_left_censored = True
+        intervals.append(interval)
+
+    # censored interval 也要求 partial=true
+    if (has_right_censored or has_left_censored) and not partial:
+        _user_wait_invalid()
+
+    # reason 强绑定（仅 truncated=false 时）：open_at_cycle_end→至少一个
+    # right_censored；orphan_resolution→至少一个 left_censored；其他 reason
+    # 不强绑具体 interval。truncated=true 时对应 censored interval 可能已被
+    # 截断出 displayed 列表（Oracle Gate1 P1），允许 reason 存在而 displayed
+    # 中无对应 censored；truncated=false 时保留严格绑定。
+    if not truncated:
+        if "open_at_cycle_end" in reasons and not has_right_censored:
+            _user_wait_invalid()
+        if "orphan_resolution" in reasons and not has_left_censored:
+            _user_wait_invalid()
+
+    result = {
+        "version": 1,
+        "timeBasis": "root_cycle_receipt_monotonic",
+        "partial": partial,
+        "partialReasons": reasons,
+        "observedIntervalCount": observed_count,
+        "displayedIntervalCount": displayed_count,
+        "truncated": truncated,
+        "intervals": intervals,
+    }
+    timeline_size = 0
+    try:
+        timeline_size = len(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        _user_wait_invalid()
+    if timeline_size > _MAX_USER_WAIT_TIMELINE_BYTES:
+        _user_wait_invalid()
+    return result
+
+
 # ─── Session Name 清洗 ─────────────────────────────────────
 
 
@@ -983,6 +1254,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
                     "question",
                     "error",
                     "subagentTimeline",
+                    "userWaitTimeline",
                 }
             ),
             "payload",
@@ -1022,6 +1294,15 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         model = _check_agent_or_model(payload.get("model"), "model")
         model_variant = _check_model_variant(payload.get("modelVariant"))
         duration_ms = _check_duration_ms(payload.get("durationMs"))
+
+        user_wait_timeline: dict[str, Any] | None = None
+        if "userWaitTimeline" in payload:
+            # 只允许 root session_idle 携带；非 root、error、question/permission action 均拒绝
+            if event != "opencode.session_idle" or session_scope != SessionScope.ROOT:
+                _user_wait_invalid()
+            user_wait_timeline = _validate_user_wait_timeline(
+                payload["userWaitTimeline"]
+            )
         instance_display_name = _clean_session_name(
             _check_session_name(payload.get("instanceDisplayName"))
         )
@@ -1122,6 +1403,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             question_raw=question_raw,
             error_raw=error_raw,
             subagent_timeline=subagent_timeline,
+            user_wait_timeline=user_wait_timeline,
         )
 
     @staticmethod
@@ -1147,6 +1429,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         question_raw: dict[str, Any] | None,
         error_raw: dict[str, Any] | None,
         subagent_timeline: dict[str, Any] | None,
+        user_wait_timeline: dict[str, Any] | None,
     ) -> NormalizedEvent:
         # status
         status_map = {
@@ -1375,6 +1658,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             links=[],
             raw={},
             subagent_timeline=subagent_timeline,
+            user_wait_timeline=user_wait_timeline,
             # 仅使用严格校验后的 payload durationMs（busy→idle 当前任务耗时）
             task_duration_ms=duration_ms if duration_ms is not None else None,
         )

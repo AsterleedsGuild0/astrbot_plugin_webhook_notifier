@@ -180,6 +180,56 @@ def _timeline_item(
     return item
 
 
+def _wait_interval(
+    *,
+    kind: str = "question",
+    state: str = "complete",
+    start: int | None = 100,
+    end: int | None = 500,
+    result: str = "replied",
+) -> dict:
+    interval: dict = {"kind": kind, "intervalState": state}
+    if state == "complete":
+        assert start is not None and end is not None
+        interval.update(
+            {
+                "result": result,
+                "startOffsetMs": start,
+                "endOffsetMs": end,
+                "durationMs": end - start,
+            }
+        )
+    elif state == "right_censored":
+        assert start is not None
+        interval["startOffsetMs"] = start
+    elif state == "left_censored":
+        assert end is not None
+        interval.update({"result": result, "endOffsetMs": end})
+    return interval
+
+
+def _wait_timeline(
+    intervals: list[dict],
+    *,
+    partial: bool = False,
+    partial_reasons: list[str] | None = None,
+    truncated: bool = False,
+    observed_count: int | None = None,
+) -> dict:
+    return {
+        "version": 1,
+        "timeBasis": "root_cycle_receipt_monotonic",
+        "partial": partial,
+        "partialReasons": partial_reasons or [],
+        "observedIntervalCount": observed_count
+        if observed_count is not None
+        else len(intervals),
+        "displayedIntervalCount": len(intervals),
+        "truncated": truncated,
+        "intervals": intervals,
+    }
+
+
 def _timeline_event(
     items: list[dict],
     *,
@@ -188,6 +238,7 @@ def _timeline_event(
     truncated: bool = False,
     observed_count: int | None = None,
     total_duration_ms: int | None | object = ...,
+    user_wait_timeline: dict | None | object = ...,
 ) -> NormalizedEvent:
     event = _make_event(title="根任务已完成", fields=[])
     event.provider = "opencode"
@@ -216,6 +267,10 @@ def _timeline_event(
     else:
         event.task_duration_ms = (
             total_duration_ms if isinstance(total_duration_ms, int) else None
+        )
+    if user_wait_timeline is not ...:
+        event.user_wait_timeline = (
+            user_wait_timeline if isinstance(user_wait_timeline, dict) else None
         )
     return event
 
@@ -422,6 +477,52 @@ class TestRenderTextDefault:
         assert "Child 11" in result
         assert "Child 12" not in result
         assert "其余 8 个任务未展开" in result
+
+    def test_mixed_timeline_text_keeps_bounded_subagents_and_adds_wait_residual(self):
+        event = _timeline_event(
+            [
+                _timeline_item(index, start=0, end=1000, name=f"mixed-{index}")
+                for index in range(20)
+            ],
+            total_duration_ms=5000,
+            user_wait_timeline=_wait_timeline(
+                [
+                    _wait_interval(start=2000, end=3000),
+                    _wait_interval(state="right_censored", start=4000, end=None),
+                ],
+                partial=True,
+                partial_reasons=["open_at_cycle_end"],
+            ),
+        )
+        text = render_text_default(event)
+        timeline_text = text.split("子任务时间线：", 1)[1]
+        assert "等待用户至少 1 秒 · 至少 1 次" in timeline_text
+        assert "结束时仍在等待" in timeline_text
+        assert "未分类时间 / 占比 · 观测受限：至多 3 秒（60%）" in timeline_text
+        assert "mixed-11" in timeline_text
+        assert "mixed-12" not in timeline_text
+        assert "其余 8 个任务未展开" in timeline_text
+        assert timeline_text.count("子任务时间线：") == 0
+
+    @pytest.mark.parametrize(
+        ("total_duration_ms", "expected"),
+        [
+            (5000, "未分类时间 / 占比：3 秒（60%）"),
+            (None, "未分类时间 / 占比：不可计算"),
+        ],
+    )
+    def test_mixed_timeline_text_preserves_exact_and_unavailable_residual_semantics(
+        self, total_duration_ms, expected
+    ):
+        event = _timeline_event(
+            [_timeline_item(0, start=0, end=1000)],
+            total_duration_ms=total_duration_ms,
+            user_wait_timeline=_wait_timeline([_wait_interval(start=2000, end=3000)]),
+        )
+        text = render_text_default(event)
+        assert "等待用户 1 秒 · 1 次" in text
+        assert "观测完整 · Question 1" in text
+        assert expected in text
 
     def test_omp_example_format(self):
         """应匹配 FSD 中的 OMP 示例格式。"""
@@ -846,6 +947,7 @@ class TestSubagentTimelineVisuals:
                 _timeline_item(3, start=3000, end=4000),
             ],
             total_duration_ms=5000,
+            user_wait_timeline=_wait_timeline([]),
         )
         view = _build_subagent_timeline_view(event)
         assert view is not None and view["mode"] == "complex"
@@ -861,6 +963,7 @@ class TestSubagentTimelineVisuals:
             "总任务时长",
             "子任务覆盖时长",
             "子任务覆盖率",
+            "未分类时间 / 占比",
         ]
         assert [metric["value"] for metric in view["metrics"]] == [
             "4",
@@ -868,6 +971,7 @@ class TestSubagentTimelineVisuals:
             "5 秒",
             "4 秒",
             "80%",
+            "1 秒（20%）",
         ]
 
         main_html = render_html_default(event)
@@ -950,6 +1054,9 @@ class TestSubagentTimelineVisuals:
             "不可用" if total_duration_ms is None else "0 毫秒"
         )
         assert values["子任务覆盖率"] == "不可用"
+        if total_duration_ms == 0:
+            assert view["timeline_end_ms"] == 0
+            assert [tick["label"] for tick in view["axis_ticks"]] == ["0"]
 
     def test_empty_timeline_stays_hidden_and_has_no_inferred_root_row(self):
         event = _timeline_event([], total_duration_ms=5000)
@@ -958,6 +1065,362 @@ class TestSubagentTimelineVisuals:
         assert _timeline_coverage_rate(coverage_union_ms, 5000) == 0
         assert _build_subagent_timeline_view(event) is None
         assert render_subagent_timeline_html(event) is None
+
+    def test_only_user_wait_without_subagents_renders_unified_root_timeline(self):
+        event = _timeline_event(
+            [],
+            total_duration_ms=5000,
+            user_wait_timeline=_wait_timeline([_wait_interval(start=500, end=1700)]),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["mode"] == "complex"
+        assert view["item_count"] == 0
+        assert view["wait_complete_count"] == 1
+        assert view["wait_union_ms"] == 1200
+        assert view["timeline_end_ms"] == 5000
+        assert view["timeline_end_source"] == "root_duration"
+
+        main_html = render_html_default(event)
+        timeline_html = render_subagent_timeline_html(event)
+        assert timeline_html is not None
+        assert "根任务时间线" in main_html
+        assert "等待用户 1.2 秒 · 1 次" in main_html
+        assert "根任务执行时间线" in timeline_html
+        assert timeline_html.count('class="row wait-row"') == 1
+        assert 'class="row timeline-row"' not in timeline_html
+
+    def test_root_duration_axis_preserves_visible_tail_after_all_intervals_end(self):
+        event = _timeline_event(
+            [_timeline_item(0, start=0, end=4000, depth=3)],
+            total_duration_ms=10_000,
+            user_wait_timeline=_wait_timeline([_wait_interval(start=1000, end=2000)]),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        assert view["timeline_end_ms"] == 10_000
+        assert view["timeline_end_source"] == "root_duration"
+        subagent = view["gantt_items"][0]
+        wait = view["wait_intervals"][0]
+        plot_width = view["layout"]["plot_width"]
+        assert float(subagent["width_px"]) == pytest.approx(plot_width * 0.4)
+        assert float(wait["left_px"]) == pytest.approx(plot_width * 0.1)
+        assert float(wait["width_px"]) == pytest.approx(plot_width * 0.1)
+        assert float(subagent["left_px"]) + float(subagent["width_px"]) < plot_width
+
+    def test_question_permission_and_censored_waits_keep_visual_and_stats_semantics(
+        self,
+    ):
+        wait = _wait_timeline(
+            [
+                _wait_interval(kind="question", start=100, end=500),
+                _wait_interval(
+                    kind="permission", start=400, end=900, result="rejected"
+                ),
+                _wait_interval(
+                    kind="question", state="right_censored", start=1200, end=None
+                ),
+                _wait_interval(
+                    kind="permission", state="left_censored", start=None, end=80
+                ),
+            ],
+            partial=True,
+            partial_reasons=["open_at_cycle_end", "orphan_resolution"],
+        )
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=1000) for index in range(4)],
+            total_duration_ms=2000,
+            user_wait_timeline=wait,
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None and view["mode"] == "complex"
+        assert view["wait_union_ms"] == 800
+        assert view["wait_complete_count"] == 2
+        assert view["wait_rate"] == pytest.approx(40)
+        assert view["wait_summary_text"] == "等待用户至少 800 毫秒 · 至少 2 次"
+        assert "Question 1" in view["wait_summary_detail"]
+        assert "Permission 1" in view["wait_summary_detail"]
+        assert "2 个边界区间未计时" in view["wait_summary_detail"]
+
+        visual = view["wait_intervals"]
+        assert {item["kind"] for item in visual} == {"question", "permission"}
+        censored = [item for item in visual if not item["counted_duration"]]
+        assert {item["state_class"] for item in censored} == {
+            "right-censored",
+            "left-censored",
+        }
+        assert all(item["timing_label"] == "未计入时长" for item in censored)
+        assert all(float(item["width_px"]) > 0 for item in censored)
+
+        html = render_subagent_timeline_html(event)
+        assert html is not None
+        assert "wait-bar question complete" in html
+        assert "wait-bar permission complete" in html
+        assert "wait-bar question right-censored" in html
+        assert "wait-bar permission left-censored" in html
+        assert html.count('data-counted-duration="false"') == 2
+
+    def test_partial_wait_reasons_use_concise_user_copy_even_when_censored_hidden(self):
+        event = _timeline_event(
+            [],
+            total_duration_ms=3000,
+            user_wait_timeline=_wait_timeline(
+                [_wait_interval(start=100, end=500)],
+                partial=True,
+                partial_reasons=[
+                    "open_at_cycle_end",
+                    "orphan_resolution",
+                    "missing_request_id",
+                    "evicted",
+                    "truncated",
+                    "clock_invalid",
+                ],
+                truncated=True,
+                observed_count=4,
+            ),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["wait_summary_text"] == "等待用户至少 400 毫秒 · 至少 1 次"
+        assert "结束时仍在等待" in view["wait_summary_detail"]
+        assert "仅观测到等待结束" in view["wait_summary_detail"]
+        assert "部分等待无法关联" in view["wait_summary_detail"]
+        assert "部分记录未保留" in view["wait_summary_detail"]
+        assert "等待记录已截断" in view["wait_summary_detail"]
+        assert "时间信息不完整" in view["wait_summary_detail"]
+        html = render_subagent_timeline_html(event)
+        assert html is not None
+        assert "evicted" not in html
+        assert "clock_invalid" not in html
+        assert "open_at_cycle_end" not in html
+        assert "orphan_resolution" not in html
+        assert "missing_request_id" not in html
+
+    def test_reliable_empty_wait_is_zero_but_none_remains_unavailable(self):
+        reliable_empty = _timeline_event(
+            [],
+            total_duration_ms=5000,
+            user_wait_timeline=_wait_timeline([]),
+        )
+        empty_view = _build_subagent_timeline_view(reliable_empty)
+        assert empty_view is not None
+        assert empty_view["mode"] == "summary"
+        assert empty_view["wait_union_ms"] == 0
+        assert empty_view["wait_summary_text"] == "等待用户 0 毫秒 · 0 次"
+        assert render_subagent_timeline_html(reliable_empty) is None
+        assert "等待用户 0 毫秒 · 0 次" in render_html_default(reliable_empty)
+
+        unavailable = _timeline_event([], total_duration_ms=5000)
+        assert _build_subagent_timeline_view(unavailable) is None
+
+        complex_unavailable = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)],
+            total_duration_ms=5000,
+        )
+        unavailable_view = _build_subagent_timeline_view(complex_unavailable)
+        assert unavailable_view is not None
+        assert unavailable_view["wait_union_ms"] is None
+        assert unavailable_view["wait_summary_text"] == "等待用户：不可用"
+        assert unavailable_view["metrics"][5] == {
+            "value": "至多 3 秒（60%）",
+            "label": "未分类时间 / 占比 · 观测受限",
+        }
+        unavailable_html = render_subagent_timeline_html(complex_unavailable)
+        assert unavailable_html is not None
+        assert "不可推断为 0" in unavailable_html
+
+    def test_wait_track_does_not_change_subagent_count_peak_or_coverage(self):
+        items = [
+            _timeline_item(0, start=0, end=2000),
+            _timeline_item(1, start=500, end=2500),
+            _timeline_item(2, start=2500, end=3000),
+            _timeline_item(3, start=3000, end=4000),
+        ]
+        without_wait = _build_subagent_timeline_view(
+            _timeline_event(items, total_duration_ms=5000)
+        )
+        with_wait = _build_subagent_timeline_view(
+            _timeline_event(
+                items,
+                total_duration_ms=5000,
+                user_wait_timeline=_wait_timeline(
+                    [
+                        _wait_interval(kind="question", start=200, end=1800),
+                        _wait_interval(kind="permission", start=1500, end=3500),
+                    ]
+                ),
+            )
+        )
+        assert without_wait is not None and with_wait is not None
+        for key in (
+            "item_count",
+            "observed_count",
+            "peak_concurrency",
+            "reliable_peak_concurrency",
+            "coverage_union_ms",
+            "coverage_rate",
+        ):
+            assert with_wait[key] == without_wait[key]
+        assert [metric["value"] for metric in with_wait["metrics"][:5]] == [
+            metric["value"] for metric in without_wait["metrics"][:5]
+        ]
+
+    @pytest.mark.parametrize(
+        ("wait_intervals", "expected_known", "expected_unclassified", "expected_rate"),
+        [
+            (
+                [_wait_interval(start=3000, end=4000)],
+                4000,
+                6000,
+                60,
+            ),
+            (
+                [_wait_interval(start=1500, end=3500)],
+                4500,
+                5500,
+                55,
+            ),
+        ],
+    )
+    def test_unclassified_uses_union_across_subagent_and_wait_without_double_counting(
+        self,
+        wait_intervals,
+        expected_known,
+        expected_unclassified,
+        expected_rate,
+    ):
+        event = _timeline_event(
+            [
+                _timeline_item(0, start=0, end=2000),
+                _timeline_item(1, start=6000, end=7000),
+            ],
+            total_duration_ms=10_000,
+            user_wait_timeline=_wait_timeline(wait_intervals),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["known_union_ms"] == expected_known
+        assert view["unclassified_ms"] == expected_unclassified
+        assert view["unclassified_rate"] == pytest.approx(expected_rate)
+        assert view["unclassified_observation_limited"] is False
+        metric = view["metrics"][5]
+        assert metric["label"] == "未分类时间 / 占比"
+        assert metric["value"] == (
+            f"{format_duration_ms(expected_unclassified)}（{expected_rate}%）"
+        )
+
+    def test_unclassified_excludes_censored_and_uses_upper_bound_when_limited(self):
+        event = _timeline_event(
+            [_timeline_item(0, start=0, end=2000)],
+            total_duration_ms=10_000,
+            user_wait_timeline=_wait_timeline(
+                [
+                    _wait_interval(start=3000, end=4000),
+                    _wait_interval(state="right_censored", start=5000, end=None),
+                ],
+                partial=True,
+                partial_reasons=["open_at_cycle_end"],
+            ),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["known_union_ms"] == 3000
+        assert view["unclassified_ms"] == 7000
+        assert view["unclassified_rate"] == pytest.approx(70)
+        assert view["unclassified_observation_limited"] is True
+        assert view["metrics"][5] == {
+            "value": "至多 7 秒（70%）",
+            "label": "未分类时间 / 占比 · 观测受限",
+        }
+
+    @pytest.mark.parametrize("total_duration_ms", [None, 0])
+    def test_unclassified_is_not_calculated_without_positive_reliable_duration(
+        self, total_duration_ms
+    ):
+        event = _timeline_event(
+            [_timeline_item(0, start=0, end=1000)],
+            total_duration_ms=total_duration_ms,
+            user_wait_timeline=_wait_timeline([_wait_interval(start=1200, end=1800)]),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["known_union_ms"] is None
+        assert view["unclassified_ms"] is None
+        assert view["unclassified_rate"] is None
+        assert view["metrics"][5] == {
+            "value": "不可计算",
+            "label": "未分类时间 / 占比",
+        }
+
+    def test_complete_wait_axis_clipping_counts_only_intersections_and_marks_limited(
+        self,
+    ):
+        event = _timeline_event(
+            [],
+            total_duration_ms=1000,
+            user_wait_timeline=_wait_timeline(
+                [
+                    _wait_interval(kind="question", start=-500, end=-100),
+                    _wait_interval(kind="permission", start=1200, end=1600),
+                    _wait_interval(kind="question", start=-200, end=200),
+                    _wait_interval(kind="permission", start=800, end=1200),
+                ]
+            ),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["wait_interval_clipped"] is True
+        assert view["wait_observation_limited"] is True
+        assert view["wait_complete_count"] == 2
+        assert view["wait_union_ms"] == 400
+        assert len(view["wait_intervals"]) == 2
+        assert view["wait_summary_text"] == "等待用户至少 400 毫秒 · 至少 2 次"
+        assert "按根任务边界裁剪" in view["wait_summary_detail"]
+        assert "Question 1" in view["wait_summary_detail"]
+        assert "Permission 1" in view["wait_summary_detail"]
+        assert all(
+            "按根任务边界裁剪" in item["title"] for item in view["wait_intervals"]
+        )
+        assert view["known_union_ms"] == 400
+        assert view["metrics"][5]["value"] == "至多 600 毫秒（60%）"
+
+    def test_reliable_empty_timelines_make_whole_positive_root_duration_unclassified(
+        self,
+    ):
+        event = _timeline_event(
+            [],
+            total_duration_ms=5000,
+            user_wait_timeline=_wait_timeline([]),
+        )
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["known_union_ms"] == 0
+        assert view["unclassified_ms"] == 5000
+        assert view["unclassified_rate"] == pytest.approx(100)
+        assert view["unclassified_observation_limited"] is False
+        assert view["metrics"][5]["value"] == "5 秒（100%）"
+
+    def test_only_wait_with_missing_subagent_timeline_has_upper_bound_and_text_summary(
+        self,
+    ):
+        event = _timeline_event(
+            [],
+            total_duration_ms=5000,
+            user_wait_timeline=_wait_timeline([_wait_interval(start=1000, end=2000)]),
+        )
+        event.subagent_timeline = None
+        view = _build_subagent_timeline_view(event)
+        assert view is not None
+        assert view["wait_union_ms"] == 1000
+        assert view["known_union_ms"] == 1000
+        assert view["unclassified_ms"] == 4000
+        assert view["unclassified_observation_limited"] is True
+        assert view["metrics"][5]["value"] == "至多 4 秒（80%）"
+
+        text = render_text_default(event)
+        assert "根任务时间线：" in text
+        assert "等待用户 1 秒 · 1 次" in text
+        assert "未分类时间 / 占比 · 观测受限：至多 4 秒（80%）" in text
 
     def test_coverage_union_ignores_invalid_intervals_defensively(self):
         coverage_union_ms = _timeline_coverage_union_ms(
@@ -1006,6 +1469,7 @@ class TestSubagentTimelineVisuals:
             "总任务时长",
             "已观测子任务覆盖时长",
             "已观测子任务覆盖率",
+            "未分类时间 / 占比 · 观测受限",
         ]
 
         main_html = render_html_default(event)

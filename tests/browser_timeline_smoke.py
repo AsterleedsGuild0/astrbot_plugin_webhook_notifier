@@ -149,6 +149,11 @@ async def _capture_with_cdp(
               const timeline = document.querySelector('.timeline');
               const axis = document.querySelector('.axis');
               const axisTrack = document.querySelector('.axis-track');
+              const waitRow = document.querySelector('.wait-row');
+              const waitTask = waitRow ? waitRow.querySelector('.wait-task') : null;
+              const waitTrack = waitRow ? waitRow.querySelector('.wait-track') : null;
+              const waitState = waitRow ? waitRow.querySelector('.wait-state') : null;
+              const waitBars = [...document.querySelectorAll('.wait-bar')];
               const rows = [...document.querySelectorAll('.timeline-row')];
               return {
                 document: {
@@ -185,6 +190,18 @@ async def _capture_with_cdp(
                   axis: visualStyle(axis),
                   axisTrack: visualStyle(axisTrack)
                 },
+                wait: waitRow ? {
+                  row: rect(waitRow), task: rect(waitTask), plot: rect(waitTrack),
+                  state: rect(waitState),
+                  scrollWidth: waitRow.scrollWidth,
+                  clientWidth: waitRow.clientWidth,
+                  bars: waitBars.map((bar) => ({
+                    bar: rect(bar), className: bar.className,
+                    countedDuration: bar.dataset.countedDuration,
+                    title: bar.title,
+                    style: visualStyle(bar)
+                  }))
+                } : null,
                 rows: rows.map((row) => {
                   const name = row.querySelector('.task-name');
                   const agent = row.querySelector('.task-agent');

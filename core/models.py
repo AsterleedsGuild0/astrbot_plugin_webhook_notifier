@@ -83,6 +83,10 @@ class NormalizedEvent:
     raw: dict[str, Any] = field(default_factory=dict)
     model_variant: str | None = None
     subagent_timeline: dict[str, Any] | None = None
+    # 用户等待时间线（root session 独立字段）。None 表示旧 client 未携带；
+    # 空完整 timeline 表示可靠 0 等待。内容已经过 strict adapter 校验，不包含
+    # 任何 ID/ref/title/name/text/answer/pattern/target/url/token 等敏感字段。
+    user_wait_timeline: dict[str, Any] | None = None
     # 内部策略字段：Provider 能证明是当前任务/round 耗时时赋值，None 表示不可靠/缺失。
     # 仅用于服务端时长过滤策略，不通过 to_dict() 对外暴露。
     task_duration_ms: int | None = None
@@ -107,6 +111,8 @@ class NormalizedEvent:
             result["model_variant"] = self.model_variant
         if self.subagent_timeline is not None:
             result["subagent_timeline"] = self.subagent_timeline
+        if self.user_wait_timeline is not None:
+            result["user_wait_timeline"] = self.user_wait_timeline
         return result
 
 

@@ -23,6 +23,8 @@ import type {
 const {
   _hashSessionRef,
   _setClockForTests,
+  _setMonoClockForTests,
+  _setClocksForTests,
   _sanitiseName,
   _projectNameFromPath,
   _projectNameFromInput,
@@ -62,6 +64,25 @@ const {
   _cacheAssistantMetadata,
   _cachedAssistantMetadata,
   _enrichEvent,
+  _userWaits,
+  _waitMissingRequestIds,
+  _waitEvicted,
+  _recordUserWaitAsked,
+  _recordUserWaitTerminal,
+  _cleanupUserWaits,
+  _freezeUserWaitTimeline,
+  _freezeUserWaitSnapshot,
+  _waitRequestKey,
+  _hashWaitRequestKey,
+  _userWaitIntervalForCycle,
+  _enqueueSessionState,
+  _hookQueueTails,
+  _hookQueueDepth,
+  _setWaitCollectorTestDelay,
+  _setWaitEvidenceOverflowForTests,
+  _safeMonoValue,
+  _intMonoMs,
+  _commitIdleClaim,
 } = mod;
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -95,6 +116,7 @@ let _originalFetch: typeof globalThis.fetch;
 
 beforeEach(() => {
   _setClockForTests();
+  _setMonoClockForTests();
   _originalFetch = globalThis.fetch;
   _idleProcessing.clear();
   _resetActionBuckets();
@@ -104,6 +126,13 @@ beforeEach(() => {
   _timelineRuns.clear();
   _timelineParents.clear();
   _timelineCapacityDrops.clear();
+  _userWaits.clear();
+  _waitMissingRequestIds.clear();
+  _waitEvicted.clear();
+  _hookQueueTails.clear();
+  _hookQueueDepth.clear();
+  _setWaitCollectorTestDelay();
+  _setWaitEvidenceOverflowForTests(false);
   _resetMetadataDiagnostics();
 });
 
@@ -4728,5 +4757,870 @@ describe("subagent timeline collector/state/envelope", () => {
     const root = rootBody(bodies);
     expect(root.subagentTimeline.items).toHaveLength(1);
     expect(root.error).toBeUndefined();
+  });
+});
+
+// ─── User wait timeline (Issue #26) ─────────────────────────
+
+describe("user wait timeline — collector, freeze, envelope", () => {
+  async function makeWaitServer(config: RawPluginOptions = makeConfig()) {
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async () => ({ data: { title: "Root", parentID: null } }),
+          messages: async () => ({ data: [] }),
+        },
+      },
+    } as any, config);
+    return { hooks, bodies };
+  }
+
+  function waitRootBody(bodies: any[]): any {
+    return bodies.find((body) => body.event === "opencode.session_idle" && body.userWaitTimeline);
+  }
+
+  async function emitAt(
+    hooks: Hooks,
+    id: string,
+    type: string,
+    sessionId: string,
+    wall: number,
+    mono: number,
+    props: Record<string, unknown> = {},
+  ): Promise<void> {
+    _setClocksForTests(() => wall);
+    _setMonoClockForTests(() => mono);
+    await hooks.event!({
+      event: { id, type, properties: { sessionID: sessionId, ...props } },
+    });
+  }
+
+  it("attaches an empty reliable-zero timeline on a complete root cycle", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const root = waitRootBody(bodies);
+    expect(root).toBeDefined();
+    expect(root.userWaitTimeline).toEqual({
+      version: 1,
+      partial: false,
+      partialReasons: [],
+      timeBasis: "root_cycle_receipt_monotonic",
+      observedIntervalCount: 0,
+      displayedIntervalCount: 0,
+      truncated: false,
+      intervals: [],
+    });
+  });
+
+  it("records a complete question wait with replied result", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 1_200, 1_200, { id: "q1", questions: [{ question: "Continue?" }] });
+    await emitAt(hooks, "qr", "question.replied", "root", 1_500, 1_500, { requestID: "q1" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question",
+      result: "replied",
+      intervalState: "complete",
+      startOffsetMs: 200,
+      endOffsetMs: 500,
+      durationMs: 300,
+    }]);
+    expect(timeline.partial).toBeFalse();
+    expect(timeline.partialReasons).toEqual([]);
+  });
+
+  it("normalises a permission reject reply to rejected result", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "pa", "permission.asked", "root", 1_200, 1_200, { id: "p1", type: "file_write" });
+    await emitAt(hooks, "pr", "permission.replied", "root", 1_400, 1_400, { requestID: "p1", reply: "reject" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "permission",
+      result: "rejected",
+      intervalState: "complete",
+      startOffsetMs: 200,
+      endOffsetMs: 400,
+      durationMs: 200,
+    }]);
+  });
+
+  it("right-censors a pending question at cycle end", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 1_200, 1_200, { id: "q1", questions: [{ question: "?" }] });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question",
+      intervalState: "right_censored",
+      startOffsetMs: 200,
+    }]);
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toEqual(["open_at_cycle_end"]);
+  });
+
+  it("left-censors an orphan terminal with orphan_resolution", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qr", "question.replied", "root", 1_500, 1_500, { requestID: "orphan-q1" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question",
+      result: "replied",
+      intervalState: "left_censored",
+      endOffsetMs: 500,
+    }]);
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toEqual(["orphan_resolution"]);
+  });
+
+  it("keeps overlapping waits in stable start order", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "q1a", "question.asked", "root", 1_200, 1_200, { id: "q1", questions: [{}] });
+    await emitAt(hooks, "q2a", "question.asked", "root", 1_300, 1_300, { id: "q2", questions: [{}] });
+    await emitAt(hooks, "q2r", "question.replied", "root", 1_400, 1_400, { requestID: "q2" });
+    await emitAt(hooks, "q1r", "question.replied", "root", 1_600, 1_600, { requestID: "q1" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const intervals = waitRootBody(bodies).userWaitTimeline.intervals;
+    expect(intervals).toEqual([
+      { kind: "question", result: "replied", intervalState: "complete", startOffsetMs: 200, endOffsetMs: 600, durationMs: 400 },
+      { kind: "question", result: "replied", intervalState: "complete", startOffsetMs: 300, endOffsetMs: 400, durationMs: 100 },
+    ]);
+  });
+
+  it("freezes the wait snapshot at idle claim; a later reply does not pollute", async () => {
+    let rootGetCount = 0;
+    let releaseIdle!: () => void;
+    const idleGate = new Promise<void>((resolve) => { releaseIdle = resolve; });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async ({ path: { id } }: any) => {
+            if (id === "root") {
+              rootGetCount++;
+              if (rootGetCount === 2) await idleGate;
+            }
+            return { data: { title: "Root", parentID: null } };
+          },
+          messages: async () => ({ data: [] }),
+        },
+      },
+    } as any, makeConfig());
+
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 1_200, 1_200, { id: "q1", questions: [{}] });
+    const idle = emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+    await wait(0);
+    // Reply arrives while enrichment is blocked (after the idle claim freeze).
+    await emitAt(hooks, "qr", "question.replied", "root", 2_100, 2_100, { requestID: "q1" });
+    releaseIdle();
+    await idle;
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question",
+      intervalState: "right_censored",
+      startOffsetMs: 200,
+    }]);
+    expect(timeline.partialReasons).toContain("open_at_cycle_end");
+  });
+
+  it("re-evaluates a pending wait across cycles and never amends a sent cycle", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b1", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 1_200, 1_200, { id: "q1", questions: [{}] });
+    await emitAt(hooks, "i1", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    await emitAt(hooks, "b2", "session.status", "root", 3_000, 3_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qr", "question.replied", "root", 3_500, 3_500, { requestID: "q1" });
+    await emitAt(hooks, "i2", "session.status", "root", 4_000, 4_000, { status: { type: "idle" } });
+
+    const roots = bodies.filter((body) => body.event === "opencode.session_idle" && body.userWaitTimeline);
+    expect(roots).toHaveLength(2);
+    expect(roots[0].userWaitTimeline.intervals).toEqual([{
+      kind: "question", intervalState: "right_censored", startOffsetMs: 200,
+    }]);
+    expect(roots[1].userWaitTimeline.intervals).toEqual([{
+      kind: "question", result: "replied", intervalState: "complete",
+      startOffsetMs: 0, endOffsetMs: 500, durationMs: 500,
+    }]);
+  });
+
+  it("deduplicates permission.asked + permission.updated by request id (v1/v2 bridge)", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "pa1", "permission.asked", "root", 1_200, 1_200, { id: "p1", type: "read" });
+    await emitAt(hooks, "pa2", "permission.updated", "root", 1_300, 1_300, { id: "p1", type: "read" });
+    await emitAt(hooks, "pr", "permission.replied", "root", 1_500, 1_500, { requestID: "p1", reply: "once" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    // Earliest asked wins → startOffset 200, not 300.
+    expect(timeline.intervals).toEqual([{
+      kind: "permission", result: "replied", intervalState: "complete",
+      startOffsetMs: 200, endOffsetMs: 500, durationMs: 300,
+    }]);
+    expect(timeline.observedIntervalCount).toBe(1);
+  });
+
+  it("keeps the first terminal result and ignores later terminals", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 1_200, 1_200, { id: "q1", questions: [{}] });
+    await emitAt(hooks, "qr", "question.replied", "root", 1_400, 1_400, { requestID: "q1" });
+    await emitAt(hooks, "qj", "question.rejected", "root", 1_600, 1_600, { requestID: "q1" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question", result: "replied", intervalState: "complete",
+      startOffsetMs: 200, endOffsetMs: 400, durationMs: 200,
+    }]);
+  });
+
+  it("clamps an asked-before-busy wait into the root cycle", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "qa", "question.asked", "root", 500, 500, { id: "q1", questions: [{}] });
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qr", "question.replied", "root", 1_500, 1_500, { requestID: "q1" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question", result: "replied", intervalState: "complete",
+      startOffsetMs: 0, endOffsetMs: 500, durationMs: 500,
+    }]);
+  });
+
+  it("reports missing_request_id when an event has no usable request id", async () => {
+    const config = _resolveConfig(makeConfig(), noopLog())!;
+    await _processEvent(makeEvent({
+      type: "session.status", status: "busy", sessionId: "s-missing",
+      sessionScope: "root", receivedAtMs: 1_000, receivedMonoMs: 1_000,
+    }), config);
+    await _processEvent(makeEvent({
+      type: "question.asked", sessionId: "s-missing", sessionScope: "root", questions: [{ text: "x" }],
+    }), config);
+    const env = await _processEvent(makeEvent({
+      type: "session.status", status: "idle", sessionId: "s-missing",
+      sessionScope: "root", receivedAtMs: 2_000, receivedMonoMs: 2_000,
+    }), config);
+    expect(env!.userWaitTimeline).toMatchObject({
+      partial: true,
+      partialReasons: ["missing_request_id"],
+      intervals: [],
+    });
+  });
+
+  it("keeps wait offsets correct when the wall clock jumps forward but mono is normal", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 50_000, 1_200, { id: "q1", questions: [{}] });
+    await emitAt(hooks, "qr", "question.replied", "root", 60_000, 1_500, { requestID: "q1" });
+    await emitAt(hooks, "i", "session.status", "root", 100_000, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question", result: "replied", intervalState: "complete",
+      startOffsetMs: 200, endOffsetMs: 500, durationMs: 300,
+    }]);
+  });
+
+  it("keeps wait offsets correct when the wall clock runs backwards but mono is normal", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 800, 1_200, { id: "q1", questions: [{}] });
+    await emitAt(hooks, "qr", "question.replied", "root", 600, 1_500, { requestID: "q1" });
+    await emitAt(hooks, "i", "session.status", "root", 500, 2_000, { status: { type: "idle" } });
+
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question", result: "replied", intervalState: "complete",
+      startOffsetMs: 200, endOffsetMs: 500, durationMs: 300,
+    }]);
+  });
+
+  it("collects waits even when question/permission notifications are disabled", async () => {
+    const { hooks, bodies } = await makeWaitServer(makeConfig({ events: ["session_idle"] }));
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 1_200, 1_200, { id: "q1", questions: [{ question: "secret" }] });
+    await emitAt(hooks, "qr", "question.replied", "root", 1_500, 1_500, { requestID: "q1" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    expect(bodies.filter((body) => body.event === "opencode.question_asked")).toHaveLength(0);
+    const timeline = waitRootBody(bodies).userWaitTimeline;
+    expect(timeline.intervals).toEqual([{
+      kind: "question", result: "replied", intervalState: "complete",
+      startOffsetMs: 200, endOffsetMs: 500, durationMs: 300,
+    }]);
+  });
+
+  it("truncates at 64 intervals with observed > displayed and canonical reasons", async () => {
+    const rootRef = await _hashSessionRef("trunc-root");
+    _setClocksForTests(() => 1_000);
+    _setMonoClockForTests(() => 1_000);
+    for (let index = 0; index < 70; index++) {
+      await _recordUserWaitAsked(
+        { sessionId: "trunc-root", requestId: `req-${index}`, receivedMonoMs: 1_000 + index * 5 } as any,
+        "question",
+      );
+    }
+    const timeline = _freezeUserWaitTimeline(rootRef, 1_000, 10_000);
+    expect(timeline.observedIntervalCount).toBe(70);
+    expect(timeline.displayedIntervalCount).toBe(64);
+    expect(timeline.truncated).toBeTrue();
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toContain("truncated");
+    expect(timeline.intervals).toHaveLength(64);
+    expect(new TextEncoder().encode(JSON.stringify(timeline)).length).toBeLessThanOrEqual(12 * 1024);
+  });
+
+  it("keeps the canonical 12KiB timeline budget with many intervals", async () => {
+    const rootRef = await _hashSessionRef("budget-root");
+    _setMonoClockForTests(() => 1_000);
+    for (let index = 0; index < 60; index++) {
+      await _recordUserWaitAsked(
+        { sessionId: "budget-root", requestId: `b-${index}`, receivedMonoMs: 1_000 + index } as any,
+        "permission",
+      );
+    }
+    const timeline = _freezeUserWaitTimeline(rootRef, 1_000, 2_000);
+    expect(new TextEncoder().encode(JSON.stringify(timeline)).length).toBeLessThanOrEqual(12 * 1024);
+    expect(JSON.stringify(timeline)).not.toContain("b-");
+  });
+
+  it("keeps a root completion envelope within the 64KiB budget", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    for (let index = 0; index < 60; index++) {
+      await emitAt(hooks, `qa-${index}`, "question.asked", "root", 1_000 + index, 1_000 + index, {
+        id: `env-q-${index}`, questions: [{ question: "q".repeat(200) }],
+      });
+    }
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+    const root = waitRootBody(bodies);
+    expect(new TextEncoder().encode(JSON.stringify(root)).length).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it("applies resolved TTL, pending TTL, and capacity eviction with evicted evidence", async () => {
+    const ref = await _hashSessionRef("ttl-root");
+    _setClocksForTests(() => 1_000);
+    _setMonoClockForTests(() => 1_000);
+    await _recordUserWaitAsked({ sessionId: "ttl-root", requestId: "r1", receivedMonoMs: 1_000 } as any, "question");
+    await _recordUserWaitTerminal({ sessionId: "ttl-root", requestId: "r1", receivedMonoMs: 1_500 } as any, "question", "replied");
+    await _recordUserWaitAsked({ sessionId: "ttl-root", requestId: "p1", receivedMonoMs: 1_000 } as any, "question");
+    expect(_userWaits.size).toBe(2);
+
+    // Resolved TTL = 1h, measured from the terminal receipt (1500).
+    _setMonoClockForTests(() => 1_500 + 60 * 60 * 1000 + 1);
+    _cleanupUserWaits();
+    expect(_userWaits.size).toBe(1);
+    expect([..._userWaits.values()][0]!.state).toBe("pending");
+
+    // Pending TTL = 24h, measured from last access.
+    _setMonoClockForTests(() => 1_000 + 24 * 60 * 60 * 1000 + 1);
+    _cleanupUserWaits();
+    expect(_userWaits.size).toBe(0);
+  });
+
+  it("evicts active pending records under capacity pressure and marks evicted", async () => {
+    const ref = await _hashSessionRef("cap-root");
+    _setMonoClockForTests(() => 1_000);
+    for (let index = 0; index < 2050; index++) {
+      _userWaits.set(`cap:${index}`, {
+        key: `cap:${index}`,
+        sessionRef: ref,
+        kind: "question",
+        requestKeyHash: `h${index}`,
+        askedMonoMs: 1_000 + index,
+        state: "pending",
+        lastAccessMonoMs: 1_000 + index,
+      } as any);
+    }
+    expect(_userWaits.size).toBe(2050);
+    _cleanupUserWaits();
+    expect(_userWaits.size).toBeLessThanOrEqual(1024);
+    expect(_waitEvicted.get(ref)).toBeGreaterThan(0);
+    const timeline = _freezeUserWaitTimeline(ref, 1_000, 100_000);
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toContain("evicted");
+    expect(timeline.partialReasons).toContain("truncated");
+  });
+
+  it("never leaks raw ids, bodies, answers, patterns, or credentials", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "qa", "question.asked", "root", 1_200, 1_200, {
+      id: "raw-req-q1",
+      questions: [{ question: "super secret question body" }],
+    });
+    await emitAt(hooks, "pa", "permission.asked", "root", 1_300, 1_300, {
+      id: "raw-req-p1", type: "file_write", title: "secret title", patterns: ["secret-pattern"],
+      target: "/private/secret-path",
+    });
+    await emitAt(hooks, "qr", "question.replied", "root", 1_400, 1_400, { requestID: "raw-req-q1" });
+    await emitAt(hooks, "pr", "permission.replied", "root", 1_500, 1_500, { requestID: "raw-req-p1", reply: "once" });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const root = waitRootBody(bodies);
+    const json = JSON.stringify(root);
+    expect(json).not.toContain("raw-req-q1");
+    expect(json).not.toContain("raw-req-p1");
+    expect(json).not.toContain("super secret question body");
+    expect(json).not.toContain("secret title");
+    expect(json).not.toContain("secret-pattern");
+    expect(json).not.toContain("/private/secret-path");
+
+    for (const key of _userWaits.keys()) {
+      expect(key).not.toContain("raw-req");
+    }
+    for (const rec of _userWaits.values()) {
+      expect(rec.requestKeyHash).toMatch(/^[0-9a-f]{32}$/);
+    }
+  });
+
+  it("attaches userWaitTimeline only to root completions and never attributes child waits", async () => {
+    const sessions = {
+      root: { title: "Root", parentID: null },
+      child: { title: "Child", parentID: "root" },
+    };
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async ({ path: { id } }: any) => ({ data: sessions[id] ?? { title: "unknown", parentID: null } }),
+          messages: async () => ({ data: [] }),
+        },
+      },
+    } as any, makeConfig());
+
+    await emitAt(hooks, "cb", "session.status", "child", 1_100, 1_100, { status: { type: "busy" } });
+    await emitAt(hooks, "cqa", "question.asked", "child", 1_200, 1_200, { id: "c1", questions: [{}] });
+    await emitAt(hooks, "ci", "session.status", "child", 1_500, 1_500, { status: { type: "idle" } });
+
+    await emitAt(hooks, "rb", "session.status", "root", 1_600, 1_600, { status: { type: "busy" } });
+    await emitAt(hooks, "ri", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+
+    const childIdle = bodies.find((body) => body.event === "opencode.session_idle" && body.session.scope === "subagent");
+    expect(childIdle.userWaitTimeline).toBeUndefined();
+
+    const root = waitRootBody(bodies);
+    expect(root.userWaitTimeline.intervals).toEqual([]);
+    expect(root.userWaitTimeline.observedIntervalCount).toBe(0);
+  });
+
+  it("marks clock_invalid when the frozen root cycle is degenerate", async () => {
+    const ref = await _hashSessionRef("clock-root");
+    const timeline = _freezeUserWaitTimeline(ref, 2_000, 1_000);
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toEqual(["clock_invalid"]);
+    expect(timeline.intervals).toEqual([]);
+    expect(timeline.truncated).toBeFalse();
+  });
+});
+
+// ─── Oracle Gate 1 required fixes ───────────────────────────
+
+describe("user wait — Oracle Gate 1 fixes (fractional mono, mono duration, request id, ordering, evidence)", () => {
+  async function makeWaitServer(config: RawPluginOptions = makeConfig()) {
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: any) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response("ok", { status: 200 });
+    });
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async () => ({ data: { title: "Root", parentID: null } }),
+          messages: async () => ({ data: [] }),
+        },
+      },
+    } as any, config);
+    return { hooks, bodies };
+  }
+
+  function waitRootBody(bodies: any[]): any {
+    return bodies.find((body) => body.event === "opencode.session_idle" && body.userWaitTimeline);
+  }
+
+  async function emitAt(
+    hooks: Hooks,
+    id: string,
+    type: string,
+    sessionId: string,
+    wall: number,
+    mono: number,
+    props: Record<string, unknown> = {},
+  ): Promise<void> {
+    _setClocksForTests(() => wall, () => mono);
+    await hooks.event!({
+      event: { id, type, properties: { sessionID: sessionId, ...props } },
+    });
+  }
+
+  it("P0 fractional mono: complete/right/left emit safe-integer wire values", async () => {
+    const rootRef = await _hashSessionRef("fract-root");
+    _setMonoClockForTests(() => 1_000.4);
+    await _recordUserWaitAsked(
+      { sessionId: "fract-root", requestId: "c1", receivedMonoMs: 1_200.7 } as any,
+      "question",
+    );
+    await _recordUserWaitTerminal(
+      { sessionId: "fract-root", requestId: "c1", receivedMonoMs: 1_500.3 } as any,
+      "question",
+      "replied",
+    );
+    await _recordUserWaitAsked(
+      { sessionId: "fract-root", requestId: "r1", receivedMonoMs: 1_300.1 } as any,
+      "permission",
+    );
+    await _recordUserWaitTerminal(
+      { sessionId: "fract-root", requestId: "orphan", receivedMonoMs: 1_600.9 } as any,
+      "permission",
+      "rejected",
+    );
+
+    const freeze = _freezeUserWaitSnapshot(rootRef, 1_000.2, 2_000.6);
+    const timeline = freeze.timeline;
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toContain("open_at_cycle_end");
+    expect(timeline.partialReasons).toContain("orphan_resolution");
+    expect(freeze.includedKeys).toHaveLength(3);
+    for (const interval of timeline.intervals) {
+      for (const key of ["startOffsetMs", "endOffsetMs", "durationMs"] as const) {
+        const value = interval[key];
+        if (value === undefined) continue;
+        expect(Number.isSafeInteger(value)).toBeTrue();
+        expect(value).toBeGreaterThanOrEqual(0);
+      }
+    }
+    // Complete question: asked 1200.7, resolved 1500.3 → round(200.5)=201..round(500.1)=500.
+    const complete = timeline.intervals.find((i) => i.kind === "question");
+    expect(complete).toMatchObject({
+      kind: "question",
+      result: "replied",
+      intervalState: "complete",
+      startOffsetMs: 201,
+      endOffsetMs: 500,
+      durationMs: 299,
+    });
+    // Permission asked (r1) still pending → right-censored.
+    const right = timeline.intervals.find((i) => i.kind === "permission" && i.intervalState === "right_censored");
+    expect(right).toMatchObject({ kind: "permission", intervalState: "right_censored", startOffsetMs: 300 });
+    // Orphan terminal → left-censored (round(1600.9-1000.2)=round(600.7)=601).
+    const left = timeline.intervals.find((i) => i.intervalState === "left_censored");
+    expect(left).toMatchObject({ kind: "permission", result: "rejected", intervalState: "left_censored", endOffsetMs: 601 });
+  });
+
+  it("P1 mono root duration: wall jump does not distort envelope durationMs", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    // busy at wall=1000/mono=1000; wall jumps to 100_000 but mono stays sane.
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "i", "session.status", "root", 100_000, 2_000, { status: { type: "idle" } });
+    const root = waitRootBody(bodies);
+    // Mono root duration = 1000, not wall 99_000.
+    expect(root.durationMs).toBe(1_000);
+    // Wall still forms the ISO labels (100_000 ms = 00:01:40.000).
+    expect(root.taskStartedAt).toBe("1970-01-01T00:00:01.000Z");
+    expect(root.endedAt).toBe("1970-01-01T00:01:40.000Z");
+  });
+
+  it("P1 mono root duration: backwards wall jump keeps mono durationMs", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "i", "session.status", "root", 500, 2_000, { status: { type: "idle" } });
+    const root = waitRootBody(bodies);
+    expect(root.durationMs).toBe(1_000);
+  });
+
+  it("P1 request id only: differing wrapper event ids without requestId produce no intervals", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    // asked and terminal carry only distinct wrapper event ids, no official request id.
+    await hooks.event!({
+      event: { id: "wrap-evt-asked", type: "question.asked", properties: { sessionID: "root", questions: [{ question: "x" }] } },
+    });
+    await hooks.event!({
+      event: { id: "wrap-evt-reply", type: "question.replied", properties: { sessionID: "root" } },
+    });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 2_000, { status: { type: "idle" } });
+    const root = waitRootBody(bodies);
+    expect(root.userWaitTimeline.intervals).toEqual([]);
+    expect(root.userWaitTimeline.partial).toBeTrue();
+    expect(root.userWaitTimeline.partialReasons).toContain("missing_request_id");
+  });
+
+  it("P1 receipt ordering: delayed first collector still yields complete asked→terminal→idle", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    let releaseAsked!: () => void;
+    const askedGate = new Promise<void>((resolve) => { releaseAsked = resolve; });
+    _setWaitCollectorTestDelay(() => askedGate);
+
+    _setClocksForTests(() => 1_000, () => 1_000);
+    await hooks.event!({
+      event: { id: "b", type: "session.status", properties: { sessionID: "root", status: { type: "busy" } } },
+    });
+
+    _setClocksForTests(() => 1_200, () => 1_200);
+    const pAsked = hooks.event!({
+      event: { id: "qa", type: "question.asked", properties: { sessionID: "root", id: "q1", questions: [{}] } },
+    });
+    _setClocksForTests(() => 1_500, () => 1_500);
+    const pTerminal = hooks.event!({
+      event: { id: "qr", type: "question.replied", properties: { sessionID: "root", requestID: "q1" } },
+    });
+    _setClocksForTests(() => 2_000, () => 2_000);
+    const pIdle = hooks.event!({
+      event: { id: "qi", type: "session.status", properties: { sessionID: "root", status: { type: "idle" } } },
+    });
+    // Release the gate: the collector's hash must be allowed to proceed before
+    // terminal/idle are processed, proving serialisation by receipt order.
+    await wait(0);
+    releaseAsked();
+    await Promise.all([pAsked, pTerminal, pIdle]);
+
+    const root = waitRootBody(bodies);
+    expect(root.userWaitTimeline.intervals).toEqual([{
+      kind: "question",
+      result: "replied",
+      intervalState: "complete",
+      startOffsetMs: 200,
+      endOffsetMs: 500,
+      durationMs: 300,
+    }]);
+    expect(_hookQueueTails.size).toBe(0);
+    expect(_hookQueueDepth.size).toBe(0);
+  });
+
+  it("P1 receipt ordering: an exception in one queued task does not stall later tasks", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    // First event: a question.asked that will throw inside the collector via a
+    // broken delay (simulating a failing hashing step).
+    _setWaitCollectorTestDelay(() => Promise.reject(new Error("synthetic collector failure")));
+    await expect(hooks.event!({
+      event: { id: "qa", type: "question.asked", properties: { sessionID: "root", id: "q1", questions: [{}] } },
+    })).resolves.toBeUndefined();
+
+    // Later events must still process normally.
+    _setClocksForTests(() => 1_000, () => 1_000);
+    await hooks.event!({
+      event: { id: "b", type: "session.status", properties: { sessionID: "root", status: { type: "busy" } } },
+    });
+    _setClocksForTests(() => 2_000, () => 2_000);
+    await hooks.event!({
+      event: { id: "i", type: "session.status", properties: { sessionID: "root", status: { type: "idle" } } },
+    });
+    expect(waitRootBody(bodies)).toBeDefined();
+    expect(_hookQueueTails.size).toBe(0);
+  });
+
+  it("P1 cleanup: resolved TTL and pending TTL deletions of unreported records keep evicted evidence", async () => {
+    const ref = await _hashSessionRef("ttl-evict");
+    _setMonoClockForTests(() => 1_000);
+    // Unreported resolved record (r1) — TTL deletion must record evicted evidence.
+    await _recordUserWaitAsked({ sessionId: "ttl-evict", requestId: "r1", receivedMonoMs: 1_000 } as any, "question");
+    await _recordUserWaitTerminal({ sessionId: "ttl-evict", requestId: "r1", receivedMonoMs: 1_500 } as any, "question", "replied");
+    // Reported resolved record (r2) — marked reported, must NOT generate evidence.
+    await _recordUserWaitAsked({ sessionId: "ttl-evict", requestId: "r2", receivedMonoMs: 1_000 } as any, "question");
+    await _recordUserWaitTerminal({ sessionId: "ttl-evict", requestId: "r2", receivedMonoMs: 1_500 } as any, "question", "replied");
+    const r2Hash = await _hashWaitRequestKey("r2");
+    const r2 = [..._userWaits.values()].find((r) => r.state === "resolved" && r.requestKeyHash === r2Hash);
+    expect(r2).toBeDefined();
+    r2!.reported = true;
+
+    // Advance beyond resolved TTL (1h from lastAccess=1500).
+    _setMonoClockForTests(() => 1_500 + 60 * 60 * 1000 + 1);
+    _cleanupUserWaits();
+    // r1 was unreported → evicted evidence; r2 was reported → no evidence.
+    expect(_waitEvicted.get(ref)).toBe(1);
+    expect(_userWaits.size).toBe(0);
+
+    // Pending TTL deletion of an unreported record also records evicted.
+    const ref2 = await _hashSessionRef("pending-ttl");
+    _setMonoClockForTests(() => 1_000);
+    await _recordUserWaitAsked({ sessionId: "pending-ttl", requestId: "p1", receivedMonoMs: 1_000 } as any, "question");
+    _setMonoClockForTests(() => 1_000 + 24 * 60 * 60 * 1000 + 1);
+    _cleanupUserWaits();
+    expect(_waitEvicted.get(ref2)).toBe(1);
+  });
+
+  it("P1 evidence lifecycle: claim rollback restores frozen evidence, commit consumes it", async () => {
+    const sid = "evidence-lifecycle";
+    const config = _resolveConfig(makeConfig(), noopLog())!;
+    await _processEvent(makeEvent({
+      type: "session.status", status: "busy", sessionId: sid,
+      sessionScope: "root", receivedAtMs: 1_000, receivedMonoMs: 1_000,
+    }), config);
+    // Missing-request-id evidence for the session.
+    await _processEvent(makeEvent({ type: "question.asked", sessionId: sid, sessionScope: "root", questions: [{ text: "x" }] }), config);
+    const ref = await _hashSessionRef(sid);
+    expect((_waitMissingRequestIds.get(ref) ?? 0)).toBeGreaterThan(0);
+
+    // Freeze a claim (evidence is read but not consumed).
+    const claim = await _claimIdleEvent(makeEvent({
+      type: "session.status", status: "idle", sessionId: sid,
+      sessionScope: "root", receivedAtMs: 2_000, receivedMonoMs: 2_000,
+    }), config);
+    expect(claim).not.toBeNull();
+    expect((_waitMissingRequestIds.get(ref) ?? 0)).toBeGreaterThan(0); // still present
+
+    // Rollback: evidence must remain for a retry.
+    _rollbackIdleClaim(claim!);
+    expect((_waitMissingRequestIds.get(ref) ?? 0)).toBeGreaterThan(0);
+
+    // A second claim freezes again; commit consumes it permanently.
+    const claim2 = await _claimIdleEvent(makeEvent({
+      type: "session.status", status: "idle", sessionId: sid,
+      sessionScope: "root", receivedAtMs: 2_000, receivedMonoMs: 2_000,
+    }), config);
+    expect(claim2).not.toBeNull();
+    _commitIdleClaim(claim2!);
+    expect(_waitMissingRequestIds.get(ref) ?? 0).toBe(0);
+  });
+
+  it("P1 fail-closed: evidence capacity overflow keeps timelines partial with evicted", async () => {
+    _setMonoClockForTests(() => 1_000);
+    // Fill beyond the evidence session cap with distinct sessions.
+    for (let i = 0; i < 1100; i++) {
+      _waitMissingRequestIds.set(`ev-${i}`, 1);
+    }
+    _cleanupUserWaits();
+    expect(_hookQueueTails.size).toBe(0);
+    const freshRef = await _hashSessionRef("fresh-session");
+    const timeline = _freezeUserWaitTimeline(freshRef, 1_000, 2_000);
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toContain("evicted");
+  });
+
+  it("P1 safe integer wire: oversize mono values are bounded and valid", async () => {
+    const rootRef = await _hashSessionRef("int-root");
+    _setMonoClockForTests(() => 0);
+    // Mono values far beyond safe integer range are rejected as invalid input.
+    expect(_safeMonoValue(Number.MAX_SAFE_INTEGER + 1)).toBeUndefined();
+    expect(_safeMonoValue(-1)).toBeUndefined();
+    expect(_safeMonoValue(1.5)).toBe(1.5);
+    expect(_intMonoMs(1.5)).toBe(2);
+    expect(_intMonoMs(-1)).toBe(0);
+    expect(_intMonoMs(Number.MAX_SAFE_INTEGER + 2)).toBe(0);
+    // A full envelope with waits stays within the 12KiB/64KiB budgets and
+    // serialises every offset as an integer.
+    for (let i = 0; i < 60; i++) {
+      await _recordUserWaitAsked(
+        { sessionId: "int-root", requestId: `w-${i}`, receivedMonoMs: 1_000.1 + i * 1.7 } as any,
+        "question",
+      );
+    }
+    const timeline = _freezeUserWaitTimeline(rootRef, 1_000.2, 10_000.8);
+    expect(new TextEncoder().encode(JSON.stringify(timeline)).length).toBeLessThanOrEqual(12 * 1024);
+    const serialized = JSON.stringify(timeline);
+    for (const m of serialized.matchAll(/"startOffsetMs":(\d+)/g)) {
+      expect(Number.isSafeInteger(Number(m[1]))).toBeTrue();
+    }
+    expect(serialized).not.toContain("int-root");
+  });
+
+  it("P1 queue saturation: saturated state phase is dropped fail-closed, not run out of order", async () => {
+    // Seed the per-session depth to the cap so the next enqueue saturates.
+    _hookQueueDepth.set("sat-session", 1024);
+    let ran = false;
+    const result = await _enqueueSessionState("sat-session", async () => {
+      ran = true;
+    });
+    // The state phase was dropped (no out-of-order bypass) and the queue did
+    // not grow; the fail-closed global flag was set.
+    expect(ran).toBeFalse();
+    expect(result).toBeUndefined();
+    expect(_hookQueueDepth.get("sat-session")).toBe(1024);
+    // Any future timeline is at least partial+evicted (never a reliable zero).
+    const ref = await _hashSessionRef("sat-fresh");
+    const timeline = _freezeUserWaitTimeline(ref, 1_000, 2_000);
+    expect(timeline.partial).toBeTrue();
+    expect(timeline.partialReasons).toContain("evicted");
+
+    // Queue recovers once the depth drains: a later enqueue runs normally.
+    _hookQueueDepth.delete("sat-session");
+    _hookQueueTails.delete("sat-session");
+    let ranAfter = false;
+    await _enqueueSessionState("sat-session", async () => { ranAfter = true; });
+    expect(ranAfter).toBeTrue();
+    await _enqueueSessionState("sat-session", async () => {});
+    expect(_hookQueueDepth.size).toBe(0);
+    expect(_hookQueueTails.size).toBe(0);
+  });
+
+  it("P1 mono invalid: end<start with reliable mono omits top-level durationMs and marks clock_invalid", async () => {
+    const { hooks, bodies } = await makeWaitServer();
+    // Busy mono=2000, idle mono=1000 → negative delta (mono captured but invalid).
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 2_000, { status: { type: "busy" } });
+    await emitAt(hooks, "i", "session.status", "root", 2_000, 1_000, { status: { type: "idle" } });
+    const root = waitRootBody(bodies);
+    expect(root).toBeDefined();
+    expect(root.durationMs).toBeUndefined();
+    expect(root.userWaitTimeline.partial).toBeTrue();
+    expect(root.userWaitTimeline.partialReasons).toContain("clock_invalid");
+    expect(root.userWaitTimeline.intervals).toEqual([]);
+  });
+
+  it("P1 mono range: exact MAX_DURATION_MS accepted, MAX+1 omitted with clock_invalid", async () => {
+    const max = 604_800_000;
+    // Exact max: valid.
+    const { hooks, bodies } = await makeWaitServer();
+    await emitAt(hooks, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks, "i", "session.status", "root", 1_000 + max, 1_000 + max, { status: { type: "idle" } });
+    const root = waitRootBody(bodies);
+    expect(root.durationMs).toBe(max);
+    expect(root.userWaitTimeline.partial).toBeFalse();
+
+    // Max+1: out of range → omit durationMs, clock_invalid.
+    const { hooks: hooks2, bodies: bodies2 } = await makeWaitServer();
+    await emitAt(hooks2, "b", "session.status", "root", 1_000, 1_000, { status: { type: "busy" } });
+    await emitAt(hooks2, "i", "session.status", "root", 1_000 + max + 1, 1_000 + max + 1, { status: { type: "idle" } });
+    const root2 = waitRootBody(bodies2);
+    expect(root2.durationMs).toBeUndefined();
+    expect(root2.userWaitTimeline.partial).toBeTrue();
+    expect(root2.userWaitTimeline.partialReasons).toContain("clock_invalid");
+  });
+
+  it("P1 legacy fallback: no reliable mono capture keeps wall duration", async () => {
+    const config = _resolveConfig(makeConfig(), noopLog())!;
+    await _processEvent(makeEvent({
+      type: "session.status", status: "busy", sessionId: "legacy-mono",
+      sessionScope: "root", receivedAtMs: 1_000,
+    }), config);
+    const env = await _processEvent(makeEvent({
+      type: "session.status", status: "idle", sessionId: "legacy-mono",
+      sessionScope: "root", receivedAtMs: 5_000,
+    }), config);
+    // No receivedMonoMs → not monoReliable → wall duration fallback preserved.
+    expect(env!.durationMs).toBe(4_000);
+    expect(env!.taskStartedAt).toBe("1970-01-01T00:00:01.000Z");
+    expect(env!.endedAt).toBe("1970-01-01T00:00:05.000Z");
   });
 });
