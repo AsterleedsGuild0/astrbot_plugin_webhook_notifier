@@ -1,19 +1,19 @@
 # 发布流程
 
-本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。`v1.1.0` 是当前稳定版。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
+本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。本轮正式发布目标为 `v1.2.0`；远端当前稳定资产状态以 GitHub Releases 页面为准。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
 
-`v1.1.0` 发布与部署必须遵循兼容顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `session.scope`。
+`v1.2.0` 发布与部署必须遵循兼容顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `userWaitTimeline`；更早版本也可能不接受 `session.scope`。
 
 ---
 
 ## 发布前检查
 
 1. 确认目标版本号一致：
-   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮稳定版为 `v1.1.0`。
-   - `pyproject.toml` 使用规范 PEP 440 版本；本轮稳定版为 `1.1.0`。
+   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮稳定版为 `v1.2.0`。
+   - `pyproject.toml` 使用规范 PEP 440 版本；本轮稳定版为 `1.2.0`。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
-   - `CHANGELOG.md` 顶部存在对应版本小节；本轮应为 `## v1.1.0 - 2026-07-30`。
-   - 本地准备与 dry-run 不创建 `v1.1.0` tag，也不创建或更新远端 Release。
+   - `CHANGELOG.md` 顶部存在对应版本小节；本轮应为 `## v1.2.0 - 2026-08-10`。
+   - 本地准备与 dry-run 不创建 `v1.2.0` tag，也不创建或更新远端 Release。
 2. 维护本地锁定验证依赖：
 
    - `uv.lock` 必须随 `pyproject.toml` 的依赖声明一起维护并纳入提交。
@@ -149,20 +149,20 @@ git push origin v1.0.0
 
 ## 手动触发
 
-如果需要在 CI 中演练完整工作流而不发布，在 GitHub Actions 页面手动运行 `Release` workflow，填写目标版本 tag。手动触发始终为 dry-run，不会创建 Release。Artifact 名称会包含目标 tag，例如 `plugin-release-v1.1.0-rc.1`。下载后可直接用于本地安装测试。
+如果需要在 CI 中演练完整工作流而不发布，在 GitHub Actions 页面手动运行 `Release` workflow，填写目标版本 tag。手动触发始终为 dry-run，不会创建 Release。Artifact 名称会包含目标 tag，例如 `plugin-release-v1.2.0`。下载后可直接用于本地安装测试。
 
 ---
 
-## v1.1.0-rc.1 发布门槛
+## v1.2.0 正式版发布门槛
 
 ### 发布前门槛
 
-1. `metadata.yaml`、`main.py @register`、`pyproject.toml` 和 `CHANGELOG.md` 对应 `v1.1.0-rc.1` / `1.1.0rc1`，且规范化后一致。
-2. 完整 Python 测试、Bun 测试、CLI smoke、前端 clean build/专项测试、版本与 package contract、RC ZIP 构建全部通过（含 Ruff lint）。
-3. RC ZIP 使用单一插件根目录，包含运行源码、OpenCode Plugin、配置示例和必要文档，不包含 `.git`、`.env`、auth/secrets、缓存、`node_modules` 或临时文件。
-4. AstrBot WebUI 手动安装、Bot Endpoint 验证和 Desktop 端到端 smoke 必须按实际执行结果记录；本 RC 准备阶段不得把它们写成已通过。
-5. 已完成的云端兼容验证必须准确表述为：卸载 v0.3.0 旧包后安装 `v1.0.0-rc.1`，同时保留原数据目录与配置数据。该结果支持卸载重装后的数据兼容性，不支持原位升级、在线更新或市场一键更新结论。
-6. 记录本地 ZIP 的 SHA256、大小、文件数和顶层摘要；用户安装前不得把本地验证写成远端发布或市场验证。
+1. `metadata.yaml`、`main.py @register`、`pyproject.toml` 和 `CHANGELOG.md` 对应 `v1.2.0` / `1.2.0`，且规范化后一致。
+2. 完整 Python 测试、Bun 测试、前端 clean build/专项测试、浏览器 timeline smoke、版本与 package contract、正式 ZIP 构建全部通过（含 Ruff lint）。
+3. 正式 ZIP 使用单一插件根目录，包含运行源码、OpenCode Plugin、配置示例和必要文档，不包含 `.git`、`.env`、auth/secrets、缓存、`node_modules` 或临时文件。
+4. 已完成的源码测试包真实链路证据可以记录为 Question、Permission、长等待与 T2I smoke 通过；该证据不替代远端正式 ZIP 的发布后复核。
+5. 服务端与 Client 的兼容顺序必须明确：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。不得在旧服务端 strict allowlist 上先启用含 `userWaitTimeline` 的 Client。
+6. 记录本地正式 ZIP 的 SHA256、大小、文件数和顶层摘要；不得把本地验证写成 GitHub Release、远端资产或插件市场验证。
 
 ### 发布后检查
 
@@ -172,7 +172,7 @@ git push origin v1.0.0
 4. 正式版发布并在 AstrBot 插件市场上架后，验证市场搜索安装、从已安装版本触发的一键更新/在线更新，以及更新后的数据与配置行为。
 5. 市场更新验证完成前，文档和发布说明不得声称该路径已通过；若市场机制实际采用重装，也应按观察到的真实行为记录，不推断为原位升级。
 
-市场更新验证属于发布后检查；`v1.1.0` 的 tag、Release、正式 ZIP 以及市场安装/更新路径必须按实际结果分别留证。
+市场更新验证属于发布后检查；`v1.2.0` 的 tag、Release、正式 ZIP 以及市场安装/更新路径必须按实际结果分别留证。
 
 ---
 
@@ -181,7 +181,7 @@ git push origin v1.0.0
 如果 Actions 不可用，且已经获得明确的远端发布授权，可以使用 GitHub CLI 手动发布目标版本。以下仅为流程示意，本轮不执行：
 
 ```bash
-TARGET_TAG=v1.1.0
+TARGET_TAG=v1.2.0
 uv sync --frozen --group dev
 uv run --frozen ruff check .
 uv run --frozen pytest
@@ -195,4 +195,4 @@ gh release create "$TARGET_TAG" \
   --notes-file tmp/release-notes.md
 ```
 
-手动兜底同样只能在发布前门槛全部满足后执行；RC 应确认 `prerelease=true`、`make_latest=false`。当前尚未执行该命令。
+手动兜底同样只能在发布前门槛全部满足后执行；`v1.2.0` 稳定版应确认 `prerelease=false`、`make_latest=true`。当前尚未执行该命令。

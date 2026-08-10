@@ -2,6 +2,25 @@
 
 ---
 
+## v1.2.0 - 2026-08-10
+
+- 自 `v1.1.0` 以来新增 OpenCode 元数据异常诊断、Subagent Timeline 覆盖统计与用户等待时间线，并将这三组向后兼容能力纳入 `v1.2.0` 稳定版，不破坏既有 V1 公共契约。
+- anomaly 元数据异常诊断（`metadataDiagnostics=anomaly`）：全天低概率取证模式，专用于捕获 OpenCode Desktop 内部 session 被判为 root/unknown 并产生 fallback 卡片的问题。每阶段最多 32 条候选，按同一匿名 session + 相同安全 payload 去重；不增加任何 `session.get` / `session.messages` / HTTP 调用，只观测既有链路。日志为有界、匿名、fail-closed 的元数据诊断，不记录标题/正文、ID 值、路径、Token 或响应体。该模式不承诺已经找到 fallback 根因，只提供取证信号；采集后应恢复为 `off`。
+- #25：Subagent Timeline 顶部覆盖统计：总任务时长使用 root busy→idle 周期的可靠 `durationMs`；子任务覆盖时长仅合并 timing quality 为 `observed`/`fallback` 且起止完整、并裁剪到 `[0, 总任务时长]` 的可靠区间，重叠或相邻区间按并集计时，覆盖率限制在 0～100%。数据不完整时只统计可靠完整区间，并将峰值与覆盖指标标为“已观测”；不对未覆盖区间作 root 或其他执行归因。统计区改为两行响应式网格布局，甘特图仍只展示 subagent。
+- #26：统一用户等待时间线（`userWaitTimeline`）：OpenCode Client 采集 Question/Permission asked→resolved 的插件接收时间区间，以独立可选字段、严格隐私安全且向后兼容的 envelope 传递，并在同一张完整 root-cycle 甘特图中与 subagent 区间对齐展示。
+  - 甘特图横轴改为完整 root 总时长：总任务时长可靠时横轴为 `0 → durationMs`，缺失时才回退到已观测最大终点并标记不完整；顶部固定“等待用户”轨道，Question 与 Permission 可区分；不单独绘制第二张图，不计入子任务数、峰值并发或 subagent 覆盖率。
+  - interval 使用 `kind`、`result`、`intervalState`、root 相对 offset 与 duration；`complete` 区间参与并集计时，left/right censored 保留边界但不伪造 duration、不参与并集；等待区间与 subagent 可重叠，不推导主 agent 真实活跃时间。
+  - 统一图顶部增加“未分类时间 / 占比”：总任务时长减去已知可靠并集（subagent 并集 + 等待并集）得出，观测受限时标注“至多/观测受限”，不把未观测时间归因给 root 或其他执行。
+  - 只统计 root session 自身的等待；原始 session/request ID、正文、答案、pattern/target、URL 与 Token 一律不出站、不进日志、不渲染；request ID 仅用于去重/撤销。
+  - 服务端先升级并重载，再部署新版 TS Client 并完全重启 OpenCode；旧服务端严格 allowlist 不接受新增 `userWaitTimeline`。
+- 验证证据（正式发布前本地门禁与真实链路）：
+  - `uv lock --check`、全仓 Ruff、前端 clean build 与 1123 项 Python 测试通过；Bun（TypeScript Client）272 项通过；真实 Chrome/CDP timeline geometry 与截图 smoke 5/5 通过。
+  - 真实 Question/Permission、长等待场景与 T2I 渲染 smoke 已通过。
+  - 本地正式 ZIP 为单一插件根目录、49 个文件、2,890,724 bytes，三版本源为 `v1.2.0` / `1.2.0`，SHA-256 为 `89fa8ebe3f9541c87b1d3f365d305e56061cf17ae40d6f75fe406852aed244b1`，未包含 `.git`、`.env`、auth/secrets、`node_modules` 或 `tmp`。
+  - GitHub Actions dry-run、tag、GitHub Release、远端正式资产及 AstrBot 插件市场安装/更新路径仍须按实际结果分别留证，当前不宣称已完成。
+
+---
+
 ## v1.1.0 - 2026-07-30
 
 - 将 v1.1.0-rc.1 已验证范围定稿为 v1.1.0，不新增业务功能。

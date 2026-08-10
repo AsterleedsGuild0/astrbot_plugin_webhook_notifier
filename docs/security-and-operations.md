@@ -133,15 +133,17 @@ Plugin 只发送 `opencode.session_idle`、`opencode.session_error`、`opencode.
 
 ### `subagentTimeline` 的发送白名单
 
-`subagentTimeline` 是唯一附加在 root completion 上的 timeline 字段：只允许出现在 `opencode.session_idle` 且 `session.scope=root` 的 envelope。其他 event 或 scope 携带它会被 Python strict adapter 拒绝；它不是独立通知、独立模板或新配置项。
+`subagentTimeline` 与独立可选的 `userWaitTimeline` 都只允许附加在 `opencode.session_idle` 且 `session.scope=root` 的 root completion envelope。其他 event 或 scope 携带它们会被 Python strict adapter 拒绝；它们不是独立通知或独立模板，`userWaitTimeline` 也不修改 `subagentTimeline.version=1`。
 
 允许的 timeline shape 为 `version=1`、`timeBasis=root_cycle`、`partial`、`partialReasons`、`observedItemCount`、`displayedItemCount`、`truncated` 和 `items`。每个 item 使用 `ref`、`parentRef`、可选 `name`/`agent`/`model`/`modelVariant`、`status`、`startOffsetMs`/`endOffsetMs`/`durationMs`、`timingQuality`、`depth`、`attempt`。`ref`/`parentRef` 是匿名 hash 图引用，不是 raw Session ID；默认 renderer 与 Sender 不展示它们。限制为 items≤64、timeline JSON≤24 KiB、body≤64 KiB、depth≤8；新增字符串字段同样计入 timeline 与 body 序列化大小边界。offset 是相对 root busy→idle cycle 的观测偏移，不表示调度依赖；重叠只说明同时运行。
 
 缺失、超限、截断或 clamped 数据必须保留 `partial`/`partialReasons`/`truncated`/timing quality 语义。`auxiliary`（包括 `smartfetch-secondary`）不进入 timeline；`focused` 仍过滤成功完成的 subagent/auxiliary 独立通知，但 root completion 可以汇总 timeline。
 
+`userWaitTimeline` 使用 `version=1`、`timeBasis=root_cycle_receipt_monotonic`、`partial`、`partialReasons`、`observedIntervalCount`、`displayedIntervalCount`、`truncated` 和 `intervals`。interval 只允许 `question|permission`、可选 `replied|rejected` 与 `complete|right_censored|left_censored` 的严格组合；complete 才具有完整 start/end/duration 并参与等待并集，censored 只保留已知边界。限制为 intervals≤64、timeline JSON≤12 KiB、body≤64 KiB。Client 只汇总 root 自身等待，raw session/request ID、正文、答案、pattern/target、URL 与 Token 不进入该字段。
+
 ### Timeline 渲染与模板风险
 
-默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 主卡摘要加同一 MessageChain 的独立横向甘特图，甘特图仍只包含 subagent，不增加 root 行。顶部统计固定为“子任务数”“峰值并发”“总任务时长”“子任务覆盖时长”“子任务覆盖率”：总任务时长只使用 root busy→idle 周期的可靠 `durationMs`；子任务覆盖时长只合并 timing quality 为 `observed`/`fallback` 且具有完整起止 offset 的区间，并先裁剪到 `[0, 总任务时长]`，重叠或相邻区间按并集计时；覆盖率为该并集时长除以总任务时长并限制在 0～100%。总任务时长缺失时覆盖时长与覆盖率显示不可用，总任务时长为 0 时覆盖时长为 0、覆盖率显示不可用，不对未覆盖区间作 root 或其他执行归因。partial、truncated、unknown timing、clamped 或记录数量不完整时只统计可靠完整区间，并将相关峰值与覆盖指标标为“已观测”。附图按任务数、名称与跨度在 1440～2400px 内动态布局，统计区使用两行响应式网格，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算，极端长名称允许继续增高。附图不继承自定义 `full_page=false` 或固定 1200px 高度，而是强制完整页面并使用 renderer 计算的有界动态 viewport 高度；主卡仍遵守原 render options。start/end 缺失比例超过 25% 不画甘特图；partial/clamped 不展示假精确 duration；未定位任务不画假 bar。
+默认渲染按 item 数、depth、峰值并发/重叠和 partial/truncated 综合判断复杂度：simple 主卡最多 8 项阶段卡；complex 或存在可展示等待区间时，主卡摘要加同一 MessageChain 的完整 root-cycle 横向甘特图。附图顶部固定“等待用户”轨道，Question/Permission 与 subagent 区间使用同一时间轴，不增加 root 行；等待不计入子任务数、峰值并发或 subagent 覆盖率。总任务时长只使用 root busy→idle 周期的可靠 `durationMs`；子任务覆盖时长只合并 timing quality 为 `observed`/`fallback` 且具有完整起止 offset 的区间，等待时长只合并 complete interval。两类区间都先裁剪到 `[0, 总任务时长]` 并分别按并集计时；“未分类时间 / 占比”为总任务时长减去两类可靠区间的联合并集，不作 root 或其他执行归因。partial、truncated、unknown timing、clamped、censored 或记录数量不完整时只统计可靠完整区间，并标记观测受限。附图按任务数、名称与跨度在 1440～2400px 内动态布局，统计区使用响应式网格，完整展示 payload 中最多 64 个 subagent item；3000px 是软高度预算。附图强制完整页面并使用有界动态 viewport 高度。start/end 缺失比例过高时不为不可靠 subagent 绘制假 bar；censored 等待只呈现已知边界，不展示假 duration。
 
 Sender 最多发 1～2 张图。附图生成、校验或构造失败只发主卡；实际发送失败后不自动重试主卡，避免造成重复通知。timeline 的身份显示遵循 `agent · model(variant)`：非 `default` variant 才追加括号，缺失字段自然降级。自定义模板如直接访问 `event.subagent_timeline`，不得渲染 `ref`、`parentRef` 或依赖其作为用户可见 ID；应使用 `render_html_data()` 生成的安全派生 `event.subagent_timeline_view`。该 view 与 built-in renderer 一样不暴露 raw Session ID、path、tool args 或 raw JSON。模板作者仍须遵守最小披露原则，不能通过自定义模板绕过服务端 allowlist。
 
@@ -151,21 +153,22 @@ Question/Permission 的 `actionContentMode` 默认为 `strict`，只保留 Permi
 
 全局 `min_completion_duration_seconds` 与 `notification_mode` 正交，默认 15 秒；仅当 Provider 提供可靠的当前任务耗时且 canonical status 为 `completed` 时，低于阈值的事件才返回 HTTP 200 `skip_reason=completion_below_duration_threshold`。耗时缺失、非法或语义不可靠时 fail-open；failed、action_required、Permission、Question 和未知状态始终放行。设置为 `0` 可关闭耗时过滤并恢复旧行为。该策略同样在 renderer、HTML/T2I、sender 和幂等 claim 前执行；响应只包含安全的耗时与阈值数值，不包含任务正文或原始 payload。
 
-客户端还支持安全、一次性的运行时元数据诊断：`metadataDiagnostics` 默认 `off`，可设为 `once` 或 `sample`，非法值回退为 `off`。`once` 每阶段每进程最多一条；`sample` 每阶段最多 8 条，对完全相同的安全 payload 去重，超过上限静默停止。每条有 session ID 的 sample 诊断可带进程内递增 `sampleSession`，同一匿名 session 跨阶段复用，不输出 raw ID、匿名 ref/hash 或 message/parent ID。诊断只记录经过安全键名过滤的 bounded key、短字符串、响应形状、状态枚举、长度和存在性，Assistant 时间只记录 `created/completed` 的存在性或 key 名；不记录标题/名称正文、parent ID 值、消息正文、parts、路径、Token、URL、headers、response body 或异常 message。
+客户端还支持安全、有界的运行时元数据诊断：`metadataDiagnostics` 默认 `off`，可设为 `once`、`sample` 或 `anomaly`，非法值回退为 `off`。`once` 每阶段每进程最多一条；`sample` 每阶段最多 8 条；`anomaly` 每阶段最多 32 条，只捕获既有链路中的 root/unknown fallback 候选，不增加 `session.get`、`session.messages` 或 HTTP 调用。诊断按安全 payload 去重，可用进程内递增 `sampleSession` 关联同一匿名 session 的不同阶段，但不输出 raw ID、匿名 ref/hash 或 message/parent ID。诊断只记录经过安全键名过滤的 bounded key、短字符串、响应形状、状态枚举、长度和存在性；不记录标题/名称正文、parent ID 值、消息正文、parts、路径、Token、URL、headers、response body 或异常 message。`anomaly` 只提供取证信号，不代表已经定位 fallback 根因。
 
 模型 variant 取证只允许 Assistant `info` 中的 `variant`、`reasoningEffort`、`reasoning_effort`，以及 `session.get` 的 nested model 和顶层对应候选。string 会清洗并限长，number/boolean 原样限界记录，对象/数组只记录类型；`reasoning` 正文、parts、provider options 和未知对象值始终不展开。nested model 的键名最多 24 个，候选字段在日志中明确区分 `model*` 与 `topLevel*`，不会加入 outgoing envelope。
 
-Client 复用已有 `input.client.session.get()` 判断 scope：非空字符串 `parentID` 为 `subagent`；只有 root/unknown 且名称精确匹配 `smartfetch-secondary` 或受限自定义 auxiliary 名称时为 `auxiliary`，明确 `undefined/null` 为 `root`，API 失败、非对象、空字符串或类型异常为 `unknown`。`session.get` 只提供 `time.created` 作为会话开始时间；`session.time.updated` 不用于任务结束或耗时。OpenCode v1.18.4 的 `message.updated.properties.info` 仅在 `role=assistant` 时被消费；清洗后的 `mode` 作为 agent，`providerID/modelID` 作为 model 元数据，`info.time.created/completed` 只在 idle 周期缺少可靠 busy 时间时作为任务时间 fallback，并按匿名 session ref 放入最多 1000 条、触发后保留最近 500 条的 LRU。若 agent/model 或 Assistant 元数据仍缺失，Client 最多调用一次 `session.messages(limit=10)`，逆序读取最后 assistant 的 `info`，不读取 `parts`。`parentID` 只在 Client 内部参与判断；若诊断开启也只记录 `parentIDState`，不记录其值。缓存也不保存 raw ID、message ID、parts、路径、tokens 或 cost；新 busy 周期只清理上一周期的 Assistant 时间缓存，保留必要的 agent/model 元数据。只缓存可靠 enum 和时间值，并对状态/缓存做有界清理。部署顺序必须是服务端先升级并重载，OpenCode Client 后完全重启，因为旧服务端严格 allowlist 不接受新 `session.scope`。
+Client 复用已有 `input.client.session.get()` 判断 scope：非空字符串 `parentID` 为 `subagent`；只有 root/unknown 且名称精确匹配 `smartfetch-secondary` 或受限自定义 auxiliary 名称时为 `auxiliary`，明确 `undefined/null` 为 `root`，API 失败、非对象、空字符串或类型异常为 `unknown`。`session.get` 只提供 `time.created` 作为会话开始时间；`session.time.updated` 不用于任务结束或耗时。OpenCode v1.18.4 的 `message.updated.properties.info` 仅在 `role=assistant` 时被消费；清洗后的 `mode` 作为 agent，`providerID/modelID` 作为 model 元数据，`info.time.created/completed` 只在 idle 周期缺少可靠 busy 时间时作为任务时间 fallback，并按匿名 session ref 放入最多 1000 条、触发后保留最近 500 条的 LRU。若 agent/model 或 Assistant 元数据仍缺失，Client 最多调用一次 `session.messages(limit=10)`，逆序读取最后 assistant 的 `info`，不读取 `parts`。`parentID` 只在 Client 内部参与判断；若诊断开启也只记录 `parentIDState`，不记录其值。缓存也不保存 raw ID、message ID、parts、路径、tokens 或 cost；新 busy 周期只清理上一周期的 Assistant 时间缓存，保留必要的 agent/model 元数据。只缓存可靠 enum 和时间值，并对状态/缓存做有界清理。部署顺序必须是服务端先升级并重载，OpenCode Client 后完全重启，因为旧服务端严格 allowlist 不接受新 `session.scope` 或 `userWaitTimeline`。
 
 以下数据不得进入 OpenCode 请求、诊断日志或服务端 `raw`：
 
 - 原始 session ID、cwd、完整本地路径、prompt、消息、tool、command 和 diff；
 - `parentID` 值；它只在 Client 内部参与 scope 判断，诊断最多记录 `parentIDState`，不能进入请求、服务端存储或渲染；
 - `subagentTimeline` 的 `ref`/`parentRef` 不得当作 raw Session ID、用户账号或可读路径输出；它们只能作为内部匿名图关联值，safe view 也不向用户暴露；
+- `userWaitTimeline` 不得包含 raw session/request ID、Question/Permission 正文、答案、pattern/target；censored 区间不得补造 duration；
 - strict 模式下 permission 标题、描述、目标路径，以及 question 正文、选项正文；full 模式也不得通过未列入 allowlist 的键绕过边界；
 - error message、response body、Token、URL 和未列入 allowlist 的字段。
 
-服务端对未知字段 fail-closed。不要绕过官方 Plugin 直接发送 OpenCode 原始 event object，也不要为了显示调试信息而放宽字段白名单。`session.get` 与 `session.messages` 的异常只产生固定脱敏 warning；不记录异常文本、session/ref、标题、响应正文或其他请求内容，且失败不阻断通知。需要排查运行时结构时，选择明确档位（例如低/高复杂度的新会话）运行多个新会话，只在受控环境临时开启 `metadataDiagnostics=once` 或 `sample`，完成取证后恢复 `off`；诊断输出不得复制到 payload、缓存、Issue 或长期运维记录。
+服务端对未知字段 fail-closed。不要绕过官方 Plugin 直接发送 OpenCode 原始 event object，也不要为了显示调试信息而放宽字段白名单。`session.get` 与 `session.messages` 的异常只产生固定脱敏 warning；不记录异常文本、session/ref、标题、响应正文或其他请求内容，且失败不阻断通知。需要排查运行时结构时，可在受控环境临时开启 `metadataDiagnostics=once`、`sample`，或针对 root/unknown fallback 候选使用 `anomaly`，完成取证后恢复 `off`；诊断输出不得复制到 payload、缓存、Issue 或长期运维记录，`anomaly` 信号也不得表述为已定位根因。
 
 ### OpenCode retry 与恢复
 

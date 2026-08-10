@@ -22,11 +22,13 @@ HTML 模板只提供一个根变量：`event`。不要使用顶层 `title`、`fi
 | --- | --- | --- |
 | OpenCode wire JSON | `subagentTimeline` | 仅 root `opencode.session_idle` 可选发送的 camelCase envelope 字段 |
 | `NormalizedEvent` / `to_dict()` | `subagent_timeline` | Python 内部与模板数据的 snake_case 字段；保留已通过 strict adapter 的 timeline shape |
+| OpenCode wire JSON | `userWaitTimeline` | 仅 root `opencode.session_idle` 可选发送的 Question/Permission 等待区间；旧 Client 可省略 |
+| `NormalizedEvent` / `to_dict()` | `user_wait_timeline` | Python 内部与模板数据的 snake_case 字段；保留 complete/censored 契约，但不含原始 request/session ID |
 | `render_html_data()` 派生 | `subagent_timeline_view` | 仅 root completion 且存在可展示 item 时生成的安全展示副本；不含 `ref`、`parentRef`、raw Session ID、路径或工具参数 |
 
-当前 `render_html_data()` 返回 `{"event": data}`，其中 `data` 会保留 `event.subagent_timeline`，并在适用时增加 `event.subagent_timeline_view`。自定义模板如果直接访问 `event.subagent_timeline`，**不得渲染其中的 `ref` 或 `parentRef`**；推荐只使用 `event.subagent_timeline_view` 的展示字段。该 view 会过滤 auxiliary item（包括 `smartfetch-secondary`），并提供 `mode`（`simple`、`complex` 或 `degraded`）、摘要、状态/时间展示数据和有界的主卡/甘特图数据。timeline item 的安全展示身份为 `identity`，格式是 `agent · model(variant)`；variant 为 `default`、空或缺失时只显示 agent/model，任一身份字段缺失时自然降级。
+当前 `render_html_data()` 返回 `{"event": data}`，其中 `data` 会保留 `event.subagent_timeline` 与 `event.user_wait_timeline`，并在适用时增加统一的 `event.subagent_timeline_view`。自定义模板如果直接访问 `event.subagent_timeline`，**不得渲染其中的 `ref` 或 `parentRef`**；如果访问 `event.user_wait_timeline`，不得尝试恢复或补造 request/session 身份。推荐只使用 `event.subagent_timeline_view` 的展示字段。该 view 会过滤 auxiliary item（包括 `smartfetch-secondary`），并提供 `mode`（`simple`、`complex` 或 `degraded`）、摘要、等待用户统计、未分类时间、状态/时间展示数据和有界的主卡/统一甘特图数据。timeline item 的安全展示身份为 `identity`，格式是 `agent · model(variant)`；variant 为 `default`、空或缺失时只显示 agent/model，任一身份字段缺失时自然降级。
 
-默认模板只读取安全派生的 `event.subagent_timeline_view`：简单流程最多展示 8 项阶段卡；复杂流程主卡展示摘要，并由服务端在同一 MessageChain 中追加独立横向甘特图。附图在 1440～2400px 内按任务数、名称与跨度动态布局，完整展示 payload 中最多 64 项，名称自然折行；3000px 是软高度预算。缺失 start/end 比例超过 25% 时不生成甘特图；`partial` 或 `clamped` 不显示假精确 duration，未定位任务不绘制假 bar。
+默认模板只读取安全派生的 `event.subagent_timeline_view`：简单流程最多展示 8 项阶段卡；需要附图时，服务端在同一 MessageChain 中追加完整 root-cycle 横向甘特图。附图顶部固定“等待用户”轨道，Question/Permission 与 subagent 区间使用同一时间轴；等待不计入子任务数、峰值并发或 subagent 覆盖率，并显示可靠等待并集及未分类时间/占比。附图在 1440～2400px 内按任务数、名称与跨度动态布局，完整展示 payload 中最多 64 个 subagent item；3000px 是软高度预算。缺失 start/end 比例过高时不会为不可靠 subagent 绘制假 bar；censored 等待区间只保留已知边界，不显示假 duration。
 
 Subagent timeline 是 root `opencode.session_idle` 的可选数据；其他 event/scope 不应假定该字段存在。没有 timeline、没有可展示 item 或不是 root completion 时，模板不会获得 timeline view。部署兼容顺序为先升级并重载服务端，再部署新版 Client 并完全重启 OpenCode Client。
 
@@ -55,6 +57,7 @@ Subagent timeline 是 root `opencode.session_idle` 的可选数据；其他 even
 | `event.generated_at` | string | `2026-07-15 20:00:01 CST (UTC+08:00)` | 本次 HTML 渲染生成时间，已转换到展示时区 |
 | `event.event_time` | string | `2026-07-15 20:00:00 CST (UTC+08:00)` | `event.emitted_at` 的展示值，已转换到展示时区 |
 | `event.subagent_timeline` | object，可选 | `{}` | 已标准化的 timeline 数据；只读，不应直接展示匿名图引用 |
+| `event.user_wait_timeline` | object，可选 | `{}` | 已标准化的用户等待时间线；只读，不含原始 request/session ID，censored 区间不得补造 duration |
 | `event.subagent_timeline_view` | object，可选 | `{}` | 安全派生展示数据；默认模板使用它展示子任务摘要、阶段卡或甘特图 |
 
 `fields` 在 HTML/默认文本渲染前会复制为展示字段：已知 OpenCode 键映射为中文，未知键保留原键名；展示副本会隐藏 `sessionRef` 和重复的 `durationMs`，在已有完整问题/权限明细时隐藏重复计数，并对重复问题摘要去重。Permission 明细使用 `permission[1].category`、`.summary`、`.title`、`.description`、`.action`、`.target`、`.patterns`，中文分别显示为“权限 1 类型”等；`permissionCount` 显示为“权限请求数”。Question 继续使用连续编号的 `question[1]`，同一聚合中的 `questionCount`/`optionCount` 不重复展示。OpenCode 的 `projectName` 映射为“项目”，仅在 envelope 有自动推导的最后一级项目名时出现；`sessionName` 只要存在就始终作为“会话名称”独立展示，即使它与 `event.title` 相同。耗时、时间和问题选项会转换为适合阅读的格式，其中选项描述独立缩进换行。`modelVariant` 保持安全短值原文，仅在同时存在 `model` 时以半角括号追加到模型值，括号前无空格，例如 `cpa/gpt-5.6-sol(max)`；仅有 variant 时不显示。时间字段的展示标签为：`startedAt` →“会话开始时间”、`taskStartedAt` →“当前任务开始时间”、`endedAt` →“当前任务结束时间”、`duration`/`durationMs` →“当前任务耗时”。仅有 provider 的 `model` 仍显示为“模型提供方”，有 variant 时同样追加括号；`provider/model` 仍显示为“模型”。`NormalizedEvent` 仅在有值时保留可选的 `model_variant`，Webhook envelope 仅在有值时保留可选的 `modelVariant`。

@@ -10,7 +10,7 @@ from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_TAG = "v1.1.0"
+EXPECTED_TAG = "v1.2.0"
 
 # ── setup-uv 固定 SHA ────────────────────────────────────────────────────
 # 来自 astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
@@ -63,6 +63,7 @@ def test_release_flags_distinguish_rc_and_stable_versions() -> None:
     assert package_plugin.release_flags("v1.0.0-rc.1") == (True, False)
     assert package_plugin.release_flags("v1.1.0-rc.1") == (True, False)
     assert package_plugin.release_flags("v1.1.0") == (False, True)
+    assert package_plugin.release_flags("v1.2.0") == (False, True)
     assert package_plugin.release_flags("v1.0.0") == (False, True)
 
 
@@ -79,6 +80,7 @@ def test_changelog_contains_stable_release_section() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "## v1.0.0 - 2026-07-21" in changelog
     assert "## v1.1.0 - 2026-07-30" in changelog
+    assert "## v1.2.0 - 2026-08-10" in changelog
 
 
 def test_changelog_contains_current_rc_section() -> None:
@@ -120,6 +122,29 @@ def test_v110_release_notes_extract_without_rc_content() -> None:
     # Must not contain RC chapter content or RC-only phrases
     assert "AstrBot WebUI" not in notes
     assert "Desktop" not in notes
+
+
+def test_v120_release_notes_cover_current_stable_scope() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    notes = _extract_release_notes(changelog, "v1.2.0")
+    assert "metadataDiagnostics=anomaly" in notes
+    assert "#25" in notes
+    assert "#26" in notes
+    assert "userWaitTimeline" in notes
+    assert "服务端先升级并重载" in notes
+    assert "v1.1.0` 已验证范围定稿" not in notes
+
+
+def test_current_release_docs_target_v120_without_claiming_remote_assets() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    release = (ROOT / "docs" / "release.md").read_text(encoding="utf-8")
+    contract = (ROOT / "docs" / "public-contract.md").read_text(encoding="utf-8")
+
+    assert "`v1.2.0` 是当前稳定源码版本与正式发布目标" in readme
+    assert "本轮正式发布目标为 `v1.2.0`" in release
+    assert "`v1.2.0` 是当前稳定源码契约版本与正式发布目标" in contract
+    assert "远端正式资产是否可用以 GitHub Releases 页面为准" in readme
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -6,7 +6,7 @@
 
 OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP 与 OpenCode 两种 provider；OpenCode 使用 V1 file Plugin 产生安全的四事件 envelope。
 
-**版本状态：** `v1.1.0` 是当前稳定版。Provider Registry、OpenCode Server Adapter、OpenCode V1 Client Plugin 及其 smoke 应使用 `v1.1.0` 稳定资产，不应归入 `v1.0.0` 范围。发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+**版本状态：** `v1.2.0` 是当前稳定源码版本与正式发布目标。OpenCode 集成、Subagent Timeline 覆盖统计与用户等待时间线及其 smoke 应使用 `v1.2.0` 资产，不应归入 `v1.1.0` 范围；远端正式资产是否可用以 GitHub Releases 页面为准。发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -17,8 +17,10 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 ## 功能亮点
 
 - 兼容社区 onebot post hook 产生的 `omp.session_stop` payload，展示会话、工作目录、模型、耗时与输入规模等常用信息。
-- `v1.1.0` 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
-- root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。
+- `v1.2.0` 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
+- root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。顶部提供覆盖统计（总任务时长、子任务覆盖时长与覆盖率），不完整数据标为“已观测”。
+- `v1.2.0` 统一用户等待时间线：OpenCode Question/Permission 的等待区间与 subagent 在同一张完整 root-cycle 甘特图中对齐展示，顶部固定“等待用户”轨道并给出未分类时间/占比；等待区间是匿名、有界的，原始 ID、正文与答案不出站。
+- `metadataDiagnostics=anomaly` 提供有界/匿名/fail-closed 的元数据诊断，用于捕获 root/unknown fallback 取证信号；不承诺定位根因。
 - 支持纯文本与 HTML 图片卡片两种全局渲染模式。
 - HTML 渲染或图片发送异常时，可自动降级为纯文本通知。
 - 通过聊天命令为个人私聊或普通 QQ 群创建、轮换、撤销和删除 endpoint。
@@ -52,11 +54,11 @@ flowchart LR
 
 ### 1. 安装插件
 
-> `v1.0.0` 已发布；`v1.1.0` 是当前稳定源码版本，正式资产状态以 GitHub Releases 页面为准。市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境。
+> `v1.2.0` 是当前稳定源码版本与正式发布目标，正式资产状态以 GitHub Releases 页面为准。市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境。
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（推荐） | `v1.1.0` 发布完成后，从对应 Release 下载 `astrbot_plugin_webhook_notifier-v1.1.0.zip`，在 WebUI 选择“从文件安装” |
+| Release ZIP（推荐） | `v1.2.0` 发布完成后，从对应 Release 下载 `astrbot_plugin_webhook_notifier-v1.2.0.zip`，在 WebUI 选择“从文件安装” |
 | RC 验收包 | `v1.1.0-rc.1` 与带 `rc-smoke` 标识的本地测试包仅用于稳定版发布前验收，不作为后续常规安装入口 |
 | 资产核对 | 在 Releases 页面核对实际存在的稳定资产；RC 资产仅用于候选版回溯 |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |

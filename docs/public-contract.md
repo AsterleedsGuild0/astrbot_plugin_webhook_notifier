@@ -2,13 +2,13 @@
 
 ## 文档状态
 
-- 稳定版本：`v1.1.0`
+- 稳定版本：`v1.2.0`
 - 状态：Final / 1.x 稳定公共契约
-- 定稿日期：2026-07-30
+- 定稿日期：2026-08-10
 - 远端发布状态：以 GitHub Releases 页面为准；本文档定义源码公共契约，不作为 tag、Release 或正式 ZIP 是否已创建的动态状态证明
-- 当前源码版本：`v1.1.0`
+- 当前源码版本：`v1.2.0`
 
-`v1.1.0` 是当前稳定版。正式资产可用后，OpenCode 集成、Provider Registry/DI 与相关 smoke 应使用 `v1.1.0` 稳定资产，不应回溯描述为 `v1.0.0` 已发布能力。AstrBot WebUI 安装、Bot Endpoint 和 Desktop 端到端 smoke 的正式版包验证仍须按实际执行结果单独留证。
+`v1.2.0` 是当前稳定源码契约版本与正式发布目标。正式资产可用后，OpenCode 集成、Provider Registry/DI、Subagent Timeline 覆盖统计、用户等待时间线与相关 smoke 应使用 `v1.2.0` 稳定资产，不应回溯描述为 `v1.1.0` 已发布能力。AstrBot WebUI 安装、Bot Endpoint 和 Desktop 端到端 smoke 的正式版包验证仍须按实际执行结果单独留证。
 
 ---
 
@@ -48,6 +48,20 @@
 聚合 bucket 只存在客户端进程内存，raw session ID 仅作本地 key；request ID 仅用于去重/撤销，不出站。`strict` 的 Permission item 仅允许 `category`，不会发送正文；`summary`/`full` 仍按 allowlist 和上限处理。
 
 这些能力的 RC 与正式版验证证据应按实际执行结果分别记录；不得将源码契约、RC 验收、正式资产验证或插件市场安装/更新验证相互替代。
+
+---
+
+## v1.2.0 新增范围
+
+以下向后兼容能力纳入 `v1.2.0` 稳定公共契约：
+
+- anomaly 元数据诊断：`metadataDiagnostics=anomaly` 只观测既有 `session.get` 与 outgoing envelope 链路中的 root/unknown fallback 候选，不增加额外 API 或 HTTP 调用。输出必须有界、匿名、去重并 fail-closed；它只提供取证信号，不表示已经定位 fallback 根因。
+- #25：Subagent Timeline 覆盖统计。总任务时长来自可靠 root busy→idle 周期；覆盖时长只合并 `observed`/`fallback` 且起止完整、已裁剪到 root 周期的 subagent 区间，重叠区间按并集计算。数据不完整时必须标记观测受限，不得把未覆盖时间归因给 root 或其他执行。
+- #26：root `opencode.session_idle` 可携带独立可选的 `userWaitTimeline`；旧客户端可以完全省略该字段，且它不修改 `subagentTimeline.version=1`。其他 event 或非 root scope 携带该字段会被 strict adapter 拒绝。
+- `userWaitTimeline` 只汇总 root session 自身 Question/Permission asked→resolved 的插件接收时间。`complete` 区间包含可靠起止与 duration 并参与等待并集；`left_censored`/`right_censored` 只保留已知边界，不伪造 duration、不参与并集。
+- Renderer 在同一张完整 root-cycle 甘特图中展示固定“等待用户”轨道与 subagent 区间。等待区间不计入子任务数、峰值并发或 subagent 覆盖率；“未分类时间 / 占比”使用总任务时长减去可靠 subagent 与等待区间并集，不把剩余时间归因给主 agent。
+- raw session/request ID、Question/Permission 正文、答案、pattern/target、URL 与 Token 不得进入 `userWaitTimeline`、诊断日志或渲染输出；request ID 只在 Client 内存中用于去重/撤销。
+- 部署必须先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client；旧服务端严格 allowlist 不接受新增 `userWaitTimeline`。
 
 ---
 
