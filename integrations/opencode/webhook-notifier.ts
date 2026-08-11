@@ -569,6 +569,26 @@ const _sessionScopes = new Map<string, SessionScope>();
 /** Assistant metadata keyed only by the existing anonymous session ref. */
 const _assistantMetadata = new Map<string, AssistantMetadata>();
 
+/**
+ * Safe Session metadata retained between events.  Populated from official
+ * `session.created` / `session.updated` events (whose `properties.info` is a
+ * full Session) and refreshed on successful `session.get`.  Keyed only by the
+ * anonymous session ref so no raw session id, directory, projectID, or raw
+ * parentID is ever retained.  Serves as a stable fallback when a later
+ * `session.get` transiently fails or returns an SDK error result.
+ */
+interface SessionMetadataCacheEntry {
+  /** Sanitised session name/title. */
+  name?: string;
+  /** Derived scope; only reliable scopes (root/subagent/auxiliary) are stored. */
+  scope?: SessionScope;
+  /** Available session created time as a safe ISO timestamp. */
+  startedAt?: string;
+}
+
+/** Bounded LRU of safe Session metadata keyed by the anonymous session ref. */
+const _sessionMetadata = new Map<string, SessionMetadataCacheEntry>();
+
 interface TimelineRun {
   key: string;
   ref: string;
@@ -1595,6 +1615,26 @@ function _cleanupTimelineRuns(force = false): void {
   }
 }
 
+/**
+ * Drop every timeline/state entry anchored to one anonymous session ref.
+ * Used by `session.deleted` so a deleted session's runs, capacity drops, and
+ * parent hints never linger; only the anonymous ref is ever inspected.
+ */
+function _dropSessionTimeline(sessionRef: string): void {
+  for (const [key, run] of _timelineRuns) {
+    if (run.ref === sessionRef) {
+      _timelineRuns.delete(key);
+      _timelineParents.delete(key);
+    }
+  }
+  for (const [key, drop] of _timelineCapacityDrops) {
+    if (drop.ref === sessionRef) {
+      _timelineCapacityDrops.delete(key);
+      _timelineParents.delete(key);
+    }
+  }
+}
+
 // ─── User Wait Collection ──────────────────────────────────
 
 /**
@@ -2276,7 +2316,7 @@ function _diagnoseAssistantMessage(
 }
 
 interface SessionDiagnosticResponse {
-  responseShape: "data-wrapper" | "direct-object" | "invalid";
+  responseShape: "data-wrapper" | "direct-object" | "error-result" | "invalid";
   data?: Record<string, unknown>;
 }
 
@@ -2286,6 +2326,13 @@ function _inspectSessionResponse(response: unknown): SessionDiagnosticResponse {
     return _isRecord(response.data)
       ? { responseShape: "data-wrapper", data: response.data }
       : { responseShape: "invalid" };
+  }
+  // The v1 SDK returns { data, request, response } on success and
+  // { error, request, response } on failure.  An error result is NOT a
+  // Session: never treat it as a direct object (which would otherwise be
+  // mis-derived as a root session and poison the scope cache).
+  if ("error" in response) {
+    return { responseShape: "error-result" };
   }
   return { responseShape: "direct-object", data: response };
 }
@@ -2347,13 +2394,16 @@ function _diagnoseSessionGet(
   context: MetadataDiagnosticContext | undefined,
 ): void {
   if (context?.mode === "anomaly") {
-    // Anomaly only records: response invalid, parentIDState empty/invalid,
-    // or parentIDState missing/null with no title (possible legitimate root fallback).
+    // Anomaly only records: response invalid/error-result, parentIDState
+    // empty/invalid, or parentIDState missing/null with no title (possible
+    // legitimate root fallback).  An SDK error result carries no Session data,
+    // so it is recorded by shape only — never its error/request payload.
     const data = response.data;
     const title = data?.title;
     const titlePresent = typeof title === "string" && title.length > 0;
     const pidState = _metadataParentIDState(data);
     const isCandidate = response.responseShape === "invalid"
+      || response.responseShape === "error-result"
       || pidState === "empty" || pidState === "invalid"
       || ((pidState === "missing" || pidState === "null") && !titlePresent);
     if (!isCandidate) return;
@@ -3234,6 +3284,51 @@ function _cachedSessionScope(sessionRef: string): SessionScope | undefined {
   return scope;
 }
 
+/**
+ * Cache safe Session metadata under the anonymous session ref only.  Only
+ * sanitised name/title, a reliable derived scope, and a valid created time
+ * are retained; raw ids, directory, projectID, and parentID never enter.
+ */
+function _cacheSessionMetadata(sessionRef: string, entry: SessionMetadataCacheEntry): void {
+  const safe: SessionMetadataCacheEntry = {};
+  const name = _sanitiseName(entry.name);
+  const startedAt = _safeTimestamp(entry.startedAt);
+  if (name) safe.name = name;
+  if (entry.scope === "root" || entry.scope === "subagent" || entry.scope === "auxiliary") {
+    safe.scope = entry.scope;
+  }
+  if (startedAt) safe.startedAt = startedAt;
+  if (Object.keys(safe).length === 0) return;
+
+  const previous = _sessionMetadata.get(sessionRef);
+  const merged: SessionMetadataCacheEntry = { ...(previous ?? {}), ...safe };
+  _sessionMetadata.delete(sessionRef);
+  _sessionMetadata.set(sessionRef, merged);
+  _cleanupSessionMetadata();
+}
+
+/** Read and refresh one safe Session metadata entry in the bounded LRU. */
+function _cachedSessionMetadata(sessionRef: string): SessionMetadataCacheEntry | undefined {
+  const entry = _sessionMetadata.get(sessionRef);
+  if (!entry) return undefined;
+  _sessionMetadata.delete(sessionRef);
+  _sessionMetadata.set(sessionRef, entry);
+  return entry;
+}
+
+/** Remove one Session's safe metadata entry (session.deleted). */
+function _dropSessionMetadata(sessionRef: string): void {
+  _sessionMetadata.delete(sessionRef);
+}
+
+function _cleanupSessionMetadata(): void {
+  if (_sessionMetadata.size <= MAX_CACHE_ENTRIES) return;
+  const entries = [..._sessionMetadata.keys()];
+  for (let i = 0; i < entries.length - CACHE_RETAIN_ENTRIES; i++) {
+    _sessionMetadata.delete(entries[i]!);
+  }
+}
+
 /** Bounded cleanup: remove state and scope entries that exceed their limits. */
 function _cleanupSessions(): void {
   if (_sessions.size > 1000) {
@@ -3249,6 +3344,7 @@ function _cleanupSessions(): void {
       _sessionScopes.delete(entries[i]!);
     }
   }
+  _cleanupSessionMetadata();
   _cleanupAssistantMetadata();
   _cleanupMetadataSampleSessions();
   _cleanupTimelineRuns();
@@ -4321,6 +4417,81 @@ async function _consumeAssistantMetadata(
   return true;
 }
 
+/**
+ * Consume official session lifecycle events before normalisation.  These are
+ * metadata-only: `session.created` / `session.updated` populate the safe
+ * Session metadata cache (never send a webhook), and `session.deleted`
+ * removes the corresponding anonymous cache/scope/assistant/timeline entries.
+ * Returns true when the event was consumed and must not reach the state
+ * machine or transport.
+ */
+async function _consumeSessionMetadata(
+  wrapped: unknown,
+  auxiliarySessionNames: ReadonlySet<string> = DEFAULT_AUXILIARY_SESSION_NAMES,
+): Promise<boolean> {
+  const candidate = wrapped && typeof wrapped === "object"
+    ? (wrapped as Record<string, unknown>).event
+    : undefined;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return false;
+
+  const rawEvent = candidate as Record<string, unknown>;
+  const type = rawEvent.type;
+  if (type !== "session.created" && type !== "session.updated" && type !== "session.deleted") {
+    return false;
+  }
+
+  try {
+    const properties = rawEvent.properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) return true;
+    const props = properties as Record<string, unknown>;
+    const info = _isRecord(props.info) ? props.info : undefined;
+
+    const rawSessionId =
+      typeof props.sessionID === "string" && props.sessionID.length > 0
+        ? props.sessionID
+        : typeof info?.id === "string" && info.id.length > 0
+          ? info.id
+          : undefined;
+    if (!rawSessionId) return true;
+
+    const sessionRef = await _hashSessionRef(rawSessionId);
+
+    if (type === "session.deleted") {
+      _dropSessionMetadata(sessionRef);
+      _sessionScopes.delete(sessionRef);
+      _assistantMetadata.delete(sessionRef);
+      _sessions.delete(sessionRef);
+      _dropSessionTimeline(sessionRef);
+      return true;
+    }
+
+    // created/updated: properties.info is the full Session
+    // ({ id, title, parentID, time }).  Only sanitised name, derived scope,
+    // and created time are cached; raw ids/directory/projectID/parentID never.
+    if (info) {
+      const title = typeof info.title === "string" ? info.title : undefined;
+      const name = _sanitiseName(
+        title ?? (typeof info.name === "string" ? info.name : undefined),
+      );
+      const scope = _deriveSessionScope(info, auxiliarySessionNames);
+      if (scope === "root" || scope === "subagent" || scope === "auxiliary") {
+        _cacheSessionScope(sessionRef, scope);
+      }
+      const time = _isRecord(info.time) ? info.time : undefined;
+      const startedAt = time
+        ? _safeTimestamp((time as Record<string, unknown>).created)
+        : undefined;
+      _cacheSessionMetadata(sessionRef, { name, scope, startedAt });
+    }
+    return true;
+  } catch {
+    // Never expose raw ids or titles from a lifecycle event parse failure.
+    return true;
+  } finally {
+    _cleanupSessions();
+  }
+}
+
 // ─── Session Enrichment ──────────────────────────────────────
 
 function _deriveSessionScope(
@@ -4369,8 +4540,20 @@ async function _enrichEvent(
 
   const sessionRef = await _hashSessionRef(rawSessionId);
   const sessionDiagnostics = _metadataDiagnosticContextForSessionRef(diagnostics, sessionRef);
+
+  // Apply cached safe Session metadata (from session.created/updated events or
+  // a prior successful session.get) BEFORE any live enrichment.  Existing
+  // event values always win; the cache is the first fallback source.
+  const cachedMetadata = _cachedSessionMetadata(sessionRef);
+  if (cachedMetadata?.name && !event.session?.name && !event.session?.title) {
+    if (!event.session) event.session = {};
+    event.session.name = cachedMetadata.name;
+  }
+  if (cachedMetadata?.startedAt && event.startedAt === undefined) {
+    event.startedAt = cachedMetadata.startedAt;
+  }
   if (event.sessionScope === undefined) {
-    event.sessionScope = _cachedSessionScope(sessionRef) ?? "unknown";
+    event.sessionScope = cachedMetadata?.scope ?? _cachedSessionScope(sessionRef) ?? "unknown";
   }
   const setScope = (scope: SessionScope): void => {
     event.sessionScope = scope;
@@ -4392,11 +4575,18 @@ async function _enrichEvent(
     const data = inspectedResponse.data;
 
     if (!data || typeof data !== "object" || Array.isArray(data)) {
-      setScope("unknown");
+      // session.get failed, returned an SDK error result
+      // ({ error, request, response }), or produced no usable Session data.
+      // Never treat the error shape as a Session, and never force the scope
+      // back to root/unknown when a reliable cached scope was already applied.
+      if (event.sessionScope === undefined || event.sessionScope === "unknown") {
+        setScope("unknown");
+      }
       _log.warn(SESSION_GET_WARNING);
     } else {
       sessionData = data as Record<string, unknown>;
-      setScope(_deriveSessionScope(sessionData, auxiliarySessionNames));
+      const derivedScope = _deriveSessionScope(sessionData, auxiliarySessionNames);
+      setScope(derivedScope);
 
       // Hash the parent in this call stack and retain only the anonymous ref.
       // The raw parentID is never copied to the event, state, logs, or envelope.
@@ -4409,14 +4599,14 @@ async function _enrichEvent(
 
       // Only fill fields not already present in the event or assistant cache.
       if (!event.session) event.session = {};
-      if (!event.session.name) {
-        const name =
-          typeof sessionData.title === "string"
-            ? sessionData.title
-            : typeof sessionData.name === "string"
-              ? sessionData.name
-              : undefined;
-        if (name) event.session.name = name;
+      const sessionName =
+        typeof sessionData.title === "string"
+          ? sessionData.title
+          : typeof sessionData.name === "string"
+            ? sessionData.name
+            : undefined;
+      if (!event.session.name && sessionName) {
+        event.session.name = sessionName;
       }
       if (!event.agent) {
         const sessionAgent = _sanitiseActionText(sessionData.agent ?? sessionData.mode, MAX_AGENT_MODEL_LENGTH);
@@ -4435,11 +4625,9 @@ async function _enrichEvent(
         sessionData.time && typeof sessionData.time === "object" && !Array.isArray(sessionData.time)
           ? sessionData.time as Record<string, unknown>
           : undefined;
-      if (sessionTime) {
-        if (event.startedAt === undefined) {
-          const startedAt = _safeTimestamp(sessionTime.created);
-          if (startedAt) event.startedAt = startedAt;
-        }
+      const sessionStartedAt = _safeTimestamp(sessionTime?.created);
+      if (sessionStartedAt && event.startedAt === undefined) {
+        event.startedAt = sessionStartedAt;
       }
 
       if (!event.counts) {
@@ -4451,11 +4639,22 @@ async function _enrichEvent(
           },
         );
       }
+
+      // session.get succeeded: refresh the safe metadata cache so a later
+      // transient session.get failure still has a reliable fallback.
+      _cacheSessionMetadata(sessionRef, {
+        name: sessionName,
+        scope: derivedScope,
+        startedAt: sessionStartedAt,
+      });
     }
   } catch {
     // Do not expose the exception, session ID, ref, title, or response body.
     _diagnoseSessionGet({ responseShape: "invalid" }, sessionDiagnostics);
-    setScope("unknown");
+    // Failure must not wipe out a reliable cached scope applied above.
+    if (event.sessionScope === undefined || event.sessionScope === "unknown") {
+      setScope("unknown");
+    }
     _log.warn(SESSION_GET_WARNING);
   }
 
@@ -4478,11 +4677,13 @@ async function _enrichEvent(
     && event.taskStartedAt
     && event.endedAt;
   if (event.agent && event.model && hasCompleteAssistantTiming) return;
-  const messages = input.client.session.messages;
-  if (typeof messages !== "function") return;
+  const sessionClient = input.client.session;
+  if (typeof sessionClient.messages !== "function") return;
 
   try {
-    const response = await messages({ path: { id: rawSessionId }, query: { limit: 10 } });
+    // Keep the generated SDK method bound to its Session client.  Detaching
+    // `messages` loses `this._client` and makes every fallback call fail.
+    const response = await sessionClient.messages({ path: { id: rawSessionId }, query: { limit: 10 } });
     const inspectedResponse = _inspectMessagesResponse(response);
     _diagnoseSessionMessages(inspectedResponse, sessionDiagnostics);
     const items = inspectedResponse.items;
@@ -4623,6 +4824,7 @@ const server: Plugin = async (input, options) => {
         // v1.18.4 assistant updates are metadata-only and must be consumed
         // before normalisation so they never enter the state machine/HTTP path.
         if (await _consumeAssistantMetadata(wrapped, diagnostics)) return;
+        if (await _consumeSessionMetadata(wrapped, config.auxiliarySessionNames)) return;
 
         const rawSessionId = typeof wrapped.event?.properties?.sessionID === "string"
           ? wrapped.event.properties.sessionID
@@ -4823,6 +5025,7 @@ export {
   _resetActionBuckets,
   _normalizeWrappedEvent,
   _consumeAssistantMetadata,
+  _consumeSessionMetadata,
   _resetMetadataDiagnostics,
   _metadataDiagnosticSamples,
   _metadataDiagnosticAnomalyCounts,
@@ -4830,6 +5033,7 @@ export {
   _diagnoseOutgoingEnvelope,
   _metadataSampleSessions,
   _assistantMetadata,
+  _sessionMetadata,
   _timelineRuns,
   _timelineParents,
   _timelineCapacityDrops,

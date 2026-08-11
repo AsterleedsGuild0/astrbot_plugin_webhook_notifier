@@ -50,6 +50,7 @@ const {
   _resetActionBuckets,
   _normalizeWrappedEvent,
   _consumeAssistantMetadata,
+  _consumeSessionMetadata,
   _resetMetadataDiagnostics,
   _metadataDiagnosticSamples,
   _metadataDiagnosticAnomalyCounts,
@@ -57,6 +58,7 @@ const {
   _metadataSampleSessions,
   _diagnoseOutgoingEnvelope,
   _assistantMetadata,
+  _sessionMetadata,
   _timelineRuns,
   _timelineParents,
   _timelineCapacityDrops,
@@ -123,6 +125,7 @@ beforeEach(() => {
   _sessionScopes.clear();
   _sessions.clear();
   _assistantMetadata.clear();
+  _sessionMetadata.clear();
   _timelineRuns.clear();
   _timelineParents.clear();
   _timelineCapacityDrops.clear();
@@ -3500,6 +3503,92 @@ describe("metadata diagnostics", () => {
   });
 });
 
+describe("session lifecycle metadata cache", () => {
+  it("uses session.updated metadata when session.get returns an SDK error result", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, options: RequestInit) => {
+      bodies.push(JSON.parse(String(options.body)));
+      return new Response("ok", { status: 200 });
+    }) as any;
+
+    const hooks = await defaultModule.server({
+      client: {
+        session: {
+          get: async () => ({ error: { name: "NotFoundError" }, request: {} }),
+        },
+      },
+    } as any, makeConfig());
+
+    await hooks.event!({
+      event: {
+        id: "lifecycle-updated",
+        type: "session.updated",
+        properties: {
+          info: {
+            id: "lifecycle-session",
+            title: "Cached Session Title",
+            parentID: null,
+            projectID: "must-not-be-cached",
+            directory: "/must/not/be/cached",
+            time: { created: 1_750_000_000_000, updated: 1_750_000_001_000 },
+          },
+        },
+      },
+    });
+    expect(bodies).toHaveLength(0);
+
+    const ref = await _hashSessionRef("lifecycle-session");
+    expect(_sessionMetadata.get(ref)).toEqual({
+      name: "Cached Session Title",
+      scope: "root",
+      startedAt: "2025-06-15T15:06:40.000Z",
+    });
+    expect(JSON.stringify(_sessionMetadata.get(ref))).not.toContain("must-not-be-cached");
+
+    await hooks.event!({
+      event: {
+        id: "lifecycle-busy",
+        type: "session.status",
+        properties: { sessionID: "lifecycle-session", status: { type: "busy" } },
+      },
+    });
+    await hooks.event!({
+      event: {
+        id: "lifecycle-idle",
+        type: "session.idle",
+        properties: { sessionID: "lifecycle-session" },
+      },
+    });
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].session.name).toBe("Cached Session Title");
+    expect(bodies[0].session.scope).toBe("root");
+    expect(bodies[0].startedAt).toBe("2025-06-15T15:06:40.000Z");
+    expect(bodies[0].session.name).not.toMatch(/^OpenCode Session [0-9a-f]{12}$/);
+
+    await hooks.event!({
+      event: {
+        id: "lifecycle-deleted",
+        type: "session.deleted",
+        properties: { info: { id: "lifecycle-session", title: "Cached Session Title" } },
+      },
+    });
+    expect(bodies).toHaveLength(1);
+    expect(_sessionMetadata.has(ref)).toBeFalse();
+    expect(_sessionScopes.has(ref)).toBeFalse();
+  });
+
+  it("consumes lifecycle events without entering transport", async () => {
+    expect(await _consumeSessionMetadata({
+      event: {
+        id: "created-only",
+        type: "session.created",
+        properties: { info: { id: "created-only", title: "Created", time: { created: 1 } } },
+      },
+    })).toBeTrue();
+    expect(_sessionMetadata.has(await _hashSessionRef("created-only"))).toBeTrue();
+  });
+});
+
 describe("_enrichEvent — session metadata enrichment", () => {
   it("uses session.time.created only for startedAt and never session.time.updated", async () => {
     const event = { type: "session.idle", sessionId: "session-time-contract" } as OpenCodeEvent;
@@ -3718,6 +3807,21 @@ describe("_enrichEvent — session metadata enrichment", () => {
     expect(event.session).toBeUndefined();
   });
 
+  it("does not treat an SDK error result as a direct Session or root scope", async () => {
+    const event = { type: "session.idle", sessionId: "sdk-error-result" } as OpenCodeEvent;
+    await _enrichEvent(event, {
+      client: {
+        session: {
+          get: async () => ({ error: { name: "NotFoundError" }, request: {} }),
+        },
+      },
+    } as any);
+
+    expect(event.session).toBeUndefined();
+    expect(event.sessionScope).toBe("unknown");
+    expect(_sessionScopes.has(await _hashSessionRef("sdk-error-result"))).toBeFalse();
+  });
+
   it("no-op when sessionId is missing", async () => {
     const event = { type: "session.idle" } as OpenCodeEvent;
     const input = {
@@ -3756,6 +3860,31 @@ describe("_enrichEvent — session metadata enrichment", () => {
     expect(event.taskStartedAt).toBe("2025-06-15T15:06:40.000Z");
     expect(event.endedAt).toBe("2025-06-15T15:06:41.000Z");
     expect(event.durationMs).toBe(1000);
+  });
+
+  it("keeps the generated SDK messages method bound to its Session client", async () => {
+    class SessionClient {
+      private marker = "bound";
+
+      async get() {
+        return { data: { title: "Receiver", parentID: null } };
+      }
+
+      async messages() {
+        if (this.marker !== "bound") throw new Error("lost receiver");
+        return {
+          data: [{
+            info: { role: "assistant", mode: "receiver-agent", providerID: "receiver", modelID: "model" },
+            parts: [],
+          }],
+        };
+      }
+    }
+
+    const event = { type: "session.idle", sessionId: "receiver-session" } as OpenCodeEvent;
+    await _enrichEvent(event, { client: { session: new SessionClient() } } as any);
+    expect(event.agent).toBe("receiver-agent");
+    expect(event.model).toBe("receiver/model");
   });
 
   it("supports a direct array messages response and keeps provider/model rules", async () => {
