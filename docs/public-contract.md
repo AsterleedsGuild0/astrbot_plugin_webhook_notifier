@@ -62,6 +62,21 @@
 - Renderer 在同一张完整 root-cycle 甘特图中展示固定“等待用户”轨道与 subagent 区间。等待区间不计入子任务数、峰值并发或 subagent 覆盖率；“未分类时间 / 占比”使用总任务时长减去可靠 subagent 与等待区间并集，不把剩余时间归因给主 agent。
 - raw session/request ID、Question/Permission 正文、答案、pattern/target、URL 与 Token 不得进入 `userWaitTimeline`、诊断日志或渲染输出；request ID 只在 Client 内存中用于去重/撤销。
 - 部署必须先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client；旧服务端严格 allowlist 不接受新增 `userWaitTimeline`。
+- 新增 `markdown` provider：不新增公开路由，仍使用现有 Endpoint Path、Bearer Token、目标别名白名单、幂等、Sender、`text`/`html_image`/fallback 链路。创建后 provider 仍不可变。
+- `markdown` provider 只接受 `event=markdown.message`。`markdown` 为必填非空字符串，最多 32768 个 Unicode 字符且 UTF-8 不超过 64 KiB；可选 `title` 最多 200 字符、`id` 最多 128 字符、`target_alias` 最多 128 字符。未知字段、错误类型、空值、错误事件或超限输入按既有 JSON 错误结构返回 4xx。
+- 受限 Markdown 子集包括标题、段落、无序/有序列表、粗体/斜体、inline code、fenced code 和普通 `http(s)` 链接。Raw HTML、图片、Jinja/模板执行与远程资源加载不受支持；相关输入按文本显示。HTML 图片继续复用内置卡片、sandbox、CSP、T2I 与文本 fallback。
+
+最小请求示例：
+
+```json
+{
+  "event": "markdown.message",
+  "id": "cpa-update-stable-id",
+  "title": "CPA 自动更新",
+  "markdown": "## 更新完成\n\n- CPA：`x → y`\n- 状态：成功",
+  "target_alias": "default"
+}
+```
 
 ---
 

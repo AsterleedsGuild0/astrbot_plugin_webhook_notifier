@@ -39,6 +39,7 @@ from .core.notification_policy import (
 )
 from .core.omp import OmpProviderAdapter
 from .core.opencode import OpenCodeProviderAdapter
+from .core.markdown import MarkdownProviderAdapter
 from .core.providers import ProviderRegistry
 from .core.registry import (
     BIND_CURRENT_GROUP,
@@ -1160,8 +1161,10 @@ class WebhookNotifierPlugin(Star):
             )
 
         # 解析可选的 --provider 参数，未指定时默认 omp
-        provider, filtered_args = self._extract_provider_flag(args)
-        if not provider:
+        provider, filtered_args, provider_error = self._extract_provider_flag(args)
+        if provider_error:
+            return f"❌ {provider_error}"
+        if provider is None:
             provider = "omp"
 
         mode = filtered_args[0].lower() if filtered_args else ""
@@ -1185,45 +1188,46 @@ class WebhookNotifierPlugin(Star):
         else:
             return (
                 f"未知类型: {mode}\n"
-                f"用法: {commands.short} token new private [名称] [--provider <omp|opencode>]；"
+                f"用法: {commands.short} token new private [名称] [--provider <omp|opencode|markdown>]；"
                 "群聊请按当前平台使用数字群号或 current"
             )
 
     @staticmethod
     def _extract_provider_flag(
         args: list[str],
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str | None, list[str], str | None]:
         """从命令参数中提取 ``--provider <value>``。
 
-        重复 ``--provider`` 视为参数错误，返回空 provider 让调用方处理拒绝。
-        末尾缺值（如 ``--provider`` 后无参数）也视为空 provider。
+        缺值、重复、``--provider=value`` 和以 ``--`` 开头的值均明确拒绝，
+        不得与“未提供 flag”混淆后静默回落到 omp。
 
         Returns:
-            (provider_value, remaining_args)
-            未提供时 provider_value 为空字符串。
+            (provider_value, remaining_args, error_message)
+            未提供时 provider_value 为 None；语法错误时 error_message 非空。
         """
         result_args: list[str] = []
-        provider = ""
+        provider: str | None = None
         found_provider = False
-        skip_next = False
-        for i, arg in enumerate(args):
-            if skip_next:
-                skip_next = False
-                continue
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg.startswith("--provider="):
+                return None, result_args, "--provider 必须使用独立参数形式"
             if arg == "--provider":
-                if i + 1 >= len(args):
-                    # 末尾缺值：标记找到但无值，跳过该 flag
-                    found_provider = True
-                    continue
                 if found_provider:
-                    # 重复 --provider，返回空 provider 让调用方拒绝
-                    return "", result_args + args[i:]
+                    return None, result_args, "--provider 不能重复指定"
                 found_provider = True
-                provider = args[i + 1].strip()
-                skip_next = True
-            else:
-                result_args.append(arg)
-        return provider, result_args
+                if i + 1 >= len(args):
+                    return None, result_args, "--provider 缺少值"
+                value = args[i + 1].strip()
+                if not value or value.startswith("--"):
+                    return None, result_args, "--provider 缺少有效值"
+                provider = value
+                i += 2
+                continue
+            result_args.append(arg)
+            i += 1
+        return provider, result_args, None
 
     def _validate_create_provider(self, provider: str) -> tuple[bool, str]:
         """验证创建时指定的 provider 值是否可用。
@@ -1231,10 +1235,10 @@ class WebhookNotifierPlugin(Star):
         Returns:
             (is_valid, error_or_empty_message)
         """
-        if provider not in ("omp", "opencode"):
+        if provider not in ("omp", "opencode", "markdown"):
             return (
                 False,
-                f"❌ 不支持的 provider: {provider}。当前支持的 provider: omp, opencode",
+                f"❌ 不支持的 provider: {provider}。当前支持的 provider: omp, opencode, markdown",
             )
         # 查询 Registry 确认 adapter 是否已注册
         reg = self._ensure_provider_registry()
@@ -1252,10 +1256,11 @@ class WebhookNotifierPlugin(Star):
         return self._provider_registry
 
     def _init_default_provider_registry(self) -> None:
-        """构造时初始化默认 ProviderRegistry 并冻结（含 OMP + OpenCode adapter）。"""
+        """构造时初始化并冻结默认 ProviderRegistry。"""
         reg = ProviderRegistry()
         reg.register(OmpProviderAdapter())
         reg.register(OpenCodeProviderAdapter())
+        reg.register(MarkdownProviderAdapter())
         reg.freeze()
         self._provider_registry = reg
 

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 PLUGIN_PARENT = Path(__file__).resolve().parents[2]
 if str(PLUGIN_PARENT) not in sys.path:
@@ -28,68 +31,138 @@ class TestExtractProviderFlag:
     """覆盖：无 flag、正常 omp/opencode、flag 末尾缺值、连续 flag、重复 flag、未知值。"""
 
     @staticmethod
-    def extract(args: list[str]) -> tuple[str, list[str]]:
+    def extract(args: list[str]) -> tuple[str | None, list[str], str | None]:
         return WebhookNotifierPlugin._extract_provider_flag(args)  # type: ignore
 
     def test_no_flag(self):
         """无 --provider 时返回空 provider。"""
-        provider, remaining = self.extract(["private", "my_ep"])
-        assert provider == ""
+        provider, remaining, error = self.extract(["private", "my_ep"])
+        assert provider is None
         assert remaining == ["private", "my_ep"]
+        assert error is None
 
     def test_flag_omp(self):
         """--provider omp 应正确提取。"""
-        provider, remaining = self.extract(["private", "--provider", "omp"])
+        provider, remaining, error = self.extract(["private", "--provider", "omp"])
         assert provider == "omp"
         assert remaining == ["private"]
+        assert error is None
 
     def test_flag_opencode(self):
         """--provider opencode 应正确提取。"""
-        provider, remaining = self.extract(["private", "--provider", "opencode"])
+        provider, remaining, error = self.extract(["private", "--provider", "opencode"])
         assert provider == "opencode"
         assert remaining == ["private"]
+        assert error is None
+
+    def test_flag_markdown(self):
+        """--provider markdown 应正确提取。"""
+        provider, remaining, error = self.extract(["private", "--provider", "markdown"])
+        assert provider == "markdown"
+        assert remaining == ["private"]
+        assert error is None
 
     def test_flag_missing_value(self):
-        """--provider 末尾缺值应返回空 provider。"""
-        provider, remaining = self.extract(["private", "--provider"])
-        assert provider == ""
+        """--provider 末尾缺值应明确报错。"""
+        provider, remaining, error = self.extract(["private", "--provider"])
+        assert provider is None
         assert remaining == ["private"]
+        assert error == "--provider 缺少值"
 
     def test_consecutive_flags(self):
-        """连续 flag（--provider 后跟另一个 --flag）应正确解析。"""
-        provider, remaining = self.extract(["private", "--provider", "omp", "--other"])
+        """provider 值后的其他 flag 保持为位置参数。"""
+        provider, remaining, error = self.extract(
+            ["private", "--provider", "omp", "--other"]
+        )
         assert provider == "omp"
         assert remaining == ["private", "--other"]
+        assert error is None
+
+    def test_flag_value_cannot_be_another_flag(self):
+        provider, remaining, error = self.extract(["private", "--provider", "--other"])
+        assert provider is None
+        assert remaining == ["private"]
+        assert error == "--provider 缺少有效值"
+
+    def test_equals_form_is_rejected(self):
+        provider, remaining, error = self.extract(["private", "--provider=markdown"])
+        assert provider is None
+        assert remaining == ["private"]
+        assert "独立参数" in str(error)
 
     def test_duplicate_flag(self):
         """重复 --provider 返回空 provider（由调用方拒绝）。"""
-        provider, remaining = self.extract(
+        provider, remaining, error = self.extract(
             ["private", "--provider", "omp", "--provider", "opencode"]
         )
-        assert provider == ""  # 重复 flag 被拒绝
-        # remaining 包含从第二个 --provider 开始的内容
-        assert len(remaining) >= 2
+        assert provider is None
+        assert remaining == ["private"]
+        assert error == "--provider 不能重复指定"
 
     def test_duplicate_flag_same_value(self):
         """即使两次相同值，重复 --provider 也被拒绝。"""
-        provider, remaining = self.extract(
+        provider, remaining, error = self.extract(
             ["private", "--provider", "omp", "--provider", "omp"]
         )
-        assert provider == ""
+        assert provider is None
+        assert remaining == ["private"]
+        assert error == "--provider 不能重复指定"
 
     def test_flag_in_middle_of_positional_args(self):
         """--provider 在位置参数中间也应正确提取。"""
-        provider, remaining = self.extract(
+        provider, remaining, error = self.extract(
             ["group", "12345", "--provider", "omp", "my_ep"]
         )
         assert provider == "omp"
         assert remaining == ["group", "12345", "my_ep"]
+        assert error is None
 
     def test_flag_value_is_unknown(self):
         """未知 provider 值也能提取，由 validate 阶段拒绝。"""
-        provider, remaining = self.extract(["private", "--provider", "unknown"])
+        provider, remaining, error = self.extract(["private", "--provider", "unknown"])
         assert provider == "unknown"
         assert remaining == ["private"]
+        assert error is None
+
+
+class _PrivateEventStub:
+    unified_msg_origin = "test:FriendMessage:user"
+    session = SimpleNamespace(message_type="friend")
+
+    def get_sender_id(self) -> str:
+        return "user"
+
+    def get_platform_id(self) -> str:
+        return "test"
+
+
+class TestHandleTokenNewProviderSyntax:
+    """证明 provider 语法错误在创建动作前明确返回，不回落 omp。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (["private", "--provider"], "缺少值"),
+            (
+                ["private", "--provider", "omp", "--provider", "markdown"],
+                "不能重复",
+            ),
+            (["private", "--provider=markdown"], "独立参数"),
+            (["private", "--provider", "--other"], "缺少有效值"),
+        ],
+    )
+    async def test_invalid_provider_syntax_is_rejected(self, args, expected):
+        plugin = WebhookNotifierPlugin(Context(), {})  # type: ignore[arg-type]
+
+        async def must_not_create(*_args, **_kwargs):
+            raise AssertionError("provider 语法错误不得进入 Endpoint 创建")
+
+        plugin._create_private_endpoint = must_not_create  # type: ignore[method-assign]
+        result = await plugin._handle_token_new(_PrivateEventStub(), args)  # type: ignore[arg-type]
+
+        assert isinstance(result, str)
+        assert expected in result
 
 
 # ─── _validate_create_provider ───────────────────────────────
@@ -156,6 +229,13 @@ class TestValidateCreateProvider:
         assert ok is False
         assert "未注册" in msg
         assert "opencode" in msg
+
+    def test_markdown_registered(self):
+        """markdown 已注册时应通过。"""
+        plugin = self._plugin_with_registry(["omp", "markdown"])
+        ok, msg = plugin._validate_create_provider("markdown")
+        assert ok is True
+        assert msg == ""
 
     def test_unknown_provider(self):
         """未知 provider 值应返回 unsupported。"""

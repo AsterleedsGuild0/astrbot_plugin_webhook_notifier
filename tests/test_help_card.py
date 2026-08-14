@@ -89,6 +89,7 @@ async def test_help_aliases_render_image_result(alias):
     assert "/whn token list" in captured["html"]
     assert "/whn token delete &lt;名称&gt;" in captured["html"]
     assert "不可恢复" in captured["html"]
+    assert "omp|opencode|markdown" in captured["html"]
 
 
 @pytest.mark.asyncio

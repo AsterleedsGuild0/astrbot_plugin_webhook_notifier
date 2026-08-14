@@ -4,7 +4,7 @@
 
 [![Release](https://img.shields.io/github/v/release/AsterleedsGuild0/astrbot_plugin_webhook_notifier?display_name=tag&sort=semver)](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) [![License](https://img.shields.io/github/license/AsterleedsGuild0/astrbot_plugin_webhook_notifier)](LICENSE) [![Python](https://img.shields.io/badge/Python-%3E%3D3.10-3776AB?logo=python&logoColor=white)](pyproject.toml) [![AstrBot Plugin](https://img.shields.io/badge/AstrBot-Plugin-6C5CE7)](https://docs.astrbot.app/)
 
-OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP 与 OpenCode 两种 provider；OpenCode 使用 V1 file Plugin 产生安全的四事件 envelope。
+OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP、OpenCode 与通用 `markdown` provider；OpenCode 使用 V1 file Plugin 产生安全的四事件 envelope，`markdown` 用于 CPA 自动更新等受控运维通知。
 
 **版本状态：** `v1.2.0` 是当前稳定源码版本与正式发布目标。OpenCode 集成、Subagent Timeline 覆盖统计与用户等待时间线及其 smoke 应使用 `v1.2.0` 资产，不应归入 `v1.1.0` 范围；远端正式资产是否可用以 GitHub Releases 页面为准。发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
 
@@ -18,6 +18,7 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 
 - 兼容社区 onebot post hook 产生的 `omp.session_stop` payload，展示会话、工作目录、模型、耗时与输入规模等常用信息。
 - `v1.2.0` 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
+- 支持通用 `markdown.message`：复用 Endpoint Bearer、目标别名白名单、幂等、文本/HTML 图片与自动降级链路，不新增公开路由。
 - root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。顶部提供覆盖统计（总任务时长、子任务覆盖时长与覆盖率），不完整数据标为“已观测”。
 - `v1.2.0` 统一用户等待时间线：OpenCode Question/Permission 的等待区间与 subagent 在同一张完整 root-cycle 甘特图中对齐展示，顶部固定“等待用户”轨道并给出未分类时间/占比；等待区间是匿名、有界的，原始 ID、正文与答案不出站。
 - `metadataDiagnostics=anomaly` 提供有界/匿名/fail-closed 的元数据诊断，用于捕获 root/unknown fallback 取证信号；不承诺定位根因。
@@ -136,6 +137,28 @@ JSON
 
 `python scripts/smoke_opencode_plugin.py --cli` 只验证 OpenCode CLI 会实际调用 V1 Plugin server，不能替代 AstrBot 测试包部署、Endpoint 创建和 Bot 端到端通知验收。完整流程见[OpenCode 集成指南](docs/opencode-integration.md)。
 
+### Markdown 信息推送
+
+先创建独立的 Markdown Endpoint：`<唤醒词>whn token new private ops --provider markdown`。调用仍使用现有 `POST {base_path}/{endpoint}` 与 Endpoint Bearer Token：
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -X POST "${WHN_BASE_URL}/${WHN_ENDPOINT_PATH}" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer ${WHN_TOKEN}" \
+  --data-binary @- <<'JSON'
+{
+  "event": "markdown.message",
+  "id": "cpa-update-stable-id",
+  "title": "CPA 自动更新",
+  "markdown": "## 更新完成\n\n- CPA：`x → y`\n- 状态：**成功**",
+  "target_alias": "default"
+}
+JSON
+```
+
+仅支持标题、段落、有序/无序列表、粗体/斜体、行内代码、fenced code 与普通 `http(s)` 链接。Raw HTML、图片语法、Jinja/模板语法与外部资源不会执行；不安全或不支持的语法按文本显示。`target_alias` 只能选择当前 Endpoint 已绑定的别名，调用方不能传入 UMO。
+
 ---
 
 ## 支持范围
@@ -202,6 +225,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 - Subagent timeline 只在 root `session_idle` 中可选发送，时间是相对 root busy→idle cycle 的观测偏移；卡片不展示匿名图引用、原始 Session ID、路径或工具参数，部分数据不会伪装成精确耗时。
 - `actionContentMode` 只控制 OpenCode Question/Permission 内容隐私，与服务端 `notification_mode` 正交；`focused` 只抑制成功完成的 subagent/auxiliary，unknown 会 fail-open 放行。
 - OpenCode Client 只发送匿名 `session.ref` 与 `session.scope`，不发送 `parentID`；部署必须服务端先升级、OpenCode Client 后重启。
+- Markdown provider 不执行 raw HTML 或模板语法，不加载远程图片、字体、样式或其他外部资源；链接只允许 `http://` 与 `https://`。
 - adapter 实例的 `platform_id` 发生变化时，不要直接编辑数据文件，按 [rebind runbook](docs/platform-id-rebind-runbook.md) 离线处理。
 
 更多说明见[安全与运维](docs/security-and-operations.md)和[平台投递策略](docs/platform-delivery-policy.md)。
@@ -235,6 +259,10 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 ### OpenCode provider 如何启用？
 
 创建 Endpoint 时追加 `--provider opencode`；不追加时默认 `omp`。provider 在创建后不可变，OpenCode Plugin 配置和排障见[OpenCode 集成指南](docs/opencode-integration.md)。
+
+### Markdown provider 如何启用？
+
+创建 Endpoint 时追加 `--provider markdown`。该 Endpoint 只接受 `event=markdown.message` 的受限 Markdown payload，继续复用原有 Bearer 鉴权、目标白名单与投递策略。
 
 ### 私聊 endpoint 创建成功，为什么没有通知？
 

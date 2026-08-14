@@ -28,9 +28,9 @@
 | `<唤醒词>webhook_notifier` | 私聊、群聊 | 所有人 | `aiocqhttp`、`qq_official` | 查看完整状态 |
 | `<唤醒词>whn status` | 私聊、群聊 | 所有人 | `aiocqhttp`、`qq_official` | 查看状态 |
 | `<唤醒词>whn help` | 私聊、群聊 | 所有人 | `aiocqhttp`、`qq_official` | 查看图片或纯文本帮助 |
-| `<唤醒词>whn token new private [名称] [--provider <omp|opencode>]` | 仅私聊 | 当前用户 | `aiocqhttp`、`qq_official` | 创建绑定当前私聊的 Endpoint |
-| `<唤醒词>whn token new group <数字群号> [名称] [--provider <omp|opencode>]` | 仅私聊 | 当前用户 | 仅 `aiocqhttp` | 发起预绑定数字群号的群验证 |
-| `<唤醒词>whn token new group current [名称] [--provider <omp|opencode>]` | 仅私聊 | 当前用户 | 仅 `qq_official` | 发起“验证时绑定当前群”的群验证 |
+| `<唤醒词>whn token new private [名称] [--provider <omp|opencode|markdown>]` | 仅私聊 | 当前用户 | `aiocqhttp`、`qq_official` | 创建绑定当前私聊的 Endpoint |
+| `<唤醒词>whn token new group <数字群号> [名称] [--provider <omp|opencode|markdown>]` | 仅私聊 | 当前用户 | 仅 `aiocqhttp` | 发起预绑定数字群号的群验证 |
+| `<唤醒词>whn token new group current [名称] [--provider <omp|opencode|markdown>]` | 仅私聊 | 当前用户 | 仅 `qq_official` | 发起“验证时绑定当前群”的群验证 |
 | `<唤醒词>whn token verify <request_id> <code>` | 仅目标群 | 群主或群管理员；`aiocqhttp` 还必须是原申请者 | `aiocqhttp`、`qq_official` | 完成群管理员验证阶段 |
 | `<唤醒词>whn token confirm <request_id>` | 仅私聊 | QQ 官方原 C2C 申请者 | 仅 `qq_official` | 确认群绑定、激活并领取 Token |
 | `<唤醒词>whn token list` | 仅私聊 | 当前用户 | `aiocqhttp`、`qq_official` | 列出当前平台 scope 内可见 Endpoint |
@@ -53,13 +53,16 @@
 ```text
 <唤醒词>whn token new private <名称> --provider omp
 <唤醒词>whn token new private <名称> --provider opencode
+<唤醒词>whn token new private <名称> --provider markdown
 ```
 
-- 允许值只有 `omp` 与 `opencode`。
+- 允许值只有 `omp`、`opencode` 与 `markdown`。`markdown` 用于通用受限 Markdown 信息推送，仍复用 Endpoint Bearer、目标白名单、幂等和原有投递链路。
 - 未提供 `--provider` 时默认 `omp`，以保持既有命令兼容。
+- 只要出现 `--provider`，就必须紧跟一个独立的非 flag 值；缺值、重复指定、`--provider=value` 或值以 `--` 开头都会明确拒绝，不会静默回落为 `omp`。
 - `--provider` 只用于 `token new`；rotate、revoke、delete、verify 和 confirm 不接受切换 provider 的参数。
 - provider 在 Endpoint 创建时写入记录并保持不可变；不能通过 rotate、直接编辑 Registry 或管理员选择器原位修改。
 - OpenCode 的 tuple、env/file 凭据、三事件和 CLI/Desktop smoke 见 [OpenCode 集成指南](opencode-integration.md)。
+- Markdown Endpoint 只接受 `event=markdown.message`；调用方不能提交任意 UMO，`target_alias` 必须属于 Endpoint 已绑定的目标别名。
 
 ---
 
@@ -303,9 +306,9 @@
 以下仅演示参数位置：
 
 ```text
-<唤醒词>whn token new private <ENDPOINT_NAME> [--provider <omp|opencode>]
-<唤醒词>whn token new group <NUMERIC_GROUP_ID> <ENDPOINT_NAME> [--provider <omp|opencode>]
-<唤醒词>whn token new group current <ENDPOINT_NAME> [--provider <omp|opencode>]
+<唤醒词>whn token new private <ENDPOINT_NAME> [--provider <omp|opencode|markdown>]
+<唤醒词>whn token new group <NUMERIC_GROUP_ID> <ENDPOINT_NAME> [--provider <omp|opencode|markdown>]
+<唤醒词>whn token new group current <ENDPOINT_NAME> [--provider <omp|opencode|markdown>]
 <唤醒词>whn token verify <REQUEST_ID> <VERIFICATION_CODE>
 <唤醒词>whn token confirm <REQUEST_ID>
 <唤醒词>whn token rotate <ENDPOINT_NAME>

@@ -17,6 +17,7 @@ from markupsafe import Markup
 
 from .models import DisplayContext, NormalizedEvent
 from .display import build_display_event_data, format_duration_ms, format_timestamp
+from .markdown import render_markdown_html, render_markdown_text
 
 DEFAULT_FALLBACK_VIEWPORT_WIDTH = 1280
 DEVICE_SCALE_CANDIDATES = (1.0, 1.3, 1.8)
@@ -53,7 +54,8 @@ SUBAGENT_TIMELINE_SOFT_HEIGHT = 3000
 SUBAGENT_TIMELINE_MAX_TIMEOUT_MS = 15000
 CSP_META = (
     '<meta http-equiv="Content-Security-Policy" '
-    "content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:\">"
+    "content=\"default-src 'none'; base-uri 'none'; form-action 'none'; "
+    "style-src 'unsafe-inline'; img-src data:\">"
 )
 _SENSITIVE_KEYS = {
     "token",
@@ -398,7 +400,8 @@ DEFAULT_HTML_TEMPLATE = """\
     }
 
     .summary code,
-    .field-value code {
+    .field-value code,
+    .markdown-body code {
       padding: 0.08em 0.34em;
       border: 1px solid rgba(60, 60, 67, 0.14);
       border-radius: 6px;
@@ -412,6 +415,57 @@ DEFAULT_HTML_TEMPLATE = """\
       word-break: break-all;
       -webkit-box-decoration-break: clone;
       box-decoration-break: clone;
+    }
+
+    .markdown-body {
+      margin-top: 16px;
+      padding: 18px 20px;
+      border: 1px solid rgba(0, 0, 0, 0.07);
+      border-radius: 16px;
+      color: #2c2c2e;
+      background: rgba(255, 255, 255, 0.72);
+      font-size: 19px;
+      line-height: 1.58;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .markdown-body > :first-child { margin-top: 0; }
+    .markdown-body > :last-child { margin-bottom: 0; }
+    .markdown-body .md-heading { margin: 1.1em 0 0.45em; color: #1d1d1f; line-height: 1.25; }
+    .markdown-body h1.md-heading { font-size: 27px; }
+    .markdown-body h2.md-heading { font-size: 24px; }
+    .markdown-body h3.md-heading { font-size: 21px; }
+    .markdown-body h4.md-heading,
+    .markdown-body h5.md-heading,
+    .markdown-body h6.md-heading { font-size: 19px; }
+    .markdown-body .md-paragraph { margin: 0.75em 0; white-space: normal; }
+    .markdown-body .md-list { margin: 0.7em 0; padding-left: 1.55em; }
+    .markdown-body .md-list li + li { margin-top: 0.28em; }
+    .markdown-body a { color: #315f91; text-decoration: underline; text-decoration-color: rgba(49, 95, 145, 0.35); text-underline-offset: 0.16em; }
+    .markdown-body strong { color: #202124; font-weight: 750; }
+    .markdown-body .md-code-block {
+      margin: 0.9em 0;
+      padding: 14px 16px;
+      overflow: hidden;
+      border: 1px solid rgba(60, 60, 67, 0.14);
+      border-radius: 12px;
+      color: #2f343b;
+      background: #f2f4f7;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", "PingFang SC", monospace;
+      font-size: 16px;
+      line-height: 1.48;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .markdown-body .md-code-block code {
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      font-size: inherit;
     }
 
     .section-label {
@@ -808,10 +862,13 @@ DEFAULT_HTML_TEMPLATE = """\
 
       <h1>{{ title|e }}</h1>
 
-      {% if summary|string|trim %}
+      {% if event.provider == 'markdown' and event.markdown_html|default('', true) %}
+      <section class="markdown-body">{{ event.markdown_html }}</section>
+      {% elif summary|string|trim %}
       <div class="summary">{{ summary|inline_code }}</div>
       {% endif %}
 
+      {% if event.provider != 'markdown' %}
       <div class="section-label">详细信息</div>
       <ul class="fields">
         {% set visible_count = namespace(value=0) %}
@@ -851,6 +908,7 @@ DEFAULT_HTML_TEMPLATE = """\
         <li class="empty-fields">暂无可展示字段</li>
         {% endif %}
       </ul>
+      {% endif %}
 
       {% set timeline = event.subagent_timeline_view|default(none) %}
       {% if timeline %}
@@ -2814,9 +2872,18 @@ class _HTMLPolicyParser(HTMLParser):
                 raise ValueError("javascript URL 不允许")
             if name == "style" and _CSS_DANGEROUS.search(value):
                 raise ValueError("危险 CSS 不允许")
-            if name in {"src", "href", "action", "poster", "data"}:
+            if name in {"src", "action", "poster", "data"}:
                 if _EXTERNAL_RESOURCE.search(compact):
                     raise ValueError("外部资源不允许")
+            if name == "href" and compact:
+                if tag != "a" and _EXTERNAL_RESOURCE.search(compact):
+                    raise ValueError("外部资源不允许")
+                if tag == "a" and not (
+                    compact.startswith("http://")
+                    or compact.startswith("https://")
+                    or compact.startswith("#")
+                ):
+                    raise ValueError("链接协议不允许")
 
 
 def validate_html_policy(html: str) -> None:
@@ -2951,6 +3018,12 @@ def render_text_default(
 
     与 FSD 中 OMP 示例格式保持一致。
     """
+    if event.provider == "markdown" and isinstance(event.markdown, str):
+        body = render_markdown_text(event.markdown)
+        return (
+            f"[{event.source.get('name', 'Markdown')}] {event.title}\n\n{body}".strip()
+        )
+
     data = build_display_event_data(event.to_dict(), display_context=display_context)
     lines: list[str] = []
 
@@ -3112,6 +3185,13 @@ def render_html_data(
         flatten_source=True,
         display_context=display_context,
     )
+    if event.provider == "markdown" and isinstance(event.markdown, str):
+        # Raw Markdown 是内部输入，不进入任何内置或自定义 Jinja context。
+        # 自定义模板只能读取已由受限 parser 生成的 Markup 和已转义纯文本副本；
+        # 即使模板追加 |safe，也无法把原输入中的 HTML 恢复成标签。
+        data.pop("markdown", None)
+        data["markdown_html"] = render_markdown_html(event.markdown)
+        data["markdown_text"] = Markup.escape(render_markdown_text(event.markdown))
 
     # 添加辅助时间字段
     data["generated_at"] = format_timestamp(
