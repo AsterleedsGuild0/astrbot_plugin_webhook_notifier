@@ -47,6 +47,28 @@ def test_opencode_missing_scope_is_unknown() -> None:
     assert event.session_scope == "unknown"
 
 
+@pytest.mark.parametrize("scope", ["root", "subagent", "auxiliary", "unknown"])
+def test_opencode_root_name_respects_current_scope(scope: str) -> None:
+    event = OpenCodeProviderAdapter().parse(
+        headers={"x-opencode-event": "opencode.session_idle"},
+        payload=_payload(
+            {
+                "ref": "safe-ref",
+                "name": "Child Session",
+                "scope": scope,
+                "rootName": "Root Session",
+            }
+        ),
+        received_at=_received_at(),
+    )
+    assert event.title == "Child Session"
+    labels = [field["label"] for field in event.fields]
+    if scope == "subagent":
+        assert labels[:2] == ["sessionName", "sessionRootName"]
+    else:
+        assert "sessionRootName" not in labels
+
+
 @pytest.mark.parametrize("scope", [None, "invalid", 1, True])
 def test_opencode_invalid_scope_is_rejected(scope) -> None:
     with pytest.raises(ProviderError):

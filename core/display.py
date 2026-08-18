@@ -49,6 +49,7 @@ _STATUS_LABELS = {
 _FIELD_LABELS = {
     "projectName": "项目",
     "sessionName": "会话名称",
+    "sessionRootName": "所属主会话",
     "会话": "会话名称",
     "agent": "执行代理",
     "model": "模型",
@@ -115,6 +116,7 @@ _MODEL_PROVIDERS = {
 _OPENCODE_FIELD_ORDER = {
     "项目": 0,
     "会话名称": 10,
+    "所属主会话": 11,
     "执行代理": 20,
     "模型提供方": 29,
     "模型": 30,

@@ -59,6 +59,7 @@ const {
   _diagnoseOutgoingEnvelope,
   _assistantMetadata,
   _sessionMetadata,
+  _resolveRootSessionName,
   _timelineRuns,
   _timelineParents,
   _timelineCapacityDrops,
@@ -3586,6 +3587,146 @@ describe("session lifecycle metadata cache", () => {
       },
     })).toBeTrue();
     expect(_sessionMetadata.has(await _hashSessionRef("created-only"))).toBeTrue();
+  });
+
+  it("carries the root name on child permission and question envelopes", async () => {
+    const bodies: any[] = [];
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+    globalThis.fetch = mock(async (_url: string, options: RequestInit) => {
+      bodies.push(JSON.parse(String(options.body)));
+      return new Response("ok", { status: 200 });
+    }) as any;
+
+    const sessions: Record<string, Record<string, unknown>> = {
+      "root-lifecycle": { id: "root-lifecycle", title: "Root Session", parentID: null },
+      "child-lifecycle": { id: "child-lifecycle", title: "Child Session", parentID: "root-lifecycle" },
+    };
+    try {
+      const hooks = await defaultModule.server({
+        client: {
+          session: {
+            get: async ({ path: { id } }: { path: { id: string } }) => ({ data: sessions[id] }),
+          },
+        },
+      } as any, makeConfig({ metadataDiagnostics: "once" }));
+
+      for (const [id, title, parentID] of [
+        ["root-lifecycle", "Root Session", null],
+        ["child-lifecycle", "Child Session", "root-lifecycle"],
+      ] as const) {
+        await hooks.event!({
+          event: {
+            id: `${id}-created`,
+            type: "session.created",
+            properties: { info: { id, title, parentID } },
+          },
+        });
+      }
+
+      await hooks.event!({
+        event: {
+          id: "child-permission",
+          type: "permission.updated",
+          properties: { id: "permission-child", sessionID: "child-lifecycle", type: "file_access" },
+        },
+      });
+      await wait(220);
+      await hooks.event!({
+        event: {
+          id: "child-question",
+          type: "question.asked",
+          properties: { id: "question-child", sessionID: "child-lifecycle", questions: [{}] },
+        },
+      });
+      await wait(220);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(body.session).toMatchObject({
+        name: "Child Session",
+        rootName: "Root Session",
+        scope: "subagent",
+      });
+      expect(body.session.rootName).not.toBe(body.session.name);
+      expect(JSON.stringify(body)).not.toContain("root-lifecycle");
+      expect(JSON.stringify(body)).not.toContain("child-lifecycle");
+    }
+    const diagnosticText = warnings.join("\n");
+    expect(diagnosticText).toContain('"rootNamePresent":true');
+    expect(diagnosticText).not.toContain("Root Session");
+    expect(diagnosticText).not.toContain("root-lifecycle");
+    expect(diagnosticText).not.toContain("child-lifecycle");
+    expect(JSON.stringify(_sessionMetadata)).not.toContain("root-lifecycle");
+    expect(JSON.stringify(_sessionMetadata)).not.toContain("child-lifecycle");
+    const childEntry = _sessionMetadata.get(await _hashSessionRef("child-lifecycle"));
+    expect(childEntry?.parentRef).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("resolves only a bounded, acyclic anonymous parent chain", async () => {
+    const rootRef = await _hashSessionRef("chain-root");
+    const parentRef = await _hashSessionRef("chain-parent");
+    const childRef = await _hashSessionRef("chain-child");
+    _sessionMetadata.set(rootRef, { scope: "root", name: "Chain Root" });
+    _sessionMetadata.set(parentRef, { scope: "subagent", name: "Chain Parent", parentRef: rootRef });
+    _sessionMetadata.set(childRef, { scope: "subagent", name: "Chain Child", parentRef });
+    expect(_resolveRootSessionName(childRef)).toBe("Chain Root");
+
+    _sessionMetadata.clear();
+    _sessionMetadata.set(childRef, { scope: "subagent", parentRef });
+    expect(_resolveRootSessionName(childRef)).toBeUndefined();
+
+    _sessionMetadata.clear();
+    _sessionMetadata.set(childRef, { scope: "subagent", parentRef });
+    _sessionMetadata.set(parentRef, { scope: "subagent", parentRef: childRef });
+    expect(_resolveRootSessionName(childRef)).toBeUndefined();
+
+    _sessionMetadata.clear();
+    let currentRef = childRef;
+    for (let i = 0; i < 17; i++) {
+      const nextRef = await _hashSessionRef(`deep-parent-${i}`);
+      _sessionMetadata.set(currentRef, { scope: "subagent", parentRef: nextRef });
+      currentRef = nextRef;
+    }
+    _sessionMetadata.set(currentRef, { scope: "root", name: "Too Deep Root" });
+    expect(_resolveRootSessionName(childRef)).toBeUndefined();
+
+    _sessionMetadata.clear();
+    _sessionMetadata.set(rootRef, { scope: "root", name: "OpenCode Session abcdef123456" });
+    _sessionMetadata.set(childRef, { scope: "subagent", name: "Chain Child", parentRef: rootRef });
+    expect(_resolveRootSessionName(childRef)).toBeUndefined();
+  });
+
+  it("omits rootName for non-subagent scopes and equal child/root names", async () => {
+    for (const scope of ["root", "unknown", "auxiliary"] as const) {
+      const envelope = await _buildEnvelope(
+        makeEvent({
+          type: "permission.updated",
+          sessionScope: scope,
+          rootSessionName: "Root Session",
+          session: { name: "Child Session" },
+          permission: { type: "file_access" },
+        }),
+        `scope-${scope}`,
+      );
+      expect(envelope?.session.rootName).toBeUndefined();
+    }
+
+    const equal = await _buildEnvelope(
+      makeEvent({
+        type: "question.asked",
+        sessionScope: "subagent",
+        rootSessionName: "Child Session",
+        session: { name: "Child Session" },
+      }),
+      "scope-equal",
+    );
+    expect(equal?.session.name).toBe("Child Session");
+    expect(equal?.session.rootName).toBeUndefined();
   });
 });
 

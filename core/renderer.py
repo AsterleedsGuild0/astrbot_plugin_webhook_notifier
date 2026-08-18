@@ -52,6 +52,7 @@ SUBAGENT_TIMELINE_MAX_PLOT_WIDTH = 1680
 SUBAGENT_TIMELINE_MIN_BAR_WIDTH = 8
 SUBAGENT_TIMELINE_SOFT_HEIGHT = 3000
 SUBAGENT_TIMELINE_MAX_TIMEOUT_MS = 15000
+SUBAGENT_TIMELINE_SESSION_CONTEXT_HEIGHT = 74
 CSP_META = (
     '<meta http-equiv="Content-Security-Policy" '
     "content=\"default-src 'none'; base-uri 'none'; form-action 'none'; "
@@ -72,6 +73,7 @@ _EXTERNAL_RESOURCE = re.compile(r"(?:https?|file)\s*:", re.I)
 _INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\r\n]+)`(?!`)")
 _TIMELINE_REF_LIKE_RE = re.compile(r"^[a-f0-9]{32,64}$", re.I)
 _TIMELINE_WINDOWS_PATH_RE = re.compile(r"^[a-z]:[\\/]", re.I)
+_OPENCODE_SESSION_FALLBACK_RE = re.compile(r"^OpenCode Session [0-9a-f]{12}$", re.I)
 _TIMELINE_STATUSES = ("completed", "failed", "running", "cancelled", "unknown")
 _TIMELINE_STATUS_VIEW = {
     "completed": ("已完成", "✓"),
@@ -1063,6 +1065,62 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       background: #8e8e93;
     }
     h1 { margin: 0; font-size: 31px; line-height: 1.18; letter-spacing: -.025em; }
+    .session-context {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      width: min(1180px, 100%);
+      margin-top: 10px;
+      padding: 8px 12px 8px 10px;
+      border-left: 3px solid #91a9c1;
+      border-radius: 4px 11px 11px 4px;
+      color: #43546a;
+      background: linear-gradient(90deg, rgba(231,238,245,.82), rgba(244,247,250,.44) 72%, transparent);
+    }
+    .session-icon {
+      position: relative;
+      flex: 0 0 17px;
+      width: 17px;
+      height: 17px;
+      margin-top: 2px;
+      opacity: .82;
+    }
+    .session-icon:before, .session-icon:after {
+      content: "";
+      position: absolute;
+      width: 6px;
+      height: 6px;
+      border: 1.5px solid #647d97;
+      border-radius: 50%;
+      background: #f4f7fa;
+    }
+    .session-icon:before { left: 0; top: 1px; }
+    .session-icon:after { right: 0; bottom: 1px; }
+    .session-icon span {
+      position: absolute;
+      left: 5px;
+      top: 8px;
+      width: 8px;
+      height: 1.5px;
+      background: #647d97;
+      transform: rotate(43deg);
+      transform-origin: center;
+    }
+    .session-copy {
+      display: -webkit-box;
+      min-width: 0;
+      max-height: 46.4px;
+      overflow: hidden;
+      color: #43546a;
+      font-size: 16px;
+      font-weight: 680;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+    .session-label { color: #718198; font-size: 14px; font-weight: 650; }
+    .session-separator { color: #9aa8b8; font-weight: 500; }
     .subtitle { margin-top: 8px; color: #6e6e73; font-size: 16px; line-height: 1.45; }
     .overview {
       display: grid;
@@ -1331,6 +1389,7 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
         <div class="status-wrap"><span class="status-badge">相对时间线</span></div>
       </div>
       <h1>根任务执行时间线</h1>
+      {% if event.session_name %}<div class="session-context"><span class="session-icon" aria-hidden="true"><span></span></span><div class="session-copy"><span class="session-label">所属会话</span><span class="session-separator"> · </span>{{ event.session_name|e }}</div></div>{% endif %}
       <div class="subtitle">{{ event.subtitle|e }}</div>
       <div class="overview">
         {% for metric in event.metrics %}<div class="metric"><span class="metric-value">{{ metric.value|e }}</span><span class="metric-label">{{ metric.label|e }}</span></div>{% endfor %}
@@ -1751,6 +1810,7 @@ def _build_subagent_timeline_layout(
     timeline_end_ms: float,
     max_depth: int,
     extra_located_rows_height: int = 0,
+    include_session_context: bool = False,
 ) -> SubagentTimelineLayout:
     item_count = len(item_views)
     density = _timeline_density(item_count)
@@ -1851,6 +1911,8 @@ def _build_subagent_timeline_layout(
 
     located_height += max(0, extra_located_rows_height)
     vertical_chrome_height = 760 + int(density_view["axis_height"])
+    if include_session_context:
+        vertical_chrome_height += SUBAGENT_TIMELINE_SESSION_CONTEXT_HEIGHT
     estimated_height = vertical_chrome_height + located_height
     if unlocated_height:
         estimated_height += 60 + unlocated_height
@@ -2133,12 +2195,28 @@ def _timeline_is_root_completion(event: NormalizedEvent) -> bool:
     return event.event == "opencode.session_idle" and scope == "root"
 
 
+def _timeline_session_name(event: NormalizedEvent) -> str:
+    """Extract one safe, useful session name from normalized display fields."""
+
+    if event.provider != "opencode" or not isinstance(event.fields, list):
+        return ""
+    for label in ("sessionRootName", "sessionName"):
+        for field in event.fields:
+            if not isinstance(field, dict) or field.get("label") != label:
+                continue
+            value = _safe_timeline_display_text(field.get("value"))
+            if value and not _OPENCODE_SESSION_FALLBACK_RE.fullmatch(value):
+                return value
+    return ""
+
+
 def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | None:
     """Build one root-cycle view from independent subagent and user-wait data."""
 
     if not _timeline_is_root_completion(event):
         return None
 
+    session_name = _timeline_session_name(event)
     timeline = event.subagent_timeline
     wait_timeline = event.user_wait_timeline
     raw_items = timeline.get("items") if isinstance(timeline, dict) else []
@@ -2425,6 +2503,7 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         timeline_end_ms=plot_scale_end_ms,
         max_depth=max_depth,
         extra_located_rows_height=wait_row_height,
+        include_session_context=bool(session_name),
     )
     px_per_ms = layout.plot_width / plot_scale_end_ms
     for item in item_views:
@@ -2797,6 +2876,7 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         "main_items": main_items,
         "main_hidden_count": main_hidden_count,
         "metrics": metrics,
+        "session_name": session_name,
         "subtitle": subtitle,
         "layout": layout.to_view(),
         "timeline_end_ms": timeline_end_ms,

@@ -698,6 +698,37 @@ class TestRenderHtmlData:
         assert "待处理" in html
         assert "action_required" not in html
 
+    def test_opencode_child_card_shows_escaped_session_hierarchy_in_order(self):
+        event = _make_event(title="子会话 <Child>")
+        event.provider = "opencode"
+        event.event = "opencode.permission_asked"
+        event.status = "action_required"
+        event.fields = [
+            {"label": "permission[1].summary", "value": "Write config"},
+            {"label": "sessionRootName", "value": "主会话 <Root> & 审核"},
+            {"label": "sessionName", "value": "子会话 <Child> & 执行"},
+        ]
+
+        html = render_html_default(event)
+
+        assert "<h1>子会话 &lt;Child&gt;</h1>" in html
+        assert "子会话 &lt;Child&gt; &amp; 执行" in html
+        assert "主会话 &lt;Root&gt; &amp; 审核" in html
+        assert html.index("会话名称") < html.index("所属主会话")
+        assert html.count("所属主会话") == 1
+
+    def test_legacy_card_without_root_name_does_not_add_hierarchy_row(self):
+        event = _make_event(
+            fields=[{"label": "sessionName", "value": "Legacy child session"}]
+        )
+        event.provider = "opencode"
+
+        html = render_html_default(event)
+
+        assert "会话名称" in html
+        assert "Legacy child session" in html
+        assert "所属主会话" not in html
+
 
 class TestSubagentTimelineVisuals:
     def test_empty_and_legacy_events_do_not_render_timeline_sections(self):
@@ -983,6 +1014,145 @@ class TestSubagentTimelineVisuals:
         assert "总任务时长" in timeline_html
         assert "子任务覆盖时长" in timeline_html
         assert "子任务覆盖率" in timeline_html
+
+    def test_timeline_session_context_uses_normalized_field_and_expands_layout(self):
+        items = [
+            _timeline_item(index, start=index * 500, end=index * 500 + 1200)
+            for index in range(8)
+        ]
+        baseline = render_subagent_timeline(_timeline_event(items))
+        event = _timeline_event(items)
+        event.fields = [
+            {
+                "label": "sessionName",
+                "value": "修复 OpenCode Desktop webhook 会话标题回退",
+            }
+        ]
+
+        rendered = render_subagent_timeline(event)
+
+        assert baseline is not None and rendered is not None
+        assert 'class="session-context"' in rendered.html
+        assert "所属会话" in rendered.html
+        assert "修复 OpenCode Desktop webhook 会话标题回退" in rendered.html
+        assert (
+            rendered.layout.vertical_chrome_height
+            > baseline.layout.vertical_chrome_height
+        )
+        assert rendered.layout.estimated_height > baseline.layout.estimated_height
+        assert rendered.layout.viewport_height > baseline.layout.viewport_height
+
+    def test_timeline_session_context_prefers_root_name_over_child_name(self):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+        event.fields = [
+            {"label": "sessionName", "value": "子会话：实现 renderer"},
+            {"label": "sessionRootName", "value": "主会话：Webhook 通知改进"},
+        ]
+
+        html = render_subagent_timeline_html(event)
+
+        assert html is not None
+        assert "主会话：Webhook 通知改进" in html
+        assert "子会话：实现 renderer" not in html
+
+    @pytest.mark.parametrize(
+        "root_name",
+        ["", "  \t ", "OpenCode Session a1b2c3d4e5f6"],
+    )
+    def test_timeline_session_context_falls_back_from_invalid_root_name(
+        self, root_name
+    ):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+        event.fields = [
+            {"label": "sessionRootName", "value": root_name},
+            {"label": "sessionName", "value": "合法子会话名称"},
+        ]
+
+        html = render_subagent_timeline_html(event)
+
+        assert html is not None
+        assert "合法子会话名称" in html
+        assert 'class="session-context"' in html
+
+    def test_timeline_session_context_escapes_name(self):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+        event.fields = [{"label": "sessionName", "value": "设计 <b>评审</b> & 确认"}]
+
+        html = render_subagent_timeline_html(event)
+
+        assert html is not None
+        assert "设计 &lt;b&gt;评审&lt;/b&gt; &amp; 确认" in html
+        assert "设计 <b>评审</b> & 确认" not in html
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            [],
+            [{"label": "sessionName", "value": "   \t  "}],
+            [
+                {
+                    "label": "sessionName",
+                    "value": "OpenCode Session a1b2c3d4e5f6",
+                }
+            ],
+            [
+                {
+                    "label": "sessionName",
+                    "value": "opencode session A1B2C3D4E5F6",
+                }
+            ],
+            [
+                {
+                    "label": "sessionRootName",
+                    "value": "OpenCode Session f1e2d3c4b5a6",
+                },
+                {"label": "sessionName", "value": "   "},
+            ],
+        ],
+    )
+    def test_hidden_timeline_session_context_preserves_existing_layout(self, fields):
+        items = [
+            _timeline_item(index, start=index * 500, end=index * 500 + 1200)
+            for index in range(8)
+        ]
+        baseline = render_subagent_timeline(_timeline_event(items))
+        event = _timeline_event(items)
+        event.fields = fields
+        event.raw = {"sessionName": "raw-only name must stay hidden"}
+
+        rendered = render_subagent_timeline(event)
+
+        assert baseline is not None and rendered is not None
+        assert 'class="session-context"' not in rendered.html
+        assert "所属会话" not in rendered.html
+        assert "raw-only name must stay hidden" not in rendered.html
+        assert rendered.layout.vertical_chrome_height == (
+            baseline.layout.vertical_chrome_height
+        )
+        assert rendered.layout.estimated_height == baseline.layout.estimated_height
+        assert rendered.layout.viewport_height == baseline.layout.viewport_height
+
+    def test_long_timeline_session_name_uses_two_line_clamp(self):
+        event = _timeline_event(
+            [_timeline_item(index, start=0, end=2000) for index in range(4)]
+        )
+        long_name = "很长的所属会话名称用于验证独立时间线卡片最多显示两行" * 12
+        event.fields = [{"label": "sessionName", "value": long_name}]
+
+        html = render_subagent_timeline_html(event)
+
+        assert html is not None
+        assert long_name in html
+        assert 'class="session-copy"' in html
+        assert "-webkit-line-clamp: 2;" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert "max-height: 46.4px;" in SUBAGENT_TIMELINE_HTML_TEMPLATE
+        assert "overflow-wrap: anywhere;" in SUBAGENT_TIMELINE_HTML_TEMPLATE
 
     @pytest.mark.parametrize(
         ("items", "total_duration_ms", "expected_union", "expected_rate"),

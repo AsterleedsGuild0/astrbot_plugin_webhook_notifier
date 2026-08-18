@@ -161,6 +161,28 @@ class TestEnvelopeSchemaCompatibility:
         assert "My Task" in event.title
         assert "  " not in event.title
 
+    def test_subagent_root_name_is_parseable_and_keeps_child_title(self):
+        payload = {
+            **self.QUESTION_EVENT,
+            "session": {
+                "ref": "99887766554433221100ffeeddccbbaa",
+                "name": "Child Session",
+                "scope": "subagent",
+                "rootName": "Root Session",
+            },
+        }
+        event = _adapter().parse(
+            headers={"x-opencode-event": "opencode.question_asked"},
+            payload=payload,
+            received_at=_received_at(),
+        )
+        assert event.title == "Child Session"
+        assert [field["label"] for field in event.fields[:2]] == [
+            "sessionName",
+            "sessionRootName",
+        ]
+        assert event.fields[1]["value"] == "Root Session"
+
     def test_ref12_in_title(self):
         """When session.name is omitted, server falls back to ref12."""
         raw_ref = "abcdef1234567890abcdef1234567890"

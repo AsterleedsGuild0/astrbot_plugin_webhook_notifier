@@ -783,6 +783,84 @@ class TestOpenCodeProviderAdapterParseSuccess:
         assert fields["sessionName"] == expected_title
 
 
+class TestSessionRootNameContract:
+    def _parse(
+        self, *, scope="subagent", name="Child Session", root_name="Root Session"
+    ):
+        payload = {
+            **_VALID_PAYLOAD,
+            "session": {
+                "ref": "child-ref",
+                "name": name,
+                "scope": scope,
+                "rootName": root_name,
+            },
+        }
+        return _make_adapter().parse(
+            headers=dict(_HEADERS), payload=payload, received_at=_received_at()
+        )
+
+    def test_subagent_root_name_is_immediately_after_child_session_name(self):
+        event = self._parse()
+        assert event.title == "Child Session"
+        assert event.fields[0] == {
+            "label": "sessionName",
+            "value": "Child Session",
+            "short": False,
+        }
+        assert event.fields[1] == {
+            "label": "sessionRootName",
+            "value": "Root Session",
+            "short": False,
+        }
+
+    @pytest.mark.parametrize("scope", ["root", "unknown", "auxiliary"])
+    def test_non_subagent_scope_ignores_root_name(self, scope):
+        event = self._parse(scope=scope)
+        assert event.title == "Child Session"
+        assert all(field["label"] != "sessionRootName" for field in event.fields)
+
+    def test_missing_root_name_keeps_legacy_payload_compatible(self):
+        event = _make_adapter().parse(
+            headers=dict(_HEADERS),
+            payload={
+                **_VALID_PAYLOAD,
+                "session": {
+                    "ref": "child-ref",
+                    "name": "Child Session",
+                    "scope": "subagent",
+                },
+            },
+            received_at=_received_at(),
+        )
+        assert event.title == "Child Session"
+        assert all(field["label"] != "sessionRootName" for field in event.fields)
+
+    @pytest.mark.parametrize(
+        "root_name", ["", "  ", "Child Session", "  Child   Session\n"]
+    )
+    def test_blank_or_equal_root_name_is_not_repeated(self, root_name):
+        event = self._parse(root_name=root_name)
+        assert event.title == "Child Session"
+        assert all(field["label"] != "sessionRootName" for field in event.fields)
+
+    def test_root_name_uses_session_name_unicode_and_control_cleaning(self):
+        event = self._parse(root_name="  Root\u202e\n\tName  ")
+        fields = {field["label"]: field["value"] for field in event.fields}
+        assert fields["sessionRootName"] == "Root Name"
+        assert event.title == "Child Session"
+
+    def test_dangerous_only_root_name_is_omitted(self):
+        event = self._parse(root_name="\u200b\u202e")
+        assert all(field["label"] != "sessionRootName" for field in event.fields)
+
+    @pytest.mark.parametrize("root_name", [123, {}, [], "x" * 201])
+    def test_invalid_root_name_reports_explicit_field_path(self, root_name):
+        with pytest.raises(ProviderError) as error:
+            self._parse(root_name=root_name)
+        assert str(error.value) == "无效的 session.rootName 字段"
+
+
 class TestOpenCodeFormatting:
     @pytest.mark.parametrize(
         "duration_ms, expected",

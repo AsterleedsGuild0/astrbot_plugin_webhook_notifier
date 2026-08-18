@@ -40,7 +40,7 @@ _MAX_USER_WAIT_TIMELINE_BYTES = 12 * 1024
 
 # ─── 允许字段 ──────────────────────────────────────────────
 
-_SESSION_ALLOW = frozenset({"ref", "name", "scope"})
+_SESSION_ALLOW = frozenset({"ref", "name", "scope", "rootName"})
 _COUNTS_ALLOW = frozenset({"messages", "tools", "changes"})
 _PERMISSION_ALLOW = frozenset({"count", "items"})
 _PERMISSION_LEGACY_ALLOW = frozenset(
@@ -145,6 +145,7 @@ _MSG_SECURE: dict[str, str] = {
     "session.ref": "无效的 session.ref 字段",
     "session.name": "无效的 session.name 字段",
     "session.scope": "无效的 session.scope 字段",
+    "session.rootName": "无效的 session.rootName 字段",
     "agent": "无效的 agent 字段",
     "model": "无效的 model 字段",
     "modelVariant": "无效的 modelVariant 字段",
@@ -325,13 +326,11 @@ def _check_session_ref(val: Any) -> str:
     return trimmed
 
 
-def _check_session_name(val: Any) -> str | None:
+def _check_session_name(val: Any, field: str = "session.name") -> str | None:
     if val is None:
         return None
     if not isinstance(val, str) or len(val) > _MAX_NAME:
-        raise ProviderError(
-            "invalid_payload", _safe_msg("session.name"), retryable=False
-        )
+        raise ProviderError("invalid_payload", _safe_msg(field), retryable=False)
     stripped = _strip_dangerous_unicode(val)
     return stripped if stripped else None
 
@@ -1277,6 +1276,9 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         _check_unknown_fields(session_raw, _SESSION_ALLOW, "session")
         session_ref = _check_session_ref(session_raw.get("ref"))
         session_name_raw = _check_session_name(session_raw.get("name"))
+        session_root_name_raw = _check_session_name(
+            session_raw.get("rootName"), "session.rootName"
+        )
         session_scope = (
             _check_session_scope(session_raw["scope"])
             if "scope" in session_raw
@@ -1388,6 +1390,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
             emitted_at=emitted_at,
             session_ref=session_ref,
             session_name_raw=session_name_raw,
+            session_root_name_raw=session_root_name_raw,
             session_scope=session_scope,
             agent=agent,
             model=model,
@@ -1414,6 +1417,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         emitted_at: str,
         session_ref: str,
         session_name_raw: str | None,
+        session_root_name_raw: str | None,
         session_scope: SessionScope,
         agent: str | None,
         model: str | None,
@@ -1443,6 +1447,7 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         # 显示名
         ref12 = _build_ref12(session_ref)
         display_name = _build_display_name(session_name_raw, ref12)
+        root_name = _clean_session_name(session_root_name_raw)
 
         # summary — 固定安全文本
         summary_map = {
@@ -1456,6 +1461,14 @@ class OpenCodeProviderAdapter(ProviderAdapter):
         # fields — 仅 allowlist，sessionRef 使用 ref12（全 ref 不进入 NormalizedEvent）
         fields: list[dict[str, Any]] = []
         fields.append({"label": "sessionName", "value": display_name, "short": False})
+        if (
+            session_scope == SessionScope.SUBAGENT
+            and root_name
+            and root_name != display_name
+        ):
+            fields.append(
+                {"label": "sessionRootName", "value": root_name, "short": False}
+            )
         if project_name:
             fields.append(
                 {"label": "projectName", "value": project_name, "short": True}

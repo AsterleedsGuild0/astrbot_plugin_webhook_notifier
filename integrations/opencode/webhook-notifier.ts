@@ -66,6 +66,7 @@ interface Envelope {
     ref: string;
     name?: string;
     scope: SessionScope;
+    rootName?: string;
   };
   instanceDisplayName?: string;
   projectName?: string;
@@ -234,6 +235,8 @@ interface OpenCodeEvent {
   cycleTimingReliable?: boolean;
   /** Internal anonymous parent reference populated by session enrichment. */
   timelineParentRef?: string;
+  /** Safe root session name resolved from the anonymous parent chain. */
+  rootSessionName?: string;
   status?: string;
   session?: {
     name?: string;
@@ -411,6 +414,7 @@ const MAX_USER_WAIT_TIMELINE_BYTES = 12 * 1024;
 const MAX_WAIT_EVIDENCE_SESSIONS = 1000;
 const RETAIN_WAIT_EVIDENCE_SESSIONS = 500;
 const MAX_HOOK_QUEUE_DEPTH = 1024;
+const MAX_ROOT_SESSION_DEPTH = 16;
 
 /**
  * Per-session FIFO for the hook's state phase (wait collector + busy/idle
@@ -582,6 +586,8 @@ interface SessionMetadataCacheEntry {
   name?: string;
   /** Derived scope; only reliable scopes (root/subagent/auxiliary) are stored. */
   scope?: SessionScope;
+  /** Anonymous hash of the parent session ref; raw parentID is never retained. */
+  parentRef?: string;
   /** Available session created time as a safe ISO timestamp. */
   startedAt?: string;
 }
@@ -662,6 +668,14 @@ async function _hashSessionRef(rawSessionId: string): Promise<string> {
     hex += hashArray[i]!.toString(16).padStart(2, "0");
   }
   return hex;
+}
+
+/** Hash one transient parentID without retaining or returning the raw value. */
+async function _hashParentRef(rawParentId: unknown): Promise<string | undefined> {
+  if (typeof rawParentId !== "string") return undefined;
+  const parentId = rawParentId.trim();
+  if (!parentId) return undefined;
+  return _hashSessionRef(parentId);
 }
 
 // ─── ID Generation ──────────────────────────────────────────
@@ -2093,6 +2107,13 @@ function _sanitiseName(raw: string | null | undefined): string | undefined {
   return s || undefined;
 }
 
+/** A root name is safe only when it is a real, non-fallback session name. */
+function _safeRootSessionName(raw: string | null | undefined): string | undefined {
+  const name = _sanitiseName(raw);
+  if (!name || FALLBACK_SESSION_NAME_RE.test(name)) return undefined;
+  return name;
+}
+
 /**
  * Keep only a safe final path component for the project display field.
  * Paths are never copied into the envelope; only this bounded basename may
@@ -2520,6 +2541,7 @@ function _diagnoseOutgoingEnvelope(
       sessionNamePresent: typeof sessionName === "string" && sessionName.length > 0,
       sessionNameLength: _metadataDiagnosticLength(sessionName),
       sessionScope: envelope.session.scope,
+      rootNamePresent: typeof envelope.session.rootName === "string" && envelope.session.rootName.length > 0,
       startedAtPresent: envelope.startedAt !== undefined,
       taskStartedAtPresent: envelope.taskStartedAt !== undefined,
       endedAtPresent: envelope.endedAt !== undefined,
@@ -3297,6 +3319,9 @@ function _cacheSessionMetadata(sessionRef: string, entry: SessionMetadataCacheEn
   if (entry.scope === "root" || entry.scope === "subagent" || entry.scope === "auxiliary") {
     safe.scope = entry.scope;
   }
+  if (typeof entry.parentRef === "string" && /^[0-9a-f]{32}$/.test(entry.parentRef)) {
+    safe.parentRef = entry.parentRef;
+  }
   if (startedAt) safe.startedAt = startedAt;
   if (Object.keys(safe).length === 0) return;
 
@@ -3314,6 +3339,58 @@ function _cachedSessionMetadata(sessionRef: string): SessionMetadataCacheEntry |
   _sessionMetadata.delete(sessionRef);
   _sessionMetadata.set(sessionRef, entry);
   return entry;
+}
+
+/** Update a cached anonymous parent ref, including an explicit parent removal. */
+function _setCachedSessionParentRef(
+  sessionRef: string,
+  parentRef: string | undefined,
+  parentKnown: boolean,
+): void {
+  if (!parentKnown) return;
+  const entry = _sessionMetadata.get(sessionRef);
+  if (!entry) {
+    if (parentRef && /^[0-9a-f]{32}$/.test(parentRef)) {
+      _cacheSessionMetadata(sessionRef, { parentRef });
+    }
+    return;
+  }
+  if (parentRef && /^[0-9a-f]{32}$/.test(parentRef)) entry.parentRef = parentRef;
+  else delete entry.parentRef;
+  _sessionMetadata.delete(sessionRef);
+  _sessionMetadata.set(sessionRef, entry);
+  _cleanupSessionMetadata();
+}
+
+/**
+ * Resolve a root name using only the bounded anonymous metadata cache.
+ * Missing entries, cycles, and chains deeper than the fixed limit fail closed.
+ */
+function _resolveRootSessionName(sessionRef: string): string | undefined {
+  let currentRef = sessionRef;
+  const visited = new Set<string>();
+  for (let depth = 0; depth < MAX_ROOT_SESSION_DEPTH; depth++) {
+    if (visited.has(currentRef)) return undefined;
+    visited.add(currentRef);
+
+    const entry = _sessionMetadata.get(currentRef);
+    if (!entry) return undefined;
+    if (entry.scope === "root") return _safeRootSessionName(entry.name);
+    if (!entry.parentRef) return undefined;
+    currentRef = entry.parentRef;
+  }
+  return undefined;
+}
+
+/** Apply the resolved root name only to a current subagent event. */
+function _applyRootSessionName(event: OpenCodeEvent, sessionRef: string): void {
+  delete event.rootSessionName;
+  if (event.sessionScope !== "subagent") return;
+
+  const rootName = _resolveRootSessionName(sessionRef);
+  const currentName = _sanitiseName(event.session?.name ?? event.session?.title);
+  if (!rootName || (currentName && rootName === currentName)) return;
+  event.rootSessionName = rootName;
 }
 
 /** Remove one Session's safe metadata entry (session.deleted). */
@@ -3517,6 +3594,10 @@ async function _buildEnvelope(
 
   if (sessionName) {
     envelope.session.name = sessionName;
+  }
+  const rootSessionName = _safeRootSessionName(event.rootSessionName);
+  if (event.sessionScope === "subagent" && rootSessionName && rootSessionName !== sessionName) {
+    envelope.session.rootName = rootSessionName;
   }
 
   // Optional fields — only when reliably available and whitelisted
@@ -4467,7 +4548,8 @@ async function _consumeSessionMetadata(
 
     // created/updated: properties.info is the full Session
     // ({ id, title, parentID, time }).  Only sanitised name, derived scope,
-    // and created time are cached; raw ids/directory/projectID/parentID never.
+    // anonymous parent ref, and created time are cached; raw
+    // ids/directory/projectID/parentID never.
     if (info) {
       const title = typeof info.title === "string" ? info.title : undefined;
       const name = _sanitiseName(
@@ -4481,7 +4563,9 @@ async function _consumeSessionMetadata(
       const startedAt = time
         ? _safeTimestamp((time as Record<string, unknown>).created)
         : undefined;
-      _cacheSessionMetadata(sessionRef, { name, scope, startedAt });
+      const parentRef = await _hashParentRef(info.parentID);
+      _cacheSessionMetadata(sessionRef, { name, scope, parentRef, startedAt });
+      _setCachedSessionParentRef(sessionRef, parentRef, true);
     }
     return true;
   } catch {
@@ -4561,6 +4645,7 @@ async function _enrichEvent(
       _cacheSessionScope(sessionRef, scope);
     }
   };
+  _applyRootSessionName(event, sessionRef);
 
   // Existing event values win; cache is the first enrichment source.
   _applyAssistantMetadata(event, _cachedAssistantMetadata(sessionRef));
@@ -4591,10 +4676,11 @@ async function _enrichEvent(
       // Hash the parent in this call stack and retain only the anonymous ref.
       // The raw parentID is never copied to the event, state, logs, or envelope.
       timelineParentKnown = true;
-      const rawParentID = sessionData.parentID;
-      if (typeof rawParentID === "string" && rawParentID.trim().length > 0) {
-        timelineParentRef = await _hashSessionRef(rawParentID.trim());
+      timelineParentRef = await _hashParentRef(sessionData.parentID);
+      if (timelineParentRef) {
         event.timelineParentRef = timelineParentRef;
+      } else {
+        delete event.timelineParentRef;
       }
 
       // Only fill fields not already present in the event or assistant cache.
@@ -4645,8 +4731,11 @@ async function _enrichEvent(
       _cacheSessionMetadata(sessionRef, {
         name: sessionName,
         scope: derivedScope,
+        parentRef: timelineParentRef,
         startedAt: sessionStartedAt,
       });
+      _setCachedSessionParentRef(sessionRef, timelineParentRef, true);
+      _applyRootSessionName(event, sessionRef);
     }
   } catch {
     // Do not expose the exception, session ID, ref, title, or response body.
@@ -5041,6 +5130,7 @@ export {
   _cacheAssistantMetadata,
   _cachedAssistantMetadata,
   _cleanupAssistantMetadata,
+  _resolveRootSessionName,
   _enrichEvent,
   _userWaits,
   _waitMissingRequestIds,
