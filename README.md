@@ -6,7 +6,7 @@
 
 OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP、OpenCode 与通用 `markdown` provider；OpenCode 使用 V1 file Plugin 产生安全的四事件 envelope，`markdown` 用于 CPA 自动更新等受控运维通知。
 
-**版本状态：** `v1.2.0` 是当前稳定源码版本与正式发布目标。OpenCode 集成、Subagent Timeline 覆盖统计与用户等待时间线及其 smoke 应使用 `v1.2.0` 资产，不应归入 `v1.1.0` 范围；远端正式资产是否可用以 GitHub Releases 页面为准。发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+**版本状态：** 当前已发布稳定版仍为 `v1.2.0`；当前源码版本与本轮正式发布目标为 `v1.3.0`。在本轮发布完成前，`v1.3.0` 的 GitHub Release、正式 ZIP 与远端资产尚不可用，插件市场安装/更新也尚未完成验证。README 中原有 `v1.2.0` 条目继续描述已发布历史能力；发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -55,13 +55,13 @@ flowchart LR
 
 ### 1. 安装插件
 
-> `v1.2.0` 是当前稳定源码版本与正式发布目标，正式资产状态以 GitHub Releases 页面为准。市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境。
+> 当前已发布稳定版仍为 `v1.2.0`；当前源码版本与本轮正式发布目标为 `v1.3.0`。本轮发布完成前，`v1.3.0` 对应的 GitHub Release 与正式 ZIP 尚不可用；市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境。
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（推荐） | `v1.2.0` 发布完成后，从对应 Release 下载 `astrbot_plugin_webhook_notifier-v1.2.0.zip`，在 WebUI 选择“从文件安装” |
+| Release ZIP（推荐） | `v1.3.0` 发布完成且对应 Release 实际可见后，下载 `astrbot_plugin_webhook_notifier-v1.3.0.zip`，在 WebUI 选择“从文件安装”；发布前不可用 |
 | RC 验收包 | `v1.1.0-rc.1` 与带 `rc-smoke` 标识的本地测试包仅用于稳定版发布前验收，不作为后续常规安装入口 |
-| 资产核对 | 在 Releases 页面核对实际存在的稳定资产；RC 资产仅用于候选版回溯 |
+| 资产核对 | 在 Releases 页面核对实际存在的稳定资产；本轮 `v1.3.0` 资产须待 Release 完成后确认；RC 资产仅用于候选版回溯 |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
 | 源码安装 | 将仓库克隆到 `AstrBot/data/plugins`，见下方命令 |
 
@@ -224,7 +224,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 - OpenCode 通知默认只发送 action 类别/计数；`full` 内容模式是显式 opt-in，虽有字段白名单和大小上限，仍可能外发问题、权限描述或目标路径。
 - Subagent timeline 只在 root `session_idle` 中可选发送，时间是相对 root busy→idle cycle 的观测偏移；卡片不展示匿名图引用、原始 Session ID、路径或工具参数，部分数据不会伪装成精确耗时。
 - `actionContentMode` 只控制 OpenCode Question/Permission 内容隐私，与服务端 `notification_mode` 正交；`focused` 只抑制成功完成的 subagent/auxiliary，unknown 会 fail-open 放行。
-- OpenCode Client 只发送匿名 `session.ref` 与 `session.scope`，不发送 `parentID`；部署必须服务端先升级、OpenCode Client 后重启。
+- OpenCode Client 的会话上下文只按白名单发送匿名 `session.ref`、`session.scope`、会话名及（子会话可解析时）安全清洗的 `session.rootName`；父链只使用匿名 `parentRef`，不发送 raw `parentID`、ID、路径或原始对象，缺失/环路/超深时省略；部署必须服务端先升级、再部署并完全重启 OpenCode Client。
 - Markdown provider 不执行 raw HTML 或模板语法，不加载远程图片、字体、样式或其他外部资源；链接只允许 `http://` 与 `https://`。
 - adapter 实例的 `platform_id` 发生变化时，不要直接编辑数据文件，按 [rebind runbook](docs/platform-id-rebind-runbook.md) 离线处理。
 

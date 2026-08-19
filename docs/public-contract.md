@@ -2,13 +2,14 @@
 
 ## 文档状态
 
-- 稳定版本：`v1.2.0`
-- 状态：Final / 1.x 稳定公共契约
-- 定稿日期：2026-08-10
-- 远端发布状态：以 GitHub Releases 页面为准；本文档定义源码公共契约，不作为 tag、Release 或正式 ZIP 是否已创建的动态状态证明
-- 当前源码版本：`v1.2.0`
+- 当前已发布稳定版本：`v1.2.0`（在本轮 GitHub Release 完成前保持不变）
+- 状态：Final / 1.x 稳定公共契约；`v1.3.0` 发布准备中
+- 定稿日期：2026-08-10（`v1.2.0` 已发布基线）
+- 远端发布状态：以 GitHub Releases 页面为准；截至本轮 `v1.3.0` 发布完成前，GitHub Release、正式 ZIP、远端资产与插件市场安装/更新验证均不可视为已完成。本文档定义源码公共契约，不作为 tag、Release 或正式 ZIP 是否已创建的动态状态证明
+- 当前源码版本：`v1.3.0`
+- 当前正式发布目标：`v1.3.0`
 
-`v1.2.0` 是当前稳定源码契约版本与正式发布目标。正式资产可用后，OpenCode 集成、Provider Registry/DI、Subagent Timeline 覆盖统计、用户等待时间线与相关 smoke 应使用 `v1.2.0` 稳定资产，不应回溯描述为 `v1.1.0` 已发布能力。AstrBot WebUI 安装、Bot Endpoint 和 Desktop 端到端 smoke 的正式版包验证仍须按实际执行结果单独留证。
+`v1.2.0` 是当前已发布稳定公共契约基线；`v1.3.0` 是当前源码公共契约版本与正式发布目标，但在本轮 GitHub Release 完成前不代表已发布。既有 `v1.2.0` 新增范围继续作为历史章节保留；`v1.3.0` 的新增范围见下文。正式资产、远端链路和插件市场验证仍须按实际执行结果单独留证。
 
 ---
 
@@ -77,6 +78,17 @@
   "target_alias": "default"
 }
 ```
+
+---
+
+## v1.3.0 新增范围
+
+以下向后兼容能力属于当前 `v1.3.0` 源码公共契约与正式发布目标；在本轮 GitHub Release 完成前，不表示已经发布或远端资产已经可用：
+
+- 修复 OpenCode Desktop 会话元数据回退路径中的标题回退行为；该修复不把 anomaly 诊断信号表述为已经确认的 Desktop 内部根因。
+- 通用 `markdown` provider 使用现有 Endpoint Path 与 Bearer 鉴权提供信息推送：只接受 `event=markdown.message`，允许字段为 `event`、`id`、`title`、`markdown`、`target_alias`；`markdown` 必须为非空字符串并受 32,768 字符与 64 KiB 限制，可选字段有界校验，未知字段拒绝，内容只由受限 Markdown parser 渲染，不执行 Jinja 或远程资源。
+- OpenCode 根会话上下文保持向后兼容：子会话卡片保留当前会话并显示“所属主会话”，完整 root-cycle 时间线显示“所属会话”。出站只允许安全清洗后的 `session.rootName`；父链使用匿名 `parentRef` 且最多解析 16 层，缺失、环路或超深时省略，不传 raw ID、`parentID`、`rootRef`、路径或原始对象；未携带该可选字段的旧 payload 继续接受。
+- 兼容部署顺序保持为：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client；旧服务端 strict allowlist 可能拒绝新增的 `session.rootName`。
 
 ---
 
