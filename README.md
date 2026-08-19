@@ -6,7 +6,7 @@
 
 OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP、OpenCode 与通用 `markdown` provider；OpenCode 使用 V1 file Plugin 产生安全的四事件 envelope，`markdown` 用于 CPA 自动更新等受控运维通知。
 
-**版本状态：** 当前已发布稳定版仍为 `v1.2.0`；当前源码版本与本轮正式发布目标为 `v1.3.0`。在本轮发布完成前，`v1.3.0` 的 GitHub Release、正式 ZIP 与远端资产尚不可用，插件市场安装/更新也尚未完成验证。README 中原有 `v1.2.0` 条目继续描述已发布历史能力；发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+**版本状态：** 当前已发布稳定版与当前源码版本均为 `v1.3.0`。正式 tag、GitHub Release 与远端正式 ZIP 已验证可用；插件市场安装/更新与生产 AstrBot 使用远端正式资产的 smoke 尚未验证。README 中原有 `v1.2.0` 条目继续描述历史能力；发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -55,13 +55,13 @@ flowchart LR
 
 ### 1. 安装插件
 
-> 当前已发布稳定版仍为 `v1.2.0`；当前源码版本与本轮正式发布目标为 `v1.3.0`。本轮发布完成前，`v1.3.0` 对应的 GitHub Release 与正式 ZIP 尚不可用；市场搜索、文件安装和源码安装的实际可用性仍取决于 AstrBot 运行环境。
+> 当前已发布稳定版与当前源码版本均为 `v1.3.0`。对应 GitHub Release 与正式 ZIP 已可用；插件市场搜索、安装和更新仍未完成验证，文件安装与源码安装的实际可用性仍取决于 AstrBot 运行环境。
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（推荐） | `v1.3.0` 发布完成且对应 Release 实际可见后，下载 `astrbot_plugin_webhook_notifier-v1.3.0.zip`，在 WebUI 选择“从文件安装”；发布前不可用 |
+| Release ZIP（推荐） | 从 [`v1.3.0 Release`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v1.3.0) 下载 [`astrbot_plugin_webhook_notifier-v1.3.0.zip`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/download/v1.3.0/astrbot_plugin_webhook_notifier-v1.3.0.zip)，在 WebUI 选择“从文件安装” |
 | RC 验收包 | `v1.1.0-rc.1` 与带 `rc-smoke` 标识的本地测试包仅用于稳定版发布前验收，不作为后续常规安装入口 |
-| 资产核对 | 在 Releases 页面核对实际存在的稳定资产；本轮 `v1.3.0` 资产须待 Release 完成后确认；RC 资产仅用于候选版回溯 |
+| 资产核对 | `v1.3.0` tag、Release 与正式 ZIP 已核对；插件市场资产与安装/更新路径仍待验证；RC 资产仅用于候选版回溯 |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
 | 源码安装 | 将仓库克隆到 `AstrBot/data/plugins`，见下方命令 |
 

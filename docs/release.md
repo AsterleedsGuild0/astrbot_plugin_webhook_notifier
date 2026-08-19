@@ -1,6 +1,8 @@
 # 发布流程
 
-本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。本轮正式发布目标为 `v1.3.0`；远端当前稳定资产状态以 GitHub Releases 页面为准。本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
+本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。本轮正式发布目标为 `v1.3.0`，现已完成正式发布：tag `v1.3.0` 精确指向 `9dadf96608ef4018d724d27059389db48ba33e97`，GitHub Release 为非 draft、`prerelease=false` 且为 Latest，正式 ZIP 已上传。远端当前稳定资产状态以 GitHub Releases 页面为准；本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
+
+本次发布后的公开文档收尾仅更新仓库中的文档，不重新构建、替换或修改已发布 tag/asset。已发布 ZIP 内的 `docs/release.md` 保留 tag 时点的构建文档；本次 docs-only commit 不应被表述为重新生成了正式资产。
 
 `v1.3.0` 发布与部署必须遵循兼容顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `session.rootName`；若客户端同时发送 `userWaitTimeline`，服务端也必须已支持上一版本的该字段。
 
@@ -13,7 +15,7 @@
    - `pyproject.toml` 使用规范 PEP 440 版本；本轮稳定版为 `1.3.0`。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
    - `CHANGELOG.md` 顶部存在对应版本小节；本轮应为 `## v1.3.0 - 2026-08-19`。
-   - 本地准备与 dry-run 不创建 `v1.3.0` tag，也不创建或更新远端 Release。
+   - 发布准备阶段的本地准备与 dry-run 不创建 `v1.3.0` tag，也不创建或更新远端 Release；本轮正式 Release 已由 tag push workflow 完成。
 2. 维护本地锁定验证依赖：
 
    - `uv.lock` 必须随 `pyproject.toml` 的依赖声明一起维护并纳入提交。
@@ -169,17 +171,17 @@ git push origin v1.0.0
 - 2026-08-19 已通过 `uv lock --check`、frozen sync、全仓 Ruff 与前端 clean build。
 - Bun OpenCode Client 279 项、全仓 Python 1191 项测试通过；版本一致性和 package contract 包含在 Python 门禁中。
 - 正式 ZIP 应保持单一插件根目录、三版本源一致且 forbidden=0；最终 size、entries 与 SHA-256 在包生成后记录到不进入 ZIP 的更新日志及发布验证结果中，避免包内文档自引用自身摘要。
-- 上述证据只覆盖本地源码与正式包；GitHub Actions、tag、Release、远端资产及插件市场路径仍按发布后检查分别留证。
+- 上述证据覆盖本地源码与正式包；GitHub Actions、tag、Release 与远端 ZIP 已在发布后核对，插件市场路径与生产 AstrBot 使用远端正式资产的 smoke 仍待验证。
 
 ### 发布后检查
 
-1. 核对 GitHub Actions 成功，tag 指向预期提交，Release 非 draft、`prerelease=false` 且为 Latest。
-2. 核对正式 ZIP 文件名、SHA256、单一插件根目录、版本三源和包内容契约。
-3. 使用远端正式资产复核新装链路和核心 Webhook 行为。
-4. 正式版发布并在 AstrBot 插件市场上架后，验证市场搜索安装、从已安装版本触发的一键更新/在线更新，以及更新后的数据与配置行为。
+1. 已完成：GitHub Actions run `32240193983` attempt 2 成功；首轮仅因 Chrome CDP target 启动瞬态 `Connection refused` 失败，重跑通过。tag 指向预期提交，Release 非 draft、`prerelease=false` 且为 Latest，发布于 `2026-08-19T10:00:25Z`，详见 [v1.3.0 Release](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v1.3.0)。
+2. 已完成：正式 ZIP `astrbot_plugin_webhook_notifier-v1.3.0.zip` 为 2,902,505 bytes、51 entries；远端 SHA-256 为 `1fba8ce3acb360246148c5b37dc057e67c4155d1e7c6383b5667d252ac224465`，单一插件根目录、版本三源和包内容契约通过，forbidden=0。远端与本地 ZIP 的 size、entries、entry 清单及全部未压缩文件内容一致；SHA 差异仅来自 ZIP entry metadata。
+3. 待完成：使用远端正式资产复核 AstrBot 新装链路和核心 Webhook 行为；生产环境 smoke 尚未执行。
+4. 待完成：正式版发布后的 AstrBot 插件市场上架、市场搜索安装、从已安装版本触发的一键更新/在线更新，以及更新后的数据与配置行为。
 5. 市场更新验证完成前，文档和发布说明不得声称该路径已通过；若市场机制实际采用重装，也应按观察到的真实行为记录，不推断为原位升级。
 
-市场更新验证属于发布后检查；`v1.3.0` 的 tag、Release、正式 ZIP 以及市场安装/更新路径必须按实际结果分别留证。
+市场更新验证属于发布后检查；`v1.3.0` 的 tag、Release、正式 ZIP 已按实际结果留证，市场安装/更新路径与生产正式资产 smoke 仍须按实际结果分别留证。
 
 ---
 

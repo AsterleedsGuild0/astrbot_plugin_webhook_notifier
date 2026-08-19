@@ -9,7 +9,8 @@
 - 增加 OpenCode 根会话上下文：子会话卡片保留当前会话，并显示“所属主会话”；完整 root-cycle 时间线显示“所属会话”。出站只传递安全清洗后的 `session.rootName`，父链只使用匿名 `parentRef` 且最多解析 16 层；父项缺失、出现环路或超过深度时省略，不传 ID、`parentID`、`rootRef`、路径或原始对象，旧 payload 继续向后兼容。
 - 已完成的真实链路与针对性证据：Bun 279、Python 合并 532、Package 14、Chromium 静态渲染 smoke、测试 ZIP 结构检查；OpenCode Desktop 完全重启后 2 次 Question、2 次 Permission 及 `session_idle` 链路均返回 HTTP 200，用户目视确认显示正常。
 - 完整 Release 门禁（本地）通过：`uv lock --check`、全仓 Ruff、前端 clean build、Bun 279 项与 Python 1191 项测试全部通过。本地正式 ZIP 为单一插件根目录、51 entries、2,902,505 bytes，三版本源为 `v1.3.0` / `1.3.0`，SHA-256 为 `4a22f4b91d111a0b33b763849cf72a6b2753de96ccd755fe342d429d47adb2e1`，forbidden=0。
-- GitHub Actions、tag、GitHub Release、远端正式资产与插件市场安装/更新路径仍需在后续阶段按实际结果分别留证；本节不宣称这些项目已经完成。
+- 正式发布证据：GitHub Actions run `32240193983` 的 attempt 2 成功；首轮仅因 Chrome CDP target 启动瞬态 `Connection refused` 失败，重跑通过。tag `v1.3.0` 精确指向提交 `9dadf96608ef4018d724d27059389db48ba33e97`；GitHub Release 为非 draft、`prerelease=false` 且为 Latest，发布于 `2026-08-19T10:00:25Z`。正式 ZIP 为 51 entries、2,902,505 bytes，远端 SHA-256 为 `1fba8ce3acb360246148c5b37dc057e67c4155d1e7c6383b5667d252ac224465`，Release notes 已覆盖本版本三项主要变更。
+- 插件市场安装/更新路径与生产 AstrBot 使用远端正式资产的 smoke 仍待按实际结果验证；本节不将这两项写成已完成。
 
 ---
 
