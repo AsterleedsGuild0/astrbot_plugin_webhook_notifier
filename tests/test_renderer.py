@@ -2258,7 +2258,7 @@ class TestDisplayLocalization:
     def test_model_provider_display_and_session_name_is_always_independent(self):
         fields = prepare_display_fields(
             [
-                {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                {"label": "model", "value": "cpa/gpt-6-sol"},
                 {"label": "model", "value": "cpa"},
                 {"label": "sessionRef", "value": "anonymous-ref"},
                 {"label": "sessionName", "value": "Session One"},
@@ -2266,7 +2266,7 @@ class TestDisplayLocalization:
             title="Session One",
         )
         assert [(field["label"], field["value"]) for field in fields] == [
-            ("模型", "cpa/gpt-5.6-sol"),
+            ("模型", "cpa/gpt-6-sol"),
             ("模型提供方", "cpa"),
             ("会话名称", "Session One"),
         ]
@@ -2280,16 +2280,16 @@ class TestDisplayLocalization:
         [
             (
                 [
-                    {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                    {"label": "model", "value": "cpa/gpt-6-sol"},
                     {"label": "modelVariant", "value": "max"},
                 ],
                 "max",
-                [("模型", "cpa/gpt-5.6-sol(max)")],
+                [("模型", "cpa/gpt-6-sol(max)")],
             ),
             (
-                [{"label": "model", "value": "cpa/gpt-5.6-sol"}],
+                [{"label": "model", "value": "cpa/gpt-6-sol"}],
                 None,
-                [("模型", "cpa/gpt-5.6-sol")],
+                [("模型", "cpa/gpt-6-sol")],
             ),
             (
                 [{"label": "modelVariant", "value": "medium"}],
@@ -2306,11 +2306,11 @@ class TestDisplayLocalization:
             ),
             (
                 [
-                    {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                    {"label": "model", "value": "cpa/gpt-6-sol"},
                     {"label": "modelVariant", "value": "experimental-v2"},
                 ],
                 "experimental-v2",
-                [("模型", "cpa/gpt-5.6-sol(experimental-v2)")],
+                [("模型", "cpa/gpt-6-sol(experimental-v2)")],
             ),
         ],
     )
@@ -2332,18 +2332,18 @@ class TestDisplayLocalization:
             assert value in html
 
     def test_model_variant_uses_normalized_event_fallback_without_raw_field(self):
-        event = _make_event(fields=[{"label": "model", "value": "cpa/gpt-5.6-sol"}])
+        event = _make_event(fields=[{"label": "model", "value": "cpa/gpt-6-sol"}])
         event.model_variant = "medium"
 
         fields = render_html_data(event)["event"]["fields"]
         assert [(field["label"], field["value"]) for field in fields] == [
-            ("模型", "cpa/gpt-5.6-sol(medium)")
+            ("模型", "cpa/gpt-6-sol(medium)")
         ]
 
     def test_model_variant_text_and_html_share_value_and_escape_html(self):
         event = _make_event(
             fields=[
-                {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                {"label": "model", "value": "cpa/gpt-6-sol"},
                 {"label": "modelVariant", "value": "max<&>"},
             ]
         )
@@ -2353,9 +2353,9 @@ class TestDisplayLocalization:
         text = render_text_default(event)
         html = render_html_default(event)
 
-        assert display_value == "cpa/gpt-5.6-sol(max<&>)"
+        assert display_value == "cpa/gpt-6-sol(max<&>)"
         assert f"模型：{display_value}" in text
-        assert "cpa/gpt-5.6-sol(max&lt;&amp;&gt;)" in html
+        assert "cpa/gpt-6-sol(max&lt;&amp;&gt;)" in html
         assert display_value not in html
         assert "思考深度" not in text
         assert "思考深度" not in html
@@ -2582,7 +2582,7 @@ class TestDisplayLocalization:
                 {"label": "endedAt", "value": "2026-07-24T00:59:00Z"},
                 {"label": "question[1]", "value": "Run `pytest`?"},
                 {"label": "taskStartedAt", "value": "2026-07-24T00:58:30Z"},
-                {"label": "model", "value": "cpa/gpt-5.6-sol"},
+                {"label": "model", "value": "cpa/gpt-6-sol"},
                 {"label": "durationMs", "value": 30_000},
                 {"label": "startedAt", "value": "2026-07-23T23:00:00Z"},
                 {"label": "agent", "value": "Designer"},

@@ -511,7 +511,7 @@ class TestOpenCodeProviderAdapterParseSuccess:
         event = self._make(
             payload={
                 **_VALID_PAYLOAD,
-                "model": "cpa/gpt-5.6-sol",
+                "model": "cpa/gpt-6-sol",
                 "modelVariant": variant,
             }
         )
@@ -521,7 +521,7 @@ class TestOpenCodeProviderAdapterParseSuccess:
         display_fields = {
             f["label"]: f["value"] for f in render_html_data(event)["event"]["fields"]
         }
-        assert display_fields["模型"] == f"cpa/gpt-5.6-sol({variant})"
+        assert display_fields["模型"] == f"cpa/gpt-6-sol({variant})"
         assert "思考深度" not in display_fields
 
     def test_session_error(self):

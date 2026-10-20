@@ -35,7 +35,7 @@
 - #20：OpenCode V1 Client Plugin、正确 `plugin` tuple、env/file 凭据、状态机、timeout/retry 和 at-least-once 语义。
 - #21：严格白名单、匿名 session ref/name fallback、Bun/Python/CLI smoke 和集成文档。
 - OpenCode 丰富通知字段：实例标识 `instanceDisplayName`、客户端自动推导的 `projectName`、会话名、agent、`provider/model`、会话开始时间、busy→idle 任务时间（无可靠周期时间时 fallback 到 Assistant 元数据）与可读耗时/低敏计数，以及默认 strict、显式 opt-in 的 `actionContentMode`；项目名只在详细字段中显示。
-- OpenCode 可选模型档位字段 `modelVariant`：优先来自 Assistant `info.variant`，缺失时来自 `session.model.variant`；仅在同时存在 `model` 时于展示副本中原样追加到模型值，例如 `cpa/gpt-5.6-sol(max)`，不单独显示。该字段不保证等同于 provider 原始 `reasoning_effort`/`reasoningEffort`，不根据 provider/model 推断。
+- OpenCode 可选模型档位字段 `modelVariant`：优先来自 Assistant `info.variant`，缺失时来自 `session.model.variant`；仅在同时存在 `model` 时于展示副本中原样追加到模型值，例如 `cpa/gpt-6-sol(max)`，不单独显示。该字段不保证等同于 provider 原始 `reasoning_effort`/`reasoningEffort`，不根据 provider/model 推断。
 - OpenCode V1 `session.scope`（`root|subagent|auxiliary|unknown`）与 Client scope 判断；`parentID` 不是公共字段，绝不发送。默认精确识别 `smartfetch-secondary`，非空 `parentID` 始终优先为 `subagent`。
 - OpenCode root `session_idle` 的可选 `subagentTimeline`。它只允许出现在 `event=opencode.session_idle` 且 `session.scope=root` 的 envelope；其他 event 或 scope 携带该字段会被 Python strict adapter 拒绝。该能力无新增配置项，仍是 root completion 的可选数据。
 - OpenCode Permission/Question 瞬时聚合：同一 Session、同一类型固定 150ms debounce；Permission 与 Question 不合并，不同 Session 不合并；回复在 flush 前撤销。Permission envelope 使用 `permission: {count, items[]}`，Question 保持 `question: {count, optionCount, summary?, items?}`。
