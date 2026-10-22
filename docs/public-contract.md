@@ -3,13 +3,23 @@
 ## 文档状态
 
 - 当前已发布稳定版本：`v1.3.0`
-- 状态：Final / 1.x 稳定公共契约
-- 定稿日期：2026-08-19
-- 远端发布状态：tag `v1.3.0`、GitHub Release、正式 ZIP 与远端资产均已按发布结果验证；Release 为非 draft、`prerelease=false` 且为 Latest。插件市场安装/更新与生产 AstrBot 使用远端正式资产的 smoke 仍待验证。本文档定义源码公共契约，不作为未来 tag、Release 或资产状态的动态证明
-- 当前源码版本：`v1.3.0`
+- 状态：1.x 稳定历史契约 + 当前源码待发布变更
+- 历史稳定版定稿日期：2026-08-19
+- 历史远端发布状态：tag `v1.3.0`、GitHub Release、正式 ZIP 与远端资产均已按当时发布结果验证；Release 当时为非 draft、`prerelease=false` 且为 Latest。插件市场安装/更新与生产 AstrBot 使用远端正式资产的 smoke 仍待验证。本文不作为未来 tag、Release 或资产状态的动态证明
+- 当前源码版本标记：`v1.3.0`（包含下述待发布变化，不等同于历史发布内容）
 - 当前正式发布版本：`v1.3.0`
 
-`v1.3.0` 是当前已发布稳定公共契约版本与源码版本。正式 tag、GitHub Release 与远端 ZIP 已验证；既有 `v1.2.0` 新增范围继续作为历史章节保留，`v1.3.0` 的新增范围已纳入稳定公共契约。插件市场安装/更新与生产 AstrBot 远端资产 smoke 仍须按实际执行结果单独留证。
+`v1.3.0` 历史发布范围与证据保留在对应章节。当前源码的默认 Provider 切换尚未发布；不能用历史 tag、Release 或 ZIP 证明此变化已发布、部署或验证。插件市场安装/更新与生产 AstrBot 远端资产 smoke 仍须按实际执行结果单独留证。
+
+## 当前源码待发布：默认 Provider 与通用定位
+
+- 插件以三 Provider 的通用 Webhook 通知能力定位；运行时支持集合由 `ProviderRegistry` 决定，当前注册 `markdown`、`omp`、`opencode`。命令校验查询实际注册表，帮助中的 Provider 选项按注册名称排序生成，不以单独的固定白名单为准。
+- `token new private`、`token new group <数字群号>` 和 `token new group current` 仅在未提供 `--provider` 时使用默认 `markdown`。成功创建私聊 Endpoint 或群待验证申请后，公开说明提醒默认 `markdown`、`event=markdown.message`，以及 OMP/OpenCode 需显式 `--provider`；独立 Token 消息不追加该提醒，创建错误也不提示成功。
+- 显式 flag 的不支持值、缺值、重复指定、`--provider=value` 或 flag 形式的值必须拒绝，不静默回退。OMP 使用 `--provider omp`，OpenCode 使用 `--provider opencode`；显式三种 Provider 均保持原有协议、鉴权、渲染与发送边界。
+- 旧持久化 Endpoint 记录仅在 **`provider` key 缺失**时按 `markdown` 读取；显式空字符串或 `null` 仍非法。显式历史 Provider 保留、不自动覆盖、不根据 payload 猜协议。依赖缺失字段的旧 OMP 调用必须创建显式 OMP Endpoint 并更新调用方 URL/Token。
+- 加载缺失 `provider` 的旧记录时会记录不含 Endpoint/Token 私密值的 warning，提醒核对调用方协议；该日志不意味着记录已自动迁移到 OMP，也不替代调用方更新。
+- Endpoint Provider 不可变，不能通过 rotate 或编辑 Registry 原位切换。`provider=markdown` 决定输入协议；`render_mode=text|html_image` 决定输出展示，Markdown 请求同样可以使用 HTML 图片与文本降级。
+- 本节仅定义待发布源码行为，不声明本次测试、smoke、部署或正式资产发布已完成；下方版本章节是历史范围，不将新默认倒灌为 `v1.3.0` 的发布事实。
 
 ---
 

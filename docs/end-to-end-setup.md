@@ -137,13 +137,15 @@ Caddy 自动 TLS 需要真实、可解析且满足签发条件的 DNS 域名。`
 
 ## 创建 Endpoint 并分离保管凭据
 
-所有创建申请都从与 Bot 的私聊开始。私聊通知 Endpoint 的最短命令为：
+所有创建申请都从与 Bot 的私聊开始。本教程后续发送 OMP payload，必须显式创建 OMP Endpoint：
 
 ```text
-<唤醒词>whn token new private demo
+<唤醒词>whn token new private demo --provider omp
 ```
 
 普通 QQ 群需要额外的群验证流程；`aiocqhttp` 与 `qq_official` 的命令和确认步骤不同，请严格按[命令参考](command-reference.md)执行。
+
+群创建命令也须追加 `--provider omp`。当前待发布源码未指定 flag 默认 `markdown`，成功创建会提醒使用 `event=markdown.message`，错误 flag 不回退默认值；不能将默认 Markdown Endpoint 用于本教程。旧记录缺少 `provider` key 也按 Markdown 读取，而显式历史 Provider 不变；依赖缺失字段的旧 OMP 调用应新建显式 OMP Endpoint 并更新 URL/Token，不自动覆盖或根据 payload 猜协议。待发布与历史发布边界见[公共契约](public-contract.md)。
 
 成功后分别取得：
 
@@ -176,9 +178,26 @@ Token:        <独立保存，不放入 URL>
 
 确认插件已启用、HTTP 服务正在运行、监听地址与端口符合部署设计，并且至少存在一个可投递 Endpoint。HTTP 服务会在存在可投递 Endpoint 后启动；只有 pending 或尚未领取 Token 的记录时，不能完成正常鉴权投递。
 
-### 2. 使用 README 的 curl 模拟社区 Hook
+### 2. 使用 curl 模拟社区 Hook
 
-按[项目 README 的 curl 示例](../README.md)分别设置 Base URL、Endpoint Path 和 Token，再发送 `omp.session_stop` version 1 JSON。先完成这一阶段，避免同时排查代理、Token、Hook 加载和 OMP 生命周期。
+按[项目 README](../README.md)设置 Base URL、Endpoint Path 和 Token，但使用**本教程显式创建的 OMP Endpoint**与下方 OMP JSON，不要直接发送 README 快速开始的 Markdown payload。先完成这一阶段，避免同时排查代理、Token、Hook 加载和 OMP 生命周期。
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -X POST "${WHN_BASE_URL}/${WHN_ENDPOINT_PATH}" \
+  -H 'Content-Type: application/json' \
+  -H 'X-OMP-Event: session_stop' \
+  -H "Authorization: Bearer ${WHN_TOKEN}" \
+  --data-binary @- <<'JSON'
+{
+  "event": "omp.session_stop",
+  "version": 1,
+  "emittedAt": "2026-07-20T12:00:00Z",
+  "session": {"name": "OMP integration check", "model": "provider/model"},
+  "round": {"turnId": "omp-demo-1", "durationMs": 20000}
+}
+JSON
+```
 
 响应含义：
 

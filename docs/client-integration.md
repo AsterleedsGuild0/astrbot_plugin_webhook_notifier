@@ -26,7 +26,7 @@ OMP adapter 显式将 `session_scope` 标记为 `unknown`；在服务端 `notifi
 ## 前提与获取方式
 
 - 已部署可加载 extension/Hook 的 OMP 环境。
-- 已在 Webhook Notifier 中创建 Endpoint，并分别取得 Base URL、Endpoint Path 和 Bearer Token。
+- 已显式创建 OMP Endpoint，例如 `<唤醒词>whn token new private my-omp --provider omp`，并分别取得 Base URL、Endpoint Path 和 Bearer Token。群 Endpoint 同样追加 `--provider omp`，按[命令参考](command-reference.md)完成验证。当前待发布源码省略此 flag 默认 `markdown`，不能发送本指南的 OMP payload；错误 flag 不回退默认值。旧记录缺失 `provider` 也按 Markdown 读取，显式历史 Provider 保留、不自动覆盖、不按 payload 猜协议；依赖缺失字段的旧 OMP 调用应创建新的显式 OMP Endpoint 并更新 URL/Token。发布边界见[公共契约](public-contract.md)。
 - 从上游仓库直接获取或引用 [`agent/hooks/post/onebot.ts`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)；完整项目见 [`ParticleG/omp-config`](https://github.com/ParticleG/omp-config)。
 - 不要从本文复制 Hook 源码，也不要把上游源码重新打包到本插件。
 
@@ -113,7 +113,7 @@ omp --hook /path/to/onebot.ts
 
 ### 触发并分层验证
 
-1. 先使用 [`README` 的 curl 示例](../README.md)确认插件、Endpoint、Token 和 AstrBot 投递链路。
+1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟社区-hook)确认插件、OMP Endpoint、Token 和 AstrBot 投递链路；README 默认快速开始使用 Markdown，不能直接用于 OMP Endpoint。
 2. 启动已加载 Hook 的 OMP，完成一次真实的主代理对话，并让主代理正常完成一轮响应；这会触发 `session_stop`。任务或子代理会话不会触发该事件。
 3. 若没有请求，先用 `omp -p '/extensions'` 确认加载路径，再确认 URL 环境变量确实进入 OMP 进程。URL 未配置时脚本会静默跳过。
 4. 若发送失败，社区脚本会通过 `pi.logger.warn("Failed to send OMP session webhook", ...)` 记录警告；在 `~/.omp/logs/` 检查脱敏后的错误类型、网络和 timeout。
@@ -209,7 +209,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 
 ## 验证步骤
 
-1. 先使用 [`README` 的 curl 示例](../README.md)模拟 version 1 请求，确认 URL、Token、Endpoint 和服务端投递链路。
+1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟社区-hook)模拟 version 1 请求，确认 URL、Token、OMP Endpoint 和服务端投递链路。
 2. 再完成一次真实主代理响应以触发 `session_stop`；任务或子代理会话不触发该事件。
 3. 检查 HTTP JSON 结果：
    - `message=ok`：至少一个目标成功投递。

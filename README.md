@@ -1,12 +1,12 @@
 # AstrBot Webhook Notifier
 
-接收由 [`omp-config` onebot post hook](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts) 发送的 oh-my-pi 会话结束通知，并向 AstrBot 私聊或普通 QQ 群发送纯文本通知或 HTML 图片卡片。
+通过受 Bearer Token 保护的 Webhook，把通用 Markdown 信息、OMP 会话结束事件或 OpenCode 通知发送到 AstrBot 私聊或普通 QQ 群，支持纯文本与 HTML 图片卡片。
 
 [![Release](https://img.shields.io/github/v/release/AsterleedsGuild0/astrbot_plugin_webhook_notifier?display_name=tag&sort=semver)](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) [![License](https://img.shields.io/github/license/AsterleedsGuild0/astrbot_plugin_webhook_notifier)](LICENSE) [![Python](https://img.shields.io/badge/Python-%3E%3D3.10-3776AB?logo=python&logoColor=white)](pyproject.toml) [![AstrBot Plugin](https://img.shields.io/badge/AstrBot-Plugin-6C5CE7)](https://docs.astrbot.app/)
 
-OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事件；HTTP Webhook 发送、环境变量与 version 1 payload 由上述社区 hook 实现，并非 OMP 内建 Webhook。本插件支持 OMP、OpenCode 与通用 `markdown` provider；OpenCode 使用 V1 file Plugin 产生安全的四事件 envelope，`markdown` 用于 CPA 自动更新等受控运维通知。
+本插件提供 `markdown`、`omp` 和 `opencode` 三种 Provider，复用 Endpoint 鉴权、目标白名单、渲染与投递链路。当前源码默认使用 `markdown`；OMP 和 OpenCode 接入须在创建 Endpoint 时显式指定 Provider。
 
-**版本状态：** 当前已发布稳定版与当前源码版本均为 `v1.3.0`。正式 tag、GitHub Release 与远端正式 ZIP 已验证可用；插件市场安装/更新与生产 AstrBot 使用远端正式资产的 smoke 尚未验证。README 中原有 `v1.2.0` 条目继续描述历史能力；发布与安装边界见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+**版本状态：** 当前已发布稳定版为 `v1.3.0`，源码版本标记仍为 `v1.3.0`，但本文的默认 Provider 切换属于**待发布源码变化**，不代表已发布 ZIP 已包含、已部署或已验证这些变化。历史正式 tag、Release 与远端 ZIP 的证据，以及尚未验证的插件市场安装/更新和生产远端资产 smoke 边界，见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -34,20 +34,20 @@ OMP 原生提供 extension / hook 加载机制和 `session_stop` 生命周期事
 
 ```mermaid
 flowchart LR
-    A["oh-my-pi"] --> B["omp-config<br/>onebot.ts 社区 Hook"] --> C["HTTPS 反向代理<br/>Caddy（推荐参考）或其他方案<br/>非强依赖"]
-    C --> D["Webhook Notifier<br/>HTTP Server"] --> E["Token 鉴权<br/>事件标准化"]
+    A["Markdown 调用方 / OMP 社区 Hook / OpenCode V1 Plugin"] --> C["直连或 HTTPS 反向代理<br/>Caddy 等方案（非强依赖）"]
+    C --> D["Webhook Notifier<br/>HTTP Server"] --> E["Token 鉴权<br/>Endpoint Provider 标准化"]
     E --> F["文本或 HTML 卡片"] --> G["AstrBot adapter"] --> H["私聊或普通 QQ 群"]
 ```
 
 1. 安装并重载 Webhook Notifier 插件。
 2. 配置 HTTP 监听地址、端口与 `public_base_url`；同机或可信内网可直接访问。
 3. 跨主机或公网接入时，按需部署 HTTPS 反向代理；Caddy 是推荐参考，也可使用其他方案。
-4. 通过聊天命令创建私聊或普通 QQ 群 Endpoint，分别保存 Base URL、Endpoint Path 与 Token。
-5. 使用 `curl` 验证 URL、Token 鉴权和实际投递或跳过结果。
-6. 部署社区 onebot post hook，并配置 `OMP_SESSION_WEBHOOK_URL` 与 `OMP_SESSION_WEBHOOK_TOKEN`。
-7. 触发真实 oh-my-pi 会话结束事件，确认目标私聊或普通 QQ 群收到通知。
+4. 按来源创建私聊或普通 QQ 群 Endpoint：通用信息默认 `markdown`，OMP 使用 `--provider omp`，OpenCode 使用 `--provider opencode`；分别保存 Base URL、Endpoint Path 与 Token。
+5. 使用与 Endpoint Provider 匹配的 `curl` 请求验证 URL、Token 鉴权和实际投递或跳过结果。
+6. 将 URL 与 Token 配置给 Markdown 调用方、OMP 社区 Hook 或 OpenCode V1 Plugin。
+7. 触发真实通知，确认目标私聊或普通 QQ 群收到文本或图片。
 
-**完整教程：** 请阅读[端到端部署](docs/end-to-end-setup.md)，其中集中说明 Caddy HTTPS 反代与社区 Hook 的完整配置，README 不重复展开运维细节。
+**完整教程：** 通用默认请求见下方快速开始；OMP 专题见[端到端部署](docs/end-to-end-setup.md)与[社区 Hook 接入](docs/client-integration.md)，OpenCode 见[集成指南](docs/opencode-integration.md)。
 
 ---
 
@@ -55,7 +55,7 @@ flowchart LR
 
 ### 1. 安装插件
 
-> 当前已发布稳定版与当前源码版本均为 `v1.3.0`。对应 GitHub Release 与正式 ZIP 已可用；插件市场搜索、安装和更新仍未完成验证，文件安装与源码安装的实际可用性仍取决于 AstrBot 运行环境。
+> 已发布稳定版 `v1.3.0` 的 Release 与正式 ZIP 已可用；下文新的默认 Markdown 流程以包含待发布变化的源码为准，不应将历史 ZIP 当作新默认的验证对象。插件市场搜索、安装和更新仍未完成验证，文件安装与源码安装的实际可用性仍取决于 AstrBot 运行环境。
 
 | 方式 | 操作 |
 | --- | --- |
@@ -81,6 +81,7 @@ git clone https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier.gi
 - 保持 `enabled: true`；默认文本模式无需额外配置。
 - 按部署方式配置 `server.host`、`server.port` 和包含 Webhook base path 的 `server.public_base_url`：同机或可信内网可直连，跨主机或公网建议通过 Caddy 等反向代理提供 HTTPS；不要公开真实值。
 - 本节使用私聊 endpoint 验证。只有在确认平台主动消息规则和风险后，才将 `enable_private_notifications` 设为 `true`，然后重载插件。
+- `provider=markdown` 决定请求协议（`event=markdown.message`）；`render_mode=text` 或 `html_image` 决定通知展示方式，两者独立，Markdown 也可以渲染为图片。
 
 ### 3. 创建第一个私聊 endpoint
 
@@ -88,9 +89,11 @@ git clone https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier.gi
 <唤醒词>whn token new private demo
 ```
 
-AstrBot 默认唤醒词为 `/`，因此默认命令是 `/whn token new private demo`。创建成功后，聊天返回 `Endpoint Path`，并在独立消息中交付一次 Token；不会返回完整 URL。请在认证后的插件详情 **Plugin Page** 复制 Base URL。
+AstrBot 默认唤醒词为 `/`，因此默认命令是 `/whn token new private demo`。未提供 `--provider` 时使用 `markdown`；仅成功创建私聊 Endpoint 或群待验证申请后，公开说明会提醒默认 Provider、`event=markdown.message` 以及 OMP/OpenCode 需显式指定 `--provider`，不会把提醒放进独立 Token 消息。创建失败不提示成功；错误、缺值或重复的 flag 不会回退到默认值。
 
-### 4. 模拟 onebot post hook 请求
+创建成功后，聊天返回 `Endpoint Path`，并在独立消息中交付一次 Token；不会返回完整 URL。请在认证后的插件详情 **Plugin Page** 复制 Base URL。
+
+### 4. 发送通用 Markdown 请求
 
 先把三个值分别写入环境变量，不要把 Token 放进 URL：
 
@@ -102,15 +105,13 @@ export WHN_TOKEN='<聊天单独返回的 Token>'
 curl --fail-with-body --silent --show-error \
   -X POST "${WHN_BASE_URL}/${WHN_ENDPOINT_PATH}" \
   -H 'Content-Type: application/json' \
-  -H 'X-OMP-Event: session_stop' \
   -H "Authorization: Bearer ${WHN_TOKEN}" \
   --data-binary @- <<'JSON'
 {
-  "event": "omp.session_stop",
-  "version": 1,
-  "emittedAt": "2026-07-20T12:00:00Z",
-  "session": {"name": "README smoke test", "model": "provider/model"},
-  "round": {"turnId": "demo-1", "durationMs": 1200}
+  "event": "markdown.message",
+  "id": "readme-demo-1",
+  "title": "Webhook 通知",
+  "markdown": "## 接入完成\n\n这是一条 **Markdown** 通知。"
 }
 JSON
 ```
@@ -121,15 +122,15 @@ JSON
 - 私聊通知保持默认关闭时，HTTP 仍返回 200，但 `message: "skipped"`，聊天不会收到通知；这是安全策略结果，不应重试。
 - 使用 `html_image` 且发生渲染问题时，默认会回退为文本，并在 HTTP 响应中给出降级原因。
 
-### 接入自动通知
+### OMP 快速接入
 
-端到端部署见[专题教程](docs/end-to-end-setup.md)，[客户端接入文档](docs/client-integration.md)包含 `onebot.ts` 的 OMP 用户级/项目级目录、进程环境变量、加载验证和 `session_stop` 触发方法。从上游部署 onebot post hook 后，为其配置完整 URL 变量 `OMP_SESSION_WEBHOOK_URL` 和 Token 变量 `OMP_SESSION_WEBHOOK_TOKEN`。
+先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用上面默认创建的 Markdown Endpoint 发送 OMP payload。端到端部署见[专题教程](docs/end-to-end-setup.md)，[客户端接入文档](docs/client-integration.md)包含 `onebot.ts` 的 OMP 用户级/项目级目录、进程环境变量、加载验证和 `session_stop` 触发方法。OMP 原生仅提供 extension / hook 加载与生命周期事件；HTTP POST、环境变量与 version 1 payload 由社区 onebot post hook 实现，并非 OMP 内建 Webhook。部署后配置完整 URL 变量 `OMP_SESSION_WEBHOOK_URL` 和 Token 变量 `OMP_SESSION_WEBHOOK_TOKEN`。
 
 `ParticleG/omp-config` 是独立维护的社区仓库，当前未明确 LICENSE；本项目仅链接上游源文件，不复制或分发其代码，也不代表该 hook 由本项目或 OMP 官方维护。
 
 ### OpenCode 快速接入
 
-1. 先构建并安装包含 OpenCode provider 的 Webhook Notifier 测试包，然后在 AstrBot 中重载插件；未部署新服务端版本时，旧插件无法创建或处理 OpenCode Endpoint。
+1. 安装支持 OpenCode 的 Webhook Notifier 并重载插件；使用当前源码新增字段时，应先完成对应服务端升级，不能仅更新客户端。
 2. 在 AstrBot 私聊创建 OpenCode Endpoint：`<唤醒词>whn token new private <名称> --provider opencode`。
 3. 分别保存 Plugin Page 的 Base URL、聊天返回的 Endpoint Path 和单独交付的 Bearer Token，并在受控环境中组成客户端所需的完整 Endpoint URL。
 4. 将 `integrations/opencode/webhook-notifier.ts` 放到运行 OpenCode 的机器，复制 `integrations/opencode/opencode.jsonc` 的 V1 `plugin` tuple，并用 `{env:...}` 或 `{file:...}` 提供 URL/Token。可选配置 `instanceDisplayName` 作为 OpenCode 实例标识；`projectName` 由客户端自动推导 worktree basename，不需要用户配置。`actionContentMode` 默认 `strict`；只有明确接受业务文本/目标路径泄露风险时才设置为 `summary` 或 `full`。
@@ -159,6 +160,12 @@ JSON
 
 仅支持标题、段落、有序/无序列表、粗体/斜体、行内代码、fenced code 与普通 `http(s)` 链接。Raw HTML、图片语法、Jinja/模板语法与外部资源不会执行；不安全或不支持的语法按文本显示。`target_alias` 只能选择当前 Endpoint 已绑定的别名，调用方不能传入 UMO。
 
+### 旧 Endpoint 与默认值迁移
+
+旧持久化记录只有在 **`provider` key 缺失**时才按 `markdown` 读取；显式空字符串或 `null` 仍非法。显式写有 `omp`、`opencode` 或 `markdown` 的历史记录保持原协议，不自动覆盖，也不根据 payload 猜协议。曾依赖缺失字段的 OMP 调用会受此次切换影响，需创建显式 `--provider omp` 的新 Endpoint，并更新调用方 URL/Token；不能靠轮换 Token 或原位修改 Provider 切换协议。运行时支持集合以 `ProviderRegistry` 为权威，当前注册三种 Provider。
+
+加载缺失 `provider` 的旧记录时会写入不含 Endpoint/Token 私密值的 warning，提醒核对调用方协议；这不是按 payload 自动修复或切换 Provider。
+
 ---
 
 ## 支持范围
@@ -180,6 +187,8 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 ## 常用命令
 
 文档统一使用 `<唤醒词>`；默认值为 `/`。完整说明见[命令参考](docs/command-reference.md)，管理员命令不在首页展开。
+
+以下省略 Provider 参数的通用创建命令默认 Markdown；OMP/OpenCode 分别追加 `--provider omp` / `--provider opencode`。
 
 | 场景 | 命令 |
 | --- | --- |
@@ -258,11 +267,11 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 
 ### OpenCode provider 如何启用？
 
-创建 Endpoint 时追加 `--provider opencode`；不追加时默认 `omp`。provider 在创建后不可变，OpenCode Plugin 配置和排障见[OpenCode 集成指南](docs/opencode-integration.md)。
+创建 Endpoint 时追加 `--provider opencode`；当前源码省略时默认 `markdown` 并提醒使用 Markdown 协议。Provider 在创建后不可变，OpenCode Plugin 配置和排障见[OpenCode 集成指南](docs/opencode-integration.md)。
 
 ### Markdown provider 如何启用？
 
-创建 Endpoint 时追加 `--provider markdown`。该 Endpoint 只接受 `event=markdown.message` 的受限 Markdown payload，继续复用原有 Bearer 鉴权、目标白名单与投递策略。
+当前源码省略 `--provider` 即创建 Markdown Endpoint 并显示默认协议提醒，也可显式指定 `--provider markdown`。该 Endpoint 只接受 `event=markdown.message` 的受限 Markdown payload，继续复用原有 Bearer 鉴权、目标白名单与投递策略。
 
 ### 私聊 endpoint 创建成功，为什么没有通知？
 

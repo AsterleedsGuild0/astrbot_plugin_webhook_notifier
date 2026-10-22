@@ -125,7 +125,7 @@ AstrBot Endpoint 创建时可显式选择：
 <唤醒词>whn token new private <名称> --provider opencode
 ```
 
-省略 `--provider` 时默认 `omp`；provider 在 Endpoint 创建后不可变。OpenCode Plugin 只使用 Endpoint 的 Base URL、Endpoint Path 和 Bearer Token 组合请求，不读取或修改 AstrBot auth/secrets。
+当前待发布源码省略 `--provider` 时默认 `markdown`，成功创建后会在公开说明中提醒默认协议及 OMP/OpenCode 需显式选择；错误 flag 不会回退默认值。Provider 在 Endpoint 创建后不可变，且不会按 payload 猜协议。旧记录仅在 `provider` key 缺失时按 `markdown` 读取，显式空值或 `null` 仍非法，显式历史 Provider 保留；依赖旧缺失字段的 OMP 调用需新建 `--provider omp` Endpoint 并更新 URL/Token，不能只轮换 Token。`provider=markdown` 与 `render_mode=text|html_image` 分别控制协议和展示方式。此默认切换不代表已发布 `v1.3.0` 资产已包含，见[公共契约](public-contract.md)。OpenCode Plugin 只使用 Endpoint 的 Base URL、Endpoint Path 和 Bearer Token 组合请求，不读取或修改 AstrBot auth/secrets。
 
 ### OpenCode 发送白名单
 

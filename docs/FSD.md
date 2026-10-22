@@ -12,6 +12,8 @@
 - 产品名称：Webhook Notifier
 - 目标仓库：`AsterleedsGuild0/astrbot_plugin_webhook_notifier`
 
+> 历史基线说明：本文保留 `v1.0.0` 的 OMP 专题规格和当时发布状态，不代表当前源码的 Provider 集合或默认值。当前待发布源码默认 `markdown`，旧记录缺失 `provider` 也按 Markdown 读取；现行协议、命令与迁移边界以[公共契约](public-contract.md)和[命令参考](command-reference.md)为准。以下 OMP 基线中的创建命令显式补充 `--provider omp`，不批量改写历史 OMP payload 或展示语义。
+
 ---
 
 ## 目的与范围
@@ -276,7 +278,7 @@ QQ 官方 `bind_current_group` pending 内部 phase：
 #### 私聊目标申请序列
 
 ```text
-User -> Bot(private): <唤醒词>whn token new private [name]
+User -> Bot(private): <唤醒词>whn token new private [name] --provider omp
 Bot -> Bot: 校验命令来自私聊
 Bot -> Endpoint Registry: create endpoint(status=active, target=user_private)
 Endpoint Registry -> Bot: endpoint path + token 明文
@@ -1461,9 +1463,9 @@ MVP 推荐命令形态：
 本文用 `<唤醒词>` 表示 AstrBot 当前会话的 `wake_prefix`。默认 `wake_prefix=["/"]` 时命令为 `/whn ...`；改为 `!` 时使用 `!whn ...`；空前缀时使用裸命令 `whn ...`。运行时配置缺失、容器/元素类型错误、包含控制字符或读取异常时，帮助输出使用安全占位符 `<AstrBot唤醒词>` 并附诊断提示；静态示例不得用该异常占位符替代 `<唤醒词>`。
 
 ```text
-<唤醒词>whn token new private [name]
-<唤醒词>whn token new group <数字群号> [name]  # aiocqhttp
-<唤醒词>whn token new group current [name]     # qq_official
+<唤醒词>whn token new private [name] --provider omp
+<唤醒词>whn token new group <数字群号> [name] --provider omp  # aiocqhttp
+<唤醒词>whn token new group current [name] --provider omp     # qq_official
 <唤醒词>whn token verify <request_id> <code>
 <唤醒词>whn token confirm <request_id>
 <唤醒词>whn token list
@@ -1660,10 +1662,10 @@ MVP 默认使用群消息事件进行校验，而不是依赖私聊上下文查�
 
 | 用例 | 输入 | 预期 |
 | --- | --- | --- |
-| 申请私聊 token | 私聊 `<唤醒词>whn token new private` | yield 安全摘要，再 direct send Token Plain |
+| 申请私聊 token | 私聊 `<唤醒词>whn token new private --provider omp` | yield 安全摘要，再 direct send Token Plain |
 | 私聊 token 列表 | 私聊 `<唤醒词>whn token list` | 只展示自己的 endpoint 摘要，不展示 token 明文 |
-| aiocqhttp 申请群聊 token | 私聊 `<唤醒词>whn token new group <数字群号>` | 创建 `prebound_group` 待验证申请 |
-| qq_official 申请群聊 token | 私聊 `<唤醒词>whn token new group current` | 创建 `bind_current_group` 待验证申请 |
+| aiocqhttp 申请群聊 token | 私聊 `<唤醒词>whn token new group <数字群号> --provider omp` | 创建 `prebound_group` 待验证申请 |
+| qq_official 申请群聊 token | 私聊 `<唤醒词>whn token new group current --provider omp` | 创建 `bind_current_group` 待验证申请 |
 | aiocqhttp 群管理员验证 | 原申请者在预指定群执行 verify | tokenless active、清理 pending，提示原申请者私聊 rotate |
 | qq_official 群管理员验证 | 目标群任一 owner/admin 执行 verify | record 仍 pending，转 waiting-owner 且不清理 pending，提示原申请者私聊 confirm |
 | qq_official 原申请者确认 | 私聊 `<唤醒词>whn token confirm <request_id>` | active，yield 摘要，再 direct send Token Plain |

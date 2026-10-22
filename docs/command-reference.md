@@ -56,13 +56,15 @@
 <唤醒词>whn token new private <名称> --provider markdown
 ```
 
-- 允许值只有 `omp`、`opencode` 与 `markdown`。`markdown` 用于通用受限 Markdown 信息推送，仍复用 Endpoint Bearer、目标白名单、幂等和原有投递链路。
-- 未提供 `--provider` 时默认 `omp`，以保持既有命令兼容。
-- 只要出现 `--provider`，就必须紧跟一个独立的非 flag 值；缺值、重复指定、`--provider=value` 或值以 `--` 开头都会明确拒绝，不会静默回落为 `omp`。
+- 运行时支持集合以 `ProviderRegistry` 为权威；当前注册 `markdown`、`omp` 与 `opencode`，帮助中的选项由实际注册集合按名称排序生成。`markdown` 用于通用受限 Markdown 信息推送，仍复用 Endpoint Bearer、目标白名单、幂等和原有投递链路。
+- 当前待发布源码中，未提供 `--provider` 时默认 `markdown`。成功创建私聊 Endpoint 或两种平台的群待验证申请后，公开说明会提醒默认 `markdown`、`event=markdown.message`，以及 OMP/OpenCode 需显式 `--provider`；该提醒不进入独立 Token 消息，创建失败也不会提示成功。已发布 `v1.3.0` 的历史默认不代表此待发布行为，见[公共契约](public-contract.md)。
+- 只要出现 `--provider`，就必须紧跟一个独立的非 flag 值；不支持的值、缺值、重复指定、`--provider=value` 或值以 `--` 开头都会明确拒绝，不会静默回退到默认值。
 - `--provider` 只用于 `token new`；rotate、revoke、delete、verify 和 confirm 不接受切换 provider 的参数。
 - provider 在 Endpoint 创建时写入记录并保持不可变；不能通过 rotate、直接编辑 Registry 或管理员选择器原位修改。
 - OpenCode 的 tuple、env/file 凭据、三事件和 CLI/Desktop smoke 见 [OpenCode 集成指南](opencode-integration.md)。
 - Markdown Endpoint 只接受 `event=markdown.message`；调用方不能提交任意 UMO，`target_alias` 必须属于 Endpoint 已绑定的目标别名。
+- 旧记录仅在 `provider` key 缺失时按 `markdown` 读取；显式空字符串或 `null` 仍非法。显式历史 Provider 保留，不自动覆盖、不按 payload 猜协议；依赖缺失字段的旧 OMP 调用应新建 `--provider omp` 的 Endpoint 并更新 URL/Token。
+- Provider 决定请求协议，`render_mode=text|html_image` 决定展示方式，二者独立。以下省略 `--provider` 的通用创建流程均使用 Markdown；用于 OMP 或 OpenCode 时须分别追加 `--provider omp` 或 `--provider opencode`。
 
 ---
 

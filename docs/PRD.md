@@ -14,6 +14,8 @@
 - 首个目标集成：兼容 `ParticleG/omp-config` 社区 post Hook 发送的 OMP `session_stop` version 1 通知
 - 目标平台：AstrBot `aiocqhttp` 与 `qq_official`；OneBot 验证环境使用 NapCat，QQ 官方普通群真实主动 Webhook / OMP 图片卡片 smoke 已通过
 
+> 历史基线说明：本文保留 `v1.0.0` 的 OMP 专题与当时发布状态，不代表当前源码的 Provider 集合或默认值。当前待发布源码默认 `markdown`，旧记录缺失 `provider` 也按 Markdown 读取；现行操作与迁移边界以[公共契约](public-contract.md)和[命令参考](command-reference.md)为准。下方 OMP 创建命令显式补充 Provider，以免复制时误用新默认。
+
 ---
 
 ## 背景
@@ -136,7 +138,7 @@ Webhook Notifier 的用户路径分为两个阶段：
 适用于用户希望把 OMP 任务完成通知推送到自己与 Bot 的私聊。
 
 ```text
-用户私聊 Bot：<唤醒词>whn token new private my-omp
+用户私聊 Bot：<唤醒词>whn token new private my-omp --provider omp
   ↓
 Bot 创建 endpoint/token
   ↓
@@ -162,8 +164,8 @@ Bot 先通过正常结果返回安全摘要，再绕过 RespondStage 单次 dire
 适用于用户希望把 OMP 任务完成通知推送到指定 QQ 群。
 
 ```text
-aiocqhttp 用户私聊 Bot：<唤醒词>whn token new group <数字群号> my-group-omp
-或 qq_official 用户私聊 Bot：<唤醒词>whn token new group current my-group-omp
+aiocqhttp 用户私聊 Bot：<唤醒词>whn token new group <数字群号> my-group-omp --provider omp
+或 qq_official 用户私聊 Bot：<唤醒词>whn token new group current my-group-omp --provider omp
   ↓
 Bot 创建待验证申请
   ↓

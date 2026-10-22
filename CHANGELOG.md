@@ -1,5 +1,14 @@
 # 更新日志
 
+## 未发布
+
+- 整理多 Provider 定位：根文档、初始化说明与默认渲染使用通用通知表述，默认快速开始发送 `markdown.message`；OMP/OpenCode 接入示例显式指定对应 Provider。
+- `token new` 未指定 `--provider` 时默认 `markdown`；仅成功创建私聊 Endpoint 或群待验证申请后在公开说明中提醒默认协议及 OMP/OpenCode 的显式参数要求，不将提醒混入独立 Token 消息。错误、不支持、缺值或重复的 flag 仍拒绝，不回退默认值。
+- Provider 支持集合以运行时 `ProviderRegistry` 为权威，命令校验复用注册表，帮助选项按注册名称排序生成。显式 `omp`、`opencode`、`markdown` 保持各自原协议，Endpoint Provider 仍不可变。
+- **迁移注意：** 旧记录只有 `provider` key 缺失才按 `markdown` 读取，显式空字符串或 `null` 仍非法；不会自动覆盖显式历史 Provider，也不按 payload 猜协议。依赖缺失字段的旧 OMP 调用需新建 `--provider omp` Endpoint 并更新 URL/Token；轮换 Token 不切换 Provider。
+- 本地验证：Python 1224 项测试通过，Ruff 检查通过；默认创建、旧记录缺失字段加载、各 Provider 的 HTTP 投递与重放去重 smoke 通过，临时注入额外 Adapter 可被命令、帮助和 HTTP 路由接受。Chromium 已核对帮助卡片中的动态选项、默认说明及横向边界。
+- 验证使用本地 HTTP 与 AstrBot 内存传输替身，不替代真实 QQ 投递、T2I 截图或生产验收。以上仍为待发布源码变化，版本标记保留 `v1.3.0`，不代表历史正式 ZIP 已包含；未执行发布或部署。下方历史发布记录保持不变。
+
 ---
 
 ## v1.3.0 - 2026-08-19
