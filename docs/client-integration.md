@@ -9,6 +9,8 @@
 
 本文说明如何把 OMP 会话结束事件通过社区 Hook 发送到 Webhook Notifier。该 HTTP POST 实现不属于 OMP 内建 Webhook 功能；外部仓库独立维护且未见明确 License，本文只提供链接和配置说明，不复制或分发其源代码。使用前请自行确认上游许可、版本兼容性与组织安全要求。
 
+仓库另提供 macOS 单文件开发同步器，见下方[本地 Hook 自动同步](#本地-hook-自动同步)。同步器只部署文件，不提供新的 OMP Hook 实现；当前社区 Hook 的安装与协议说明仍作为既有接入资料保留，不能把同步器完成理解为自维护 Hook 已接管。
+
 首次从 AstrBot 服务端、HTTPS 反向代理一路部署到真实 OMP 会话时，请先阅读[端到端部署教程](end-to-end-setup.md)。本文只负责 OMP 侧社区 Hook 的获取、环境变量、HTTP 契约与数据边界；插件服务端配置、Endpoint 创建和 Caddy 参考部署以端到端教程为准。
 
 ---
@@ -256,6 +258,80 @@ Token 必须放在独立环境变量中。轮换后旧 Token 立即失效；不�
 - 外部项目独立维护，本插件不分发其代码，也不保证未来上游变化继续兼容。
 - 上游 `main` 链接不是固定发布物；生产环境应记录实际采用的上游 commit，并在升级前复验。
 - 外部仓库未见明确 License。部署或再分发前，使用方应自行确认上游许可；本指南不构成许可意见。
+
+---
+
+## 本地 Hook 自动同步
+
+`scripts/sync_omp_hook.py` 是 macOS 开发工具，不属于 AstrBot 运行插件，不进入插件 ZIP。它用 Python 标准库把一份 `.ts` 源文件单向同步为普通文件部署副本，不执行 Hook、不修改 Git index、不提交或推送、不重启 OMP。
+
+### 前提与首次安装
+
+- 使用主硬盘上的 Python 3.10 或更新版本，不通过外置仓库的 `.venv` 启动安装命令；解释器的真实路径位于 `/Volumes/` 时安装会拒绝。
+- 源文件必须存在、非空且不超过 4 MiB，目标父目录必须存在；源、目标及其路径组件不能是符号链接，两端不能是同一个文件。
+- 首次安装时，目标应不存在或与源内容相同。已有不同内容返回 `initial_target_conflict`，不覆盖；先人工核对并将旧文件备份到自动发现目录之外。
+- `integrations/omp/webhook-notifier.ts` 尚未纳入仓库，默认真实同步尚未启用。必须先完成自维护 Hook，再绑定该路径；不要为启动同步器创建空 Hook。
+- 从旧 `onebot.ts` 切换到新文件名时，应另行备份并移走旧加载入口，避免两份 Hook 同时自动加载。同步器不会替调用方处理旧入口。
+
+在插件仓库根目录执行，以下源路径必须替换为实际维护的文件：
+
+```bash
+python3 scripts/sync_omp_hook.py install \
+  --source '/绝对路径/已维护的/webhook-notifier.ts' \
+  --target "$HOME/.omp/agent/hooks/post/webhook-notifier.ts"
+python3 scripts/sync_omp_hook.py sync
+python3 scripts/sync_omp_hook.py start
+python3 scripts/sync_omp_hook.py status
+```
+
+`install` 只安装，不启动或立即复制 Hook。首次 `sync` 确认部署结果后再 `start`；后台启动也会自行完成首次稳定观察与同步。
+
+### 管理与数据归属
+
+默认实例为 `default`。源码入口或主硬盘运行副本均可管理同一实例：
+
+```bash
+SYNC="$HOME/Library/Application Support/WebhookNotifier/omp-hook-sync/default/sync_omp_hook.py"
+python3 "$SYNC" status
+python3 "$SYNC" stop
+python3 "$SYNC" start
+python3 "$SYNC" sync
+python3 "$SYNC" sync --overwrite-target
+python3 "$SYNC" uninstall
+```
+
+| 动作 | 行为 |
+| --- | --- |
+| `install` | 安装／更新主硬盘运行副本和 LaunchAgent；更新前先 `stop`，同一实例不能改绑源或目标 |
+| `start` | 启用并加载用户级 LaunchAgent；登录会话中运行，意外退出由 launchd 重启 |
+| `stop` | 禁用并卸载任务，保留部署文件；再次 `start` 才恢复后台同步 |
+| `status` | 输出是否安装、是否已加载、最后同步时间／摘要、冲突标记和当前两端内容是否一致；成功查询退出 0，即使同步处于冲突状态 |
+| `sync` | 立即尝试同步；需要稳定观察时等待 2 秒，未完成或存在冲突时退出 2 |
+| `sync --overwrite-target` | 显式处理冲突；现存目标先备份，再以稳定源覆盖，目标已删除时不伪造备份 |
+| `uninstall` | 停止任务，删除 plist 和运行脚本；保留目标、配置、状态和备份，不清理用户文件 |
+
+运行目录为 `~/Library/Application Support/WebhookNotifier/omp-hook-sync/<实例>/`，包含 `config.json`、`state.json`、运行脚本和锁文件；冲突备份位于其中的 `backups/`，使用 `.bak` 后缀。正文不进入状态文件，状态只记录路径、摘要、时间和固定状态码；备份本身包含目标原文，应按本机私密资料保管，工具不自动清理备份。
+
+默认 LaunchAgent 为 `~/Library/LaunchAgents/io.github.asterleedsguild0.webhook-notifier.omp-hook-sync.plist`。`--instance <小写字母数字连字符名称>` 放在子命令之前，可创建隔离验收实例；非默认实例在 LaunchAgent label 后追加实例名。不要让多个实例管理同一目标。
+
+更新同步器本身需停止后，从插件仓库重新运行相同绑定的 `install`，再 `start`。它不会自行更新运行脚本。卸载后配置与冲突标记仍保留，相同绑定重新安装不会清除冲突；卸载后如需重新安装，应使用仓库脚本入口。
+
+### 同步与故障语义
+
+- 每 2 秒读取一次小文件；相邻两次内容一致才复制，因此通常在稳定保存后约 2–4 秒同步。连续保存、原子保存或分支切换都会重新核对内容，不依赖旧 inode。
+- 写入目标目录的 `.tmp` 文件后原子替换，不留下可被 OMP 自动加载的临时 `.ts` 文件；部署文件权限为 `0600`，内容不变时不重写目标。
+- 源缺失、外置盘断开或源变为空文件时，保留最后部署副本；恢复有效源后自动继续。该稳定观察不是 TypeScript 编译或功能验证，保存的开发版本仍可能不可用。
+- 目标内容与上次成功部署摘要不同或目标被删除时，锁存 `target_conflict`，即使进程重启或后来内容偶然一致也不会自动恢复。检查后显式使用 `sync --overwrite-target`；源不可用时不会强行覆盖。
+- 源／目标为符号链接、非普通文件、超限或发生 I/O 错误时，不继续写目标，状态显示固定错误码；状态损坏时不猜测基线。
+- 单实例锁阻止重复后台进程；同步操作锁协调后台检查和手动同步。工具在替换前再次检查两端，但不与外部编辑器共享锁，不能保证消除检查与替换间极短的竞争窗口。不要同时编辑部署副本和开发源。
+- 替换目标后、写状态前若进程崩溃，下次会保守识别为目标冲突，需要人工核对恢复，不静默重新建立基线。
+- `loaded=true` 表示 launchd 已加载任务，不是 OMP 已加载新 Hook 的证明；后台故障时还应检查该 label 的 `launchctl print`。文件同步不保证当前 OMP Session 热更新，应新开 OMP 进程验收。
+
+### 验收范围
+
+2026-10-22 已完成 26 项同步器回归、全仓 1226 项 Python 测试及 Ruff 检查。真实 macOS 用户级 LaunchAgent 使用外置盘临时源和主硬盘临时目标，验证了自动同步、原子保存、重复进程拒绝、崩溃重启、冲突跨重启保留、备份覆盖、源消失恢复、停止、单次同步和卸载保留数据。临时服务、plist 与实例文件已清理，原 `onebot.ts` 内容未改变。
+
+尚未接管真实 Hook，未验证 OMP 加载新客户端、登录重启恢复或实际拔插磁盘。源消失恢复采用临时路径操作模拟，不等同于物理磁盘拔插验收。
 
 ---
 

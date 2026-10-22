@@ -1,5 +1,13 @@
 # 更新日志
 
+## 未发布
+
+- 新增 macOS 开发工具 `scripts/sync_omp_hook.py`：单文件、跨盘单向同步；提供安装、启停、状态、单次同步、显式备份覆盖及卸载命令，由用户级 LaunchAgent 管理主硬盘运行副本。不操作 Git、不执行 Hook、不进入 AstrBot 插件 ZIP。
+- 源缺失或为空时保留部署副本；两次稳定观察后原子替换目标，目标独立修改／删除时持久化暂停，进程重启不清除冲突。显式覆盖前保留备份，卸载保留目标、配置、状态与备份。
+- 验证：同步器 26 项回归、全仓 Python 1226 项与 Ruff 通过；真实 macOS LaunchAgent 跨文件系统验收 13 项通过，临时实例已清理。当前未接管真实 OMP Hook，未验证 OMP 热加载、登录重启或物理磁盘拔插。
+
+---
+
 ## v2.0.0 - 2026-10-22
 
 - **破坏性变更（#27）：** 默认 Provider 从 OMP 改为 Markdown，覆盖新建 Endpoint 和缺少 `provider` 字段的旧记录。显式保存为 `omp`、`opencode` 或 `markdown` 的 Endpoint 保持原协议；版本号升至 2.0 表示默认行为的兼容性边界，不改变 Webhook payload 版本或 Registry 格式版本。
