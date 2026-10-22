@@ -95,9 +95,9 @@ enable_private_notifications: false
 
 ---
 
-## 客户端社区 Hook 与数据外发
+## OMP 客户端 Hook 与数据外发
 
-OMP 原生提供 extension/Hook 加载机制和 `session_stop` 生命周期事件，但本插件当前兼容的 HTTP POST、环境变量和 version 1 payload 来自外部 [`ParticleG/omp-config` 社区 Hook](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)，不是 OMP 内建 Webhook。部署步骤见[OMP 客户端社区 Hook 集成指南](client-integration.md)。
+OMP 原生提供 extension/Hook 加载机制和 `session_stop` 生命周期事件。HTTP POST、环境变量和 version 1 payload 由本仓库 [`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts) 实现，不是 OMP 内建 Webhook。部署步骤与来源说明见[OMP 客户端 Hook 集成指南](client-integration.md)。
 
 客户端主要环境变量：
 
@@ -109,9 +109,9 @@ OMP 原生提供 extension/Hook 加载机制和 `session_stop` 生命周期事�
 
 该 Hook 可能外发 prompt、`cwd`、session file、会话/轮次标识、模型、耗时、图片与 entry/message 计数、lastAssistant 元数据。使用方必须评估业务数据、用户输入和本地路径离开 OMP 运行环境后的传输、接收、日志与留存风险。
 
-当前上游实现失败时记录 warn、不重试，因此临时网络故障可能造成单次通知丢失；timeout 过小会增加此风险。失败日志可能记录 URL，但不应记录 Token 或完整 payload，仍应避免把敏感信息放入 URL，并限制日志访问。
+基线代码在网络异常时记录 warn、不重试，因此临时网络故障可能造成单次通知丢失；timeout 过小会增加此风险。它不检查 HTTP 状态码或响应正文，HTTP 4xx/5xx 不会产生该警告，不能仅凭无报错认定送达。失败日志包含目标 URL 和错误文本，未做脱敏；URL 路径和查询参数可能敏感，不得把 Token 放入 URL，公开日志前须脱敏并限制日志访问。
 
-外部仓库独立维护且未见明确 License。本项目只链接、不复制或分发其源代码；使用、固定版本或再分发前，应自行确认上游许可和兼容性。生产环境建议记录实际采用的上游 commit，并在升级 OMP 或 `omp-config` 后重新验证 payload 与日志行为。
+本次客户端迁入保留既有本地 `onebot.ts` 的发送行为，不自动实现匿名化、字段裁剪或重试。生产环境应固定本仓库 commit 或发布版本，并在升级 OMP 或 Hook 后重新验证 payload 与日志行为；开发同步器不是发布门禁。
 
 ---
 
@@ -402,7 +402,7 @@ Endpoint 名称、Provider 和目标别名属于运维定位字段，会原样�
 
 - [端到端部署教程](end-to-end-setup.md)
 - [命令参考](command-reference.md)
-- [OMP 客户端社区 Hook 集成指南](client-integration.md)
+- [OMP 客户端 Hook 集成指南](client-integration.md)
 - [OpenCode 集成指南](opencode-integration.md)
 - [平台投递策略](platform-delivery-policy.md)
 - [platform_id 离线 Rebind Runbook](platform-id-rebind-runbook.md)

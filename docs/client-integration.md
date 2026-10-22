@@ -1,25 +1,25 @@
-# OMP 客户端社区 Hook 集成指南
+# OMP 客户端 Hook 集成指南
 
 ## 文档信息
 
-- 适用插件版本：v0.3.0 及后续保持兼容的版本
-- 验证日期：2026-07-20
-- 集成性质：外部社区依赖
-- 社区实现：`ParticleG/omp-config` 的 `agent/hooks/post/onebot.ts`
+- 服务端协议：`omp.session_stop` version 1，自 v0.3.0 起支持
+- 客户端维护入口：[`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts)
+- 基线日期：2026-10-22
+- 发布状态：仓库新增、尚未发布；已发布的 v2.0.0 ZIP 不含此客户端
 
-本文说明如何把 OMP 会话结束事件通过社区 Hook 发送到 Webhook Notifier。该 HTTP POST 实现不属于 OMP 内建 Webhook 功能；外部仓库独立维护且未见明确 License，本文只提供链接和配置说明，不复制或分发其源代码。使用前请自行确认上游许可、版本兼容性与组织安全要求。
+本文说明如何把 OMP 会话结束事件发送到 Webhook Notifier。客户端现由本仓库维护，基于既有本地 `onebot.ts` 建立基线，保留原有事件、payload、环境变量与发送行为，不再要求部署时从外部社区仓库获取脚本。历史接入来源为 [`ParticleG/omp-config`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)，不将既有代码表述为全新原创。
 
-仓库另提供 macOS 单文件开发同步器，见下方[本地 Hook 自动同步](#本地-hook-自动同步)。同步器只部署文件，不提供新的 OMP Hook 实现；当前社区 Hook 的安装与协议说明仍作为既有接入资料保留，不能把同步器完成理解为自维护 Hook 已接管。
+macOS 开发环境可以通过[本地 Hook 自动同步](#本地-hook-自动同步)部署普通文件副本。创建仓库源文件不等于接管本机已加载的 Hook；切换文件名和启动同步需单独执行。
 
-首次从 AstrBot 服务端、HTTPS 反向代理一路部署到真实 OMP 会话时，请先阅读[端到端部署教程](end-to-end-setup.md)。本文只负责 OMP 侧社区 Hook 的获取、环境变量、HTTP 契约与数据边界；插件服务端配置、Endpoint 创建和 Caddy 参考部署以端到端教程为准。
+首次从 AstrBot 服务端、HTTPS 反向代理一路部署到真实 OMP 会话时，请先阅读[端到端部署教程](end-to-end-setup.md)。本文负责客户端安装、环境变量、HTTP 契约与数据边界；插件服务端配置、Endpoint 创建和 Caddy 参考部署以端到端教程为准。
 
 ---
 
-## OMP 原生机制与社区实现的边界
+## OMP 原生机制与客户端的边界
 
-OMP 原生提供 extension、Hook 加载机制，以及 `session_stop` 生命周期事件。HTTP POST、环境变量读取和 version 1 JSON payload 由 [`ParticleG/omp-config` 的 `onebot.ts`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts) 社区 Hook 实现，不是 OMP 原生 Webhook。
+OMP 原生提供 extension、Hook 加载机制，以及 `session_stop` 生命周期事件。HTTP POST、环境变量读取和 version 1 JSON payload 由本仓库的 `webhook-notifier.ts` 实现，不是 OMP 原生 Webhook。
 
-本插件的 `omp` provider 名称为既有服务端兼容标识。它当前兼容并标准化上述社区 Hook 输出的 `omp.session_stop` version 1 payload，不表示 OMP 官方承诺该 HTTP 契约。
+本插件的 `omp` provider 兼容并标准化 `omp.session_stop` version 1 payload；客户端入库没有改变该契约，也不表示 OMP 官方承诺该 HTTP 契约。
 
 OMP adapter 显式将 `session_scope` 标记为 `unknown`；在服务端 `notification_mode=focused` 下 OMP 行为不变，不会因缺少可靠 scope 而被抑制。
 
@@ -29,20 +29,20 @@ OMP adapter 显式将 `session_scope` 标记为 `unknown`；在服务端 `notifi
 
 - 已部署可加载 extension/Hook 的 OMP 环境。
 - 已显式创建 OMP Endpoint，例如 `<唤醒词>whn token new private my-omp --provider omp`，并分别取得 Base URL、Endpoint Path 和 Bearer Token。群 Endpoint 同样追加 `--provider omp`，按[命令参考](command-reference.md)完成验证。自 `v2.0.0` 起省略此 flag 默认 `markdown`，不能发送本指南的 OMP payload；错误 flag 不回退默认值。旧记录缺失 `provider` 也按 Markdown 读取，显式历史 Provider 保留、不自动覆盖、不按 payload 猜协议；依赖缺失字段的旧 OMP 调用应创建新的显式 OMP Endpoint 并更新 URL/Token。发布边界见[公共契约](public-contract.md)。
-- 从上游仓库直接获取或引用 [`agent/hooks/post/onebot.ts`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)；完整项目见 [`ParticleG/omp-config`](https://github.com/ParticleG/omp-config)。
-- 不要从本文复制 Hook 源码，也不要把上游源码重新打包到本插件。
+- 从本仓库取得 `integrations/omp/webhook-notifier.ts`，或从包含该文件的后续发布 ZIP 中提取；无需克隆外部社区配置仓库。
+- 确认现有 Hook 入口，切换时避免旧 `onebot.ts` 与新客户端重复加载。
 
 OMP 自带 Bun/TypeScript 运行能力，部署该 Hook 不需要执行 `npm install`、`bun install` 或手动编译。本文不声明未经验证的最低 OMP 版本。
 
 ---
 
-## 在 OMP 中安装 onebot.ts
+## 在 OMP 中安装 webhook-notifier.ts
 
-### 确认来源与使用授权
+### 确认维护源与旧入口
 
-社区脚本来源为 [`ParticleG/omp-config` 的 `agent/hooks/post/onebot.ts`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)。该仓库当前未见明确 License；从上游取得脚本前，应确认自己有权使用，并记录取得日期和对应上游 commit。
+本仓库的 `integrations/omp/webhook-notifier.ts` 是开发维护源，OMP 加载目录中的文件是部署副本。部署时记录插件仓库 commit 或发布版本。
 
-本仓库不分发该脚本，也不复制其完整源码。本文只说明如何安装已经通过组织授权流程取得的本地 `onebot.ts` 文件，不提供 raw 下载命令。
+已有 `onebot.ts` 时，先将它备份到 OMP 自动发现目录之外，再安装新文件；不要把备份保留为 `post` 目录中的另一个 `.ts`。本轮入库不自动移除或覆盖既有入口。
 
 ### 选择自动发现目录
 
@@ -51,21 +51,21 @@ OMP 自带 Bun/TypeScript 运行能力，部署该 Hook 不需要执行 `npm ins
 - 用户级：`~/.omp/agent/hooks/post/*.ts`，对该用户启动的 OMP 生效。
 - 项目级：`.omp/hooks/post/*.ts`，对当前项目生效；这里是项目根目录下的点目录 `.omp`，不是 `./omp`。
 
-用户级安装已有本地文件：
+在插件仓库根目录执行用户级安装：
 
 ```bash
 mkdir -p ~/.omp/agent/hooks/post
-install -m 600 /path/to/onebot.ts ~/.omp/agent/hooks/post/onebot.ts
+install -m 600 integrations/omp/webhook-notifier.ts ~/.omp/agent/hooks/post/webhook-notifier.ts
 ```
 
-项目级替代方案：
+项目级替代方案，在需要启用 Hook 的项目根目录执行：
 
 ```bash
 mkdir -p .omp/hooks/post
-install -m 600 /path/to/onebot.ts .omp/hooks/post/onebot.ts
+install -m 600 /path/to/astrbot_plugin_webhook_notifier/integrations/omp/webhook-notifier.ts .omp/hooks/post/webhook-notifier.ts
 ```
 
-OMP 只发现 `post` 目录中的直接子文件，不递归扫描其子目录。文件名不要求固定，但模块必须默认导出工厂函数；保留 `onebot.ts` 文件名便于与上游对照。不要同时在用户级、项目级或显式配置中放置同一 Hook 的多份副本，否则可能重复推送。
+OMP 只发现 `post` 目录中的直接子文件，不递归扫描其子目录。文件名不要求固定，但模块必须默认导出工厂函数；本仓库使用 `webhook-notifier.ts`，因为它发送插件 Webhook，并不直接调用 OneBot。不要同时在用户级、项目级或显式配置中放置同一 Hook 的多份副本，否则可能重复推送。
 
 ### 配置启动进程环境变量
 
@@ -79,7 +79,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 
 可以把变量配置在 shell 启动配置、受控包装启动脚本或服务管理器的环境配置中。环境变量必须实际传入启动 OMP 的进程；设置后需要重启 OMP。当前没有上游确认的 OMP 自动加载 `.env` 约定，不要仅创建 `.env` 后假设变量已经生效。
 
-社区脚本在 URL 未配置时会静默不发送。虽然脚本本身可以在 Token 为空时发出无鉴权请求，但本插件 Endpoint 强制要求 Bearer Token，因此必须使用创建 Endpoint 时单独返回的 Token，并与 URL 分开保存。
+Hook 在 URL 未配置时会静默不发送。虽然客户端本身可以在 Token 为空时发出无鉴权请求，但本插件 Endpoint 强制要求 Bearer Token，因此必须使用创建 Endpoint 时单独返回的 Token，并与 URL 分开保存。
 
 ### 重启并验证自动发现
 
@@ -89,7 +89,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 omp -p '/extensions'
 ```
 
-检查输出的已加载扩展路径是否包含所安装的 `onebot.ts`。加载失败时检查 `~/.omp/logs/` 中的 OMP 日志，并确认文件位于直接子目录、权限可读、模块具有默认工厂导出。
+检查输出的已加载扩展路径是否包含所安装的 `webhook-notifier.ts`。加载失败时检查 `~/.omp/logs/` 中的 OMP 日志，并确认文件位于直接子目录、权限可读、模块具有默认工厂导出。
 
 不同 OMP 版本若没有自动加载，可先升级 OMP，再使用显式注册或 `--hook` 进行诊断。
 
@@ -100,7 +100,7 @@ omp -p '/extensions'
 ```json
 {
   "extensions": [
-    "/absolute/path/to/onebot.ts"
+    "/absolute/path/to/webhook-notifier.ts"
   ]
 }
 ```
@@ -108,22 +108,22 @@ omp -p '/extensions'
 也可以一次性启动并加载 Hook，用于区分自动发现与脚本本身的问题：
 
 ```bash
-omp --hook /path/to/onebot.ts
+omp --hook /path/to/webhook-notifier.ts
 ```
 
 显式注册和 `--hook` 是兼容或诊断手段；正常部署优先使用用户级或项目级自动发现目录。
 
 ### 触发并分层验证
 
-1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟社区-hook)确认插件、OMP Endpoint、Token 和 AstrBot 投递链路；README 默认快速开始使用 Markdown，不能直接用于 OMP Endpoint。
+1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟-omp-hook)确认插件、OMP Endpoint、Token 和 AstrBot 投递链路；README 默认快速开始使用 Markdown，不能直接用于 OMP Endpoint。
 2. 启动已加载 Hook 的 OMP，完成一次真实的主代理对话，并让主代理正常完成一轮响应；这会触发 `session_stop`。任务或子代理会话不会触发该事件。
 3. 若没有请求，先用 `omp -p '/extensions'` 确认加载路径，再确认 URL 环境变量确实进入 OMP 进程。URL 未配置时脚本会静默跳过。
-4. 若发送失败，社区脚本会通过 `pi.logger.warn("Failed to send OMP session webhook", ...)` 记录警告；在 `~/.omp/logs/` 检查脱敏后的错误类型、网络和 timeout。
+4. 网络请求失败时，Hook 会通过 `pi.logger.warn("Failed to send OMP session webhook", ...)` 记录警告；当前基线不检查 HTTP 状态码或响应正文，HTTP 4xx/5xx 不会触发该警告。排障需结合接收端日志或 curl 返回值。
 5. 再检查反向代理访问日志、AstrBot 脱敏日志和 Bot 目标是否送达，不要公开完整 URL、Endpoint Path、Token 或 payload。
 
 ### 更新策略
 
-记录脚本取得日期和实际采用的上游 commit，不要让生产环境自动追踪可变的 `main`。更新前后检查本地文件与目标上游版本的 diff，重点复核新增外发字段、环境变量、日志内容和网络行为；更新后重新执行扩展加载检查、curl 模拟和真实主代理轮次验证。
+生产部署固定插件仓库 commit 或发布版本；开发环境可选择下方自动同步器，不能将它当作稳定版本发布。更新前后复核新增外发字段、环境变量、日志内容和网络行为。本次入库保持本地工作版本行为，未进行真实 OMP 加载或线上投递验收。
 
 ---
 
@@ -132,9 +132,9 @@ omp --hook /path/to/onebot.ts
 1. 在已认证的 AstrBot Plugin Page 获取 Base URL。
 2. 在与 Bot 的聊天中创建或查看 Endpoint，取得 Endpoint Path；Token 仅在创建、轮换或确认成功时独立交付。
 3. 在受控环境中组合 Base URL 与 Endpoint Path，避免在聊天、Issue、截图或 shell history 中公开完整 URL。
-4. 将完整 URL 配置到上游 Hook 的 URL 环境变量，将 Token 配置到独立 Token 环境变量。
-5. 如需调整请求超时，设置毫秒值；未设置时上游默认约为 5 秒。
-6. 按 OMP 和 `omp-config` 的部署方式加载 Hook，再触发验证。
+4. 将完整 URL 配置到 Hook 的 URL 环境变量，将 Token 配置到独立 Token 环境变量。
+5. 如需调整请求超时，设置毫秒值；未设置时默认 5 秒。
+6. 按本文安装并加载 Hook，再触发验证。
 
 安全占位示例：
 
@@ -156,13 +156,13 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 | `OMP_SESSION_WEBHOOK_TOKEN` | `ONEBOT_WEBHOOK_TOKEN` | 创建 Endpoint 时单独返回的 Bearer Token；本插件鉴权必需 |
 | `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | HTTP 请求超时，单位为毫秒；默认约 5 秒 |
 
-优先使用 `OMP_SESSION_*` 主变量。fallback 用于兼容上游既有配置，不应同时配置相互冲突的值。
+优先使用 `OMP_SESSION_*` 主变量。`ONEBOT_*` fallback 保留既有本地配置兼容性，不应同时配置相互冲突的值。URL、Token 使用首个去除首尾空白后的非空值；timeout 使用首个有效正数，否则回退 5000 毫秒。
 
 ---
 
 ## 生命周期与 HTTP 契约
 
-社区 Hook 订阅 OMP 原生 `session_stop` 生命周期事件，并执行一次 HTTP POST：
+Hook 在 `before_agent_start` 保存回合起点，在 OMP 原生 `session_stop` 事件中生成 payload，随后异步执行一次 HTTP POST：
 
 - 方法：`POST`
 - Body：JSON
@@ -170,9 +170,10 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 - 事件 Header：`X-OMP-Event: session_stop`
 - 鉴权 Header：配置 Token 时发送 `Authorization: Bearer <TOKEN>`
 - 超时：默认约 5 秒，可通过环境变量调整
-- 失败策略：记录 warn，不重试，不阻断 OMP 的会话结束流程
+- 失败策略：网络异常记录 warn，不重试；不等待 HTTP 结果完成 OMP 事件回调
+- 响应限制：沿用本地基线，不检查 HTTP 状态或响应正文，不能把“没有 warn”当作投递成功
 
-`onebot.ts` 是上游文件名，不表示本插件要求客户端直接调用 OneBot 协议。客户端只需向本插件 HTTP Endpoint 发送符合契约的 JSON；后续 AstrBot 消息投递由插件处理。
+客户端只向本插件 HTTP Endpoint 发送符合契约的 JSON；后续 AstrBot 消息投递由插件处理。
 
 ### 服务端兼容字段
 
@@ -181,7 +182,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 | 顶层 | `event`、`version`、`emittedAt` | 识别 `omp.session_stop` version 1 和事件时间 |
 | `session` | `id`、`file`、`cwd`、`name`、`model` | 生成事件 ID、上下文与模型展示 |
 | `round` | `turnId`、`startedAt`、`endedAt`、`durationMs` | 轮次标识与耗时 |
-| `round` | `prompt`、`promptLength`、`imageCount` | 输入规模；prompt 由上游截断至约 2000 字符 |
+| `round` | `prompt`、`promptLength`、`imageCount` | prompt 超过 2000 个 UTF-16 代码单元时截取前 2000 个并追加省略号，`promptLength` 保留原始长度 |
 | `round` | entry/message 的 before、after、delta 计数 | 轮次变化统计 |
 | `round.lastAssistant` | provider、model、stopReason、timestamp、durationMs 等 | 最后 assistant 状态和模型回退 |
 | `metadata` | `version`、`eventName` | 兼容诊断与 raw 保留 |
@@ -194,7 +195,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 
 ## 数据与隐私
 
-社区 Hook 可能外发：
+Hook 可能外发：
 
 - session id、名称、模型；
 - session file 和工作目录 `cwd`；
@@ -205,20 +206,26 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 
 其中 prompt、`cwd`、session file 可能包含业务内容、用户输入、仓库结构、用户名或本地路径。即使默认聊天通知不展示完整 prompt 或 session file，原始 HTTP payload 仍可能携带这些字段，使用方必须在启用前评估数据最小化、跨网络传输、日志留存和接收目标权限。
 
-根据当前上游实现，失败日志可能记录目标 URL，但不应记录 Token 或完整 payload。仍应避免把敏感信息放入 URL，并检查组织的日志采集与访问控制。
+基线代码的网络失败日志包含目标 URL 和错误文本，未做脱敏；URL 中的路径及查询参数也可能敏感。不得将 Token 拼入 URL，公开日志前须脱敏，并限制日志采集与访问权限。本次迁入不改变该既有行为。
 
 ---
 
 ## 验证步骤
 
-1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟社区-hook)模拟 version 1 请求，确认 URL、Token、OMP Endpoint 和服务端投递链路。
+1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟-omp-hook)模拟 version 1 请求，确认 URL、Token、OMP Endpoint 和服务端投递链路。
 2. 再完成一次真实主代理响应以触发 `session_stop`；任务或子代理会话不触发该事件。
-3. 检查 HTTP JSON 结果：
+3. 通过 curl 返回值或接收端记录检查 HTTP JSON 结果；当前 Hook 不展示这些结果：
    - `message=ok`：至少一个目标成功投递。
    - `message=skipped`：请求已处理，但目标被安全策略跳过；常见于私聊通知默认关闭，不应重试。
    - `message=partial_delivery`：部分目标成功，部分目标被跳过或失败；查看逐目标结果和 `retryable`。
    - 非 2xx 或鉴权错误：先检查 URL、Token 和 Endpoint 状态。
 4. 同时检查 `omp -p '/extensions'`、`~/.omp/logs/` 中的 warn 与 AstrBot 侧脱敏日志，但不要公开完整 URL、Token 或 payload。
+
+### 客户端基线验证记录
+
+2026-10-22 本地验证通过：OMP 与 OpenCode 的 Bun 测试合计 293 项，Python 全仓 1226 项，Ruff 检查通过。除新增维护说明注释外，仓库 Hook 代码与既有本地 `onebot.ts` 一致。
+
+实际构建验证 ZIP，确认包含 OMP 运行文件、排除 Bun 测试与同步器；从 ZIP 提取 Hook 后，由受控事件驱动它发送真实的回环 HTTP 请求，再调用现有 OMP 事件识别和标准化函数，验证了 Header、会话／轮次标识、耗时、模型及计数差值。该验证未启动 OMP 原生加载器，也未连接线上 AstrBot 或执行 Bot 消息投递，不替代这些运行链路的验收。
 
 ---
 
@@ -238,26 +245,25 @@ Token 必须放在独立环境变量中。轮换后旧 Token 立即失效；不�
 
 ### 网络或 timeout
 
-确认 OMP 运行环境可访问插件 Endpoint、TLS 证书有效、反向代理允许 POST，并根据受控网络延迟调整 `OMP_SESSION_WEBHOOK_TIMEOUT_MS`。上游失败不重试，临时网络故障可能导致单次通知丢失。
+确认 OMP 运行环境可访问插件 Endpoint、TLS 证书有效、反向代理允许 POST，并根据受控网络延迟调整 `OMP_SESSION_WEBHOOK_TIMEOUT_MS`。Hook 失败不重试，临时网络故障可能导致单次通知丢失。
 
 ### payload 变更
 
 确认 `event=omp.session_stop`、`version=1`，并检查 Header 与 Body 是否一致。字段缺失通常可兼容，事件名、版本或结构变化可能需要插件升级。
 
-### 上游升级
+### Hook 或 OMP 升级
 
-`main` 分支文件可随时变化。升级 `omp-config` 或 OMP 后，重新核对环境变量、Hook 加载目录、payload、日志行为和许可状态，并执行 curl 与真实会话双重验证。
+升级本仓库 Hook 或 OMP 后，重新核对环境变量、Hook 加载目录、payload 和日志行为。文件同步成功不证明 OMP 生命周期兼容，也不证明 AstrBot 已投递。
 
 ---
 
 ## 兼容性与责任边界
 
 - OMP 原生负责 extension/Hook 加载和 `session_stop` 生命周期事件。
-- `ParticleG/omp-config` 独立负责 HTTP POST 社区 Hook、环境变量和 version 1 payload。
-- Webhook Notifier 负责接收、鉴权、兼容解析、标准化、渲染和 AstrBot 投递。
-- 外部项目独立维护，本插件不分发其代码，也不保证未来上游变化继续兼容。
-- 上游 `main` 链接不是固定发布物；生产环境应记录实际采用的上游 commit，并在升级前复验。
-- 外部仓库未见明确 License。部署或再分发前，使用方应自行确认上游许可；本指南不构成许可意见。
+- 本仓库 `integrations/omp/webhook-notifier.ts` 负责 HTTP POST、环境变量和 version 1 payload。
+- Webhook Notifier 服务端负责接收、鉴权、兼容解析、标准化、渲染和 AstrBot 投递。
+- 初始维护版本来自本地 `onebot.ts`，没有借迁入修改协议、增加重试或实现 OpenCode 客户端的其他能力。
+- OMP 原生 API 后续变化仍需独立验证；历史社区源码链接用于来源追溯，不是自动更新源。
 
 ---
 
@@ -270,14 +276,14 @@ Token 必须放在独立环境变量中。轮换后旧 Token 立即失效；不�
 - 使用主硬盘上的 Python 3.10 或更新版本，不通过外置仓库的 `.venv` 启动安装命令；解释器的真实路径位于 `/Volumes/` 时安装会拒绝。
 - 源文件必须存在、非空且不超过 4 MiB，目标父目录必须存在；源、目标及其路径组件不能是符号链接，两端不能是同一个文件。
 - 首次安装时，目标应不存在或与源内容相同。已有不同内容返回 `initial_target_conflict`，不覆盖；先人工核对并将旧文件备份到自动发现目录之外。
-- `integrations/omp/webhook-notifier.ts` 尚未纳入仓库，默认真实同步尚未启用。必须先完成自维护 Hook，再绑定该路径；不要为启动同步器创建空 Hook。
+- 维护源为 `integrations/omp/webhook-notifier.ts`；源文件存在不等于已经部署或启用同步，首次接管需完成下面的安装、同步和启动步骤。
 - 从旧 `onebot.ts` 切换到新文件名时，应另行备份并移走旧加载入口，避免两份 Hook 同时自动加载。同步器不会替调用方处理旧入口。
 
-在插件仓库根目录执行，以下源路径必须替换为实际维护的文件：
+在插件仓库根目录执行：
 
 ```bash
 python3 scripts/sync_omp_hook.py install \
-  --source '/绝对路径/已维护的/webhook-notifier.ts' \
+  --source "$PWD/integrations/omp/webhook-notifier.ts" \
   --target "$HOME/.omp/agent/hooks/post/webhook-notifier.ts"
 python3 scripts/sync_omp_hook.py sync
 python3 scripts/sync_omp_hook.py start
@@ -331,7 +337,9 @@ python3 "$SYNC" uninstall
 
 2026-10-22 已完成 26 项同步器回归、全仓 1226 项 Python 测试及 Ruff 检查。真实 macOS 用户级 LaunchAgent 使用外置盘临时源和主硬盘临时目标，验证了自动同步、原子保存、重复进程拒绝、崩溃重启、冲突跨重启保留、备份覆盖、源消失恢复、停止、单次同步和卸载保留数据。临时服务、plist 与实例文件已清理，原 `onebot.ts` 内容未改变。
 
-尚未接管真实 Hook，未验证 OMP 加载新客户端、登录重启恢复或实际拔插磁盘。源消失恢复采用临时路径操作模拟，不等同于物理磁盘拔插验收。
+2026-10-22 已完成本机真实入口切换：旧 `onebot.ts` 移至默认实例的 `backups/onebot-before-cutover-20261022.ts.bak`，SHA-256 与切换前一致；新入口为 `~/.omp/agent/hooks/post/webhook-notifier.ts`，是权限 `0600` 的普通文件，与外置盘维护源内容一致。默认 LaunchAgent 已启动，检查时进程运行且状态为 `in_sync`、无冲突；OMP 配置仓库的忽略规则已放行新文件。
+
+该验收只覆盖部署文件、备份及同步服务，不证明当前 OMP Session 已重新加载 Hook。OMP 原生加载、线上投递、登录重启恢复和物理磁盘拔插未执行；此前源消失恢复使用临时路径操作模拟。
 
 ---
 
@@ -340,7 +348,7 @@ python3 "$SYNC" uninstall
 - [端到端部署教程](end-to-end-setup.md)
 - [项目 README](../README.md)
 - [安全与运维指南](security-and-operations.md)
-- [`ParticleG/omp-config` 上游源码](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)
+- [仓库维护的 OMP Hook](../integrations/omp/webhook-notifier.ts)
 - [OMP Hooks 文档](https://omp.sh/docs/hooks)
 - [OMP 官方 Extension Loading 文档](https://github.com/can1357/oh-my-pi/blob/main/docs/extension-loading.md)
 - [OMP 官方 Hooks 文档](https://github.com/can1357/oh-my-pi/blob/main/docs/hooks.md)

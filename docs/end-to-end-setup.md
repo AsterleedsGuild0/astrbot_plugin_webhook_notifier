@@ -3,11 +3,11 @@
 ## 文档信息
 
 - 适用插件版本：v0.3.0 及后续保持兼容的版本
-- 验证日期：2026-07-20
+- 原部署链路验证日期：2026-07-20；本次客户端维护入口迁入未重跑线上验证
 - 目标读者：首次部署 Webhook Notifier，并希望把 oh-my-pi 会话结束通知发送到 AstrBot 私聊或普通 QQ 群的管理员
 - 反向代理说明：本文使用 Caddy 作为参考实现；Nginx、Traefik 或其他能够保留请求路径并提供 HTTPS 的反向代理均可替代
 
-本文从 AstrBot 服务器配置开始，依次完成 Endpoint 创建、HTTPS 反向代理、请求模拟、社区 Hook 配置和真实 `session_stop` 验收。示例只使用保留域名和占位符；真实 URL、Endpoint Path、Token、群标识及日志只能在受控环境中处理。
+本文从 AstrBot 服务器配置开始，依次完成 Endpoint 创建、HTTPS 反向代理、请求模拟、OMP Hook 配置和真实 `session_stop` 验收。示例只使用保留域名和占位符；真实 URL、Endpoint Path、Token、群标识及日志只能在受控环境中处理。
 
 ---
 
@@ -15,7 +15,7 @@
 
 ```mermaid
 flowchart LR
-    OMP[oh-my-pi 会话] --> Hook[omp-config onebot.ts 社区 Hook]
+    OMP[oh-my-pi 会话] --> Hook[webhook-notifier.ts OMP Hook]
     Hook --> Proxy[HTTPS 反向代理]
     Proxy --> HTTP[插件 aiohttp<br/>127.0.0.1:18080]
     HTTP --> Auth[Bearer 鉴权<br/>OMP 标准化]
@@ -28,7 +28,7 @@ flowchart LR
 职责边界如下：
 
 - oh-my-pi（OMP）提供 extension、Hook 加载机制和 `session_stop` 生命周期事件。
-- [`ParticleG/omp-config` 的 `agent/hooks/post/onebot.ts`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts) 是独立维护的社区 Hook，负责把事件转换为 HTTP POST；它不是 OMP 原生 Webhook。
+- 本仓库 [`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts) 负责把事件转换为 HTTP POST；它不是 OMP 原生 Webhook。
 - HTTPS 反向代理负责公网入口、TLS 和访问日志，不负责插件 Token 鉴权。
 - Webhook Notifier 负责 Endpoint 查找、Bearer 鉴权、OMP version 1 payload 标准化、渲染和 AstrBot 投递。
 - AstrBot adapter 负责把通知送往 Endpoint 已绑定的私聊或普通 QQ 群；外部 payload 不能指定任意目标。
@@ -61,9 +61,9 @@ Caddy 与 AstrBot 不同机时，插件不能继续只监听 loopback；应绑�
 - 公网入口允许 TCP `80`、`443`；插件端口 `18080` 不直接暴露公网。
 - 已安装 Caddy 或其他反向代理；Caddy 只是参考实现，不是必需依赖。
 - 已有可加载 extension/Hook 的 OMP 环境。
-- 已按上游方式取得并部署 `ParticleG/omp-config` 的社区 `onebot.ts` Hook。
+- 已取得本仓库 `integrations/omp/webhook-notifier.ts`，并确认旧 `onebot.ts` 入口的迁移安排，避免重复加载。
 
-这里的 HTTP POST 能力来自社区 Hook，不是 OMP 原生 Webhook。不要把上游 Hook 源码复制到本项目文档或插件中；生产环境应记录实际使用的上游 commit，并自行确认许可和兼容性。
+该维护入口尚未发布，已发布的 v2.0.0 ZIP 不含此文件。生产部署应记录实际使用的插件仓库 commit 或后续发布版本；HTTP POST 由客户端实现，不是 OMP 原生 Webhook。
 
 ---
 
@@ -178,7 +178,7 @@ Token:        <独立保存，不放入 URL>
 
 确认插件已启用、HTTP 服务正在运行、监听地址与端口符合部署设计，并且至少存在一个可投递 Endpoint。HTTP 服务会在存在可投递 Endpoint 后启动；只有 pending 或尚未领取 Token 的记录时，不能完成正常鉴权投递。
 
-### 2. 使用 curl 模拟社区 Hook
+### 2. 使用 curl 模拟 OMP Hook
 
 按[项目 README](../README.md)设置 Base URL、Endpoint Path 和 Token，但使用**本教程显式创建的 OMP Endpoint**与下方 OMP JSON，不要直接发送 README 快速开始的 Markdown payload。先完成这一阶段，避免同时排查代理、Token、Hook 加载和 OMP 生命周期。
 
@@ -210,20 +210,20 @@ JSON
 
 若 `html_image` 渲染失败且 `fallback_to_text=true`，插件会尝试回退为文本；响应中的 `requested_render_mode`、`render_mode` 和 `fallback_reason` 可用于判断是否发生降级。
 
-### 3. 再部署真实社区 Hook
+### 3. 再部署真实 OMP Hook
 
 只有 curl 已经成功或得到预期的 `skipped` 后，才继续配置 OMP Hook。这样可以把后续问题限定在 Hook 加载、环境变量、网络和 timeout 范围内。
 
 ---
 
-## 配置 OMP 社区 Hook
+## 配置 OMP Hook
 
-完整命令、显式注册、日志位置和排障步骤见[OMP 客户端社区 Hook 集成指南](client-integration.md)。本阶段只按以下顺序执行：
+完整命令、显式注册、日志位置和排障步骤见[OMP 客户端 Hook 集成指南](client-integration.md)。本阶段只按以下顺序执行：
 
-1. 从 [`ParticleG/omp-config` 上游 `onebot.ts`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)取得脚本前确认有权使用；本仓库不分发脚本，且不提供 raw 下载步骤。
+1. 从本仓库取得 `integrations/omp/webhook-notifier.ts`；已有 `onebot.ts` 时，先备份到 OMP 自动发现目录之外再切换，不能保留两个生效入口。
 2. 二选一放入用户级 `~/.omp/agent/hooks/post/` 或项目级 `.omp/hooks/post/` 自动发现目录，不要同时部署多份。OMP 自带 TypeScript 运行能力，无需安装依赖或手动编译。
 3. 在启动 OMP 的进程环境中设置完整 Endpoint URL、创建 Endpoint 时单独返回的 Token 和可选 timeout；不要假设 OMP 自动加载 `.env`。
-4. 重启 OMP，并执行 `omp -p '/extensions'` 确认扩展路径中包含 `onebot.ts`。若未加载，按客户端指南检查日志、升级 OMP 或使用显式注册、`--hook` 诊断。
+4. 重启 OMP，并执行 `omp -p '/extensions'` 确认扩展路径中包含 `webhook-notifier.ts`。若未加载，按客户端指南检查日志、升级 OMP 或使用显式注册、`--hook` 诊断。
 5. 完成一次真实主代理响应以触发 `session_stop`，再按 OMP、反向代理、AstrBot 和 Bot 的顺序检查。任务或子代理会话不会触发该事件。
 
 该 Hook 可能外发 prompt、`cwd`、session file、会话与轮次标识、模型和统计信息。启用前必须评估数据最小化、跨网络传输、接收目标权限以及 OMP、Caddy 和 AstrBot 各层日志留存。
@@ -253,8 +253,8 @@ JSON
 | 鉴权失败 | `Authorization: Bearer`、Token 是否被轮换、Endpoint 状态 | 从独立变量发送 Token；无法确认旧 Token 时在私聊执行 rotate |
 | HTTP 200 `skipped` | 目标是否为私聊、`enable_private_notifications` | 这是默认安全策略，不重试；评估平台风险后再决定是否开启 |
 | HTML 图片失败但收到文本 | `render_mode`、`fallback_to_text`、AstrBot T2I/`html_render` | 根据 `fallback_reason` 修复渲染；可先保留文本降级保证通知链路 |
-| curl 成功但真实 Hook 没请求 | Hook 文件是否进入 OMP 可发现目录、环境变量是否传入实际进程、`session_stop` 是否触发 | 按上游部署方式重新加载 Hook，并检查 OMP warn |
-| Hook 报 timeout | Caddy/AstrBot 响应时间、网络延迟、渲染耗时、超时值 | 先用文本模式验证；按受控网络情况调整毫秒值；注意上游不重试 |
+| curl 成功但真实 Hook 没请求 | Hook 文件是否进入 OMP 可发现目录、环境变量是否传入实际进程、`session_stop` 是否触发 | 按客户端指南重新加载 Hook，并检查 OMP warn；没有 warn 不等于投递成功，当前 Hook 不检查 HTTP 响应 |
+| Hook 报 timeout | Caddy/AstrBot 响应时间、网络延迟、渲染耗时、超时值 | 先用文本模式验证；按受控网络情况调整毫秒值；注意 Hook 不重试 |
 | 升级或迁移后 Endpoint 不可管理 | adapter 实例的 `platform_id` 是否变化 | 不手工改 Registry；按 [platform_id 离线 Rebind Runbook](platform-id-rebind-runbook.md)停服迁移 |
 
 ---
@@ -267,8 +267,8 @@ JSON
 - 为不同 Endpoint 使用独立 Token；怀疑泄露或交付状态不确定时立即 rotate，并同步更新 OMP 环境。
 - 将 Registry 与 `server_secret` 作为同一恢复单元备份；备份不得进入源码仓库、普通日志或公开工单。
 - 限制 Caddy 日志权限，对 Endpoint Path 等信息脱敏，并设置合理保留期。
-- 记录生产使用的 `omp-config` 上游 commit，不把可变的 `main` 分支链接当作固定发布物。
-- 插件、OMP、`omp-config`、反向代理或 adapter 升级后，重新执行状态检查、curl 模拟和真实会话验收。
+- 固定生产使用的本仓库 Hook commit 或发布版本，不把可变的 `main` 分支或开发同步副本当作固定发布物。
+- 插件、OMP、Hook、反向代理或 adapter 升级后，重新执行状态检查、curl 模拟和真实会话验收。
 - 遵守私聊与普通 QQ 群的平台主动消息规则；技术可发送不代表平台允许无限发送。
 
 更完整的 Token、Registry、日志和恢复规则见[安全与运维指南](security-and-operations.md)。
@@ -283,4 +283,4 @@ JSON
 - [平台投递策略](platform-delivery-policy.md)
 - [命令参考](command-reference.md)
 - [platform_id 离线 Rebind Runbook](platform-id-rebind-runbook.md)
-- [`ParticleG/omp-config` 上游 `onebot.ts`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)
+- [仓库维护的 OMP Hook](../integrations/omp/webhook-notifier.ts)

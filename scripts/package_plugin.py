@@ -34,6 +34,7 @@ PACKAGE_ROOT_FILES = [
     "LICENSE",
     "logo.png",
     "scripts/rebind_platform_id.py",
+    "integrations/omp/webhook-notifier.ts",
     "integrations/opencode/webhook-notifier.ts",
     "integrations/opencode/opencode.jsonc",
 ]

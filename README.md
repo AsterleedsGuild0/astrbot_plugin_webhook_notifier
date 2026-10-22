@@ -16,7 +16,7 @@
 
 ## 功能亮点
 
-- 兼容社区 onebot post hook 产生的 `omp.session_stop` payload，展示会话、工作目录、模型、耗时与输入规模等常用信息。
+- 支持 OMP `omp.session_stop` V1 通知，展示会话、工作目录、模型、耗时与输入规模；客户端维护入口为 `integrations/omp/webhook-notifier.ts`。
 - `v1.2.0` 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
 - 支持通用 `markdown.message`：复用 Endpoint Bearer、目标别名白名单、幂等、文本/HTML 图片与自动降级链路，不新增公开路由。
 - root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。顶部提供覆盖统计（总任务时长、子任务覆盖时长与覆盖率），不完整数据标为“已观测”。
@@ -34,7 +34,7 @@
 
 ```mermaid
 flowchart LR
-    A["Markdown 调用方 / OMP 社区 Hook / OpenCode V1 Plugin"] --> C["直连或 HTTPS 反向代理<br/>Caddy 等方案（非强依赖）"]
+    A["Markdown 调用方 / OMP Hook / OpenCode V1 Plugin"] --> C["直连或 HTTPS 反向代理<br/>Caddy 等方案（非强依赖）"]
     C --> D["Webhook Notifier<br/>HTTP Server"] --> E["Token 鉴权<br/>Endpoint Provider 标准化"]
     E --> F["文本或 HTML 卡片"] --> G["AstrBot adapter"] --> H["私聊或普通 QQ 群"]
 ```
@@ -44,10 +44,10 @@ flowchart LR
 3. 跨主机或公网接入时，按需部署 HTTPS 反向代理；Caddy 是推荐参考，也可使用其他方案。
 4. 按来源创建私聊或普通 QQ 群 Endpoint：通用信息默认 `markdown`，OMP 使用 `--provider omp`，OpenCode 使用 `--provider opencode`；分别保存 Base URL、Endpoint Path 与 Token。
 5. 使用与 Endpoint Provider 匹配的 `curl` 请求验证 URL、Token 鉴权和实际投递或跳过结果。
-6. 将 URL 与 Token 配置给 Markdown 调用方、OMP 社区 Hook 或 OpenCode V1 Plugin。
+6. 将 URL 与 Token 配置给 Markdown 调用方、OMP Hook 或 OpenCode V1 Plugin。
 7. 触发真实通知，确认目标私聊或普通 QQ 群收到文本或图片。
 
-**完整教程：** 通用默认请求见下方快速开始；OMP 专题见[端到端部署](docs/end-to-end-setup.md)与[社区 Hook 接入](docs/client-integration.md)，OpenCode 见[集成指南](docs/opencode-integration.md)。
+**完整教程：** 通用默认请求见下方快速开始；OMP 专题见[端到端部署](docs/end-to-end-setup.md)与[Hook 接入](docs/client-integration.md)，OpenCode 见[集成指南](docs/opencode-integration.md)。
 
 ---
 
@@ -124,9 +124,9 @@ JSON
 
 ### OMP 快速接入
 
-先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用上面默认创建的 Markdown Endpoint 发送 OMP payload。端到端部署见[专题教程](docs/end-to-end-setup.md)，[客户端接入文档](docs/client-integration.md)包含 `onebot.ts` 的 OMP 用户级/项目级目录、进程环境变量、加载验证和 `session_stop` 触发方法。OMP 原生仅提供 extension / hook 加载与生命周期事件；HTTP POST、环境变量与 version 1 payload 由社区 onebot post hook 实现，并非 OMP 内建 Webhook。部署后配置完整 URL 变量 `OMP_SESSION_WEBHOOK_URL` 和 Token 变量 `OMP_SESSION_WEBHOOK_TOKEN`。
+先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用默认创建的 Markdown Endpoint 发送 OMP payload。将本仓库 [`integrations/omp/webhook-notifier.ts`](integrations/omp/webhook-notifier.ts) 部署到 OMP Hook 目录，配置 `OMP_SESSION_WEBHOOK_URL` 和 `OMP_SESSION_WEBHOOK_TOKEN`。用户级／项目级安装、旧入口迁移和 macOS 开发自动同步见[客户端接入文档](docs/client-integration.md)；服务端部署见[专题教程](docs/end-to-end-setup.md)。
 
-`ParticleG/omp-config` 是独立维护的社区仓库，当前未明确 LICENSE；本项目仅链接上游源文件，不复制或分发其代码，也不代表该 hook 由本项目或 OMP 官方维护。
+该客户端基于既有本地 `onebot.ts` 建立维护基线，保持 V1 协议和 `ONEBOT_*` 环境变量回退；不再要求部署时获取外部社区脚本。**此维护入口尚未发布，已发布的 v2.0.0 ZIP 不含该文件。** OMP 原生只提供扩展加载和生命周期事件，HTTP POST 仍由 Hook 实现。
 
 ### OpenCode 快速接入
 
@@ -229,7 +229,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 - 公网接收 Webhook 时使用 HTTPS，并优先让 HTTP 服务监听本地地址、由反向代理转发。
 - Token 只放在 `Authorization` Header 的 `Bearer <token>` 中；泄露后立即执行 `token rotate`。
 - 私聊主动通知默认关闭；开启前核对 QQ 官方规则或 OneBot 实现的风控边界。
-- 社区 hook 可能发送截断 prompt、cwd、session 文件、模型和消息计数等元数据；部署前评估数据外发边界，提交 Issue、日志或截图时一并脱敏。
+- OMP Hook 可能发送截断 prompt、cwd、session 文件、模型和消息计数等元数据；网络失败日志还包含目标 URL。部署前评估数据外发边界，提交 Issue、日志或截图时一并脱敏。
 - OpenCode 通知默认只发送 action 类别/计数；`full` 内容模式是显式 opt-in，虽有字段白名单和大小上限，仍可能外发问题、权限描述或目标路径。
 - Subagent timeline 只在 root `session_idle` 中可选发送，时间是相对 root busy→idle cycle 的观测偏移；卡片不展示匿名图引用、原始 Session ID、路径或工具参数，部分数据不会伪装成精确耗时。
 - `actionContentMode` 只控制 OpenCode Question/Permission 内容隐私，与服务端 `notification_mode` 正交；`focused` 只抑制成功完成的 subagent/auxiliary，unknown 会 fail-open 放行。
@@ -263,7 +263,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 
 ### 这是 OMP 原生 Webhook 吗？
 
-不是。OMP 提供 hook 机制和 `session_stop` 事件，HTTP 请求与 version 1 payload 来自独立维护的社区 onebot post hook；本插件兼容其请求格式。
+不是。OMP 提供 Hook 机制和 `session_stop` 事件，HTTP 请求与 version 1 payload 由本仓库维护的 `integrations/omp/webhook-notifier.ts` 实现；服务端继续兼容既有 V1 请求格式。
 
 ### OpenCode provider 如何启用？
 

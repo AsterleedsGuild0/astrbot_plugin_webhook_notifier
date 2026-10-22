@@ -4,7 +4,11 @@
 
 - 新增 macOS 开发工具 `scripts/sync_omp_hook.py`：单文件、跨盘单向同步；提供安装、启停、状态、单次同步、显式备份覆盖及卸载命令，由用户级 LaunchAgent 管理主硬盘运行副本。不操作 Git、不执行 Hook、不进入 AstrBot 插件 ZIP。
 - 源缺失或为空时保留部署副本；两次稳定观察后原子替换目标，目标独立修改／删除时持久化暂停，进程重启不清除冲突。显式覆盖前保留备份，卸载保留目标、配置、状态与备份。
-- 验证：同步器 26 项回归、全仓 Python 1226 项与 Ruff 通过；真实 macOS LaunchAgent 跨文件系统验收 13 项通过，临时实例已清理。当前未接管真实 OMP Hook，未验证 OMP 热加载、登录重启或物理磁盘拔插。
+- 同步器初次验收：26 项回归、全仓 Python 1226 项与 Ruff 通过；真实 macOS LaunchAgent 跨文件系统验收 13 项通过，临时实例已清理。该阶段未接管真实 OMP Hook，未验证 OMP 热加载、登录重启或物理磁盘拔插。
+- 新增仓库维护的 `integrations/omp/webhook-notifier.ts`，以现用本地 `onebot.ts` 为基线，保留 `omp.session_stop` V1、`OMP_SESSION_*`／`ONEBOT_*` 配置和既有发送行为；不自动替换本机 Hook 或启用同步。
+- OMP 客户端运行文件纳入后续插件 ZIP，Bun 测试不进入发布包；接入文档改用仓库维护入口，补充旧入口迁移、重复加载风险及既有隐私／HTTP 响应处理限制。
+- OMP 维护基线验证：Bun 两客户端合计 293 项、Python 全仓 1226 项与 Ruff 通过；验证 ZIP 提取的 Hook 已完成本地真实 HTTP 发送及现有 OMP 解析／标准化 smoke。除维护注释外与本机原 Hook 一致；未执行 OMP 原生加载、线上 AstrBot 投递、登录重启或物理拔插验证。
+- 本机部署切换：旧 `onebot.ts` 移出自动加载目录并保留校验一致的备份，新 `webhook-notifier.ts` 作为普通文件由默认 LaunchAgent 单向同步；实际检查进程运行、内容一致、状态 `in_sync` 且无冲突。此结果不代表现有 OMP Session 已热加载，也未新增线上投递验收。
 
 ---
 

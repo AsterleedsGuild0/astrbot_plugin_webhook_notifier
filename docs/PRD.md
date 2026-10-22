@@ -15,6 +15,8 @@
 - 目标平台：AstrBot `aiocqhttp` 与 `qq_official`；OneBot 验证环境使用 NapCat，QQ 官方普通群真实主动 Webhook / OMP 图片卡片 smoke 已通过
 
 > 历史基线说明：本文保留 `v1.0.0` 的 OMP 专题与当时发布状态，不代表当前源码的 Provider 集合或默认值。自 `v2.0.0` 起默认 `markdown`，旧记录缺失 `provider` 也按 Markdown 读取；现行操作与迁移边界以[公共契约](public-contract.md)和[命令参考](command-reference.md)为准。下方 OMP 创建命令显式补充 Provider，以免复制时误用新默认。
+>
+> OMP 客户端现已在本仓库建立维护入口，安装与来源说明见[客户端指南](client-integration.md)。下文外部社区 Hook 的表述仅描述历史集成来源，不是当前部署依赖；V1 payload 契约保持不变。
 
 ---
 
