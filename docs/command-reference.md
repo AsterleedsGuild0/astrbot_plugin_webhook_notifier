@@ -57,7 +57,7 @@
 ```
 
 - 运行时支持集合以 `ProviderRegistry` 为权威；当前注册 `markdown`、`omp` 与 `opencode`，帮助中的选项由实际注册集合按名称排序生成。`markdown` 用于通用受限 Markdown 信息推送，仍复用 Endpoint Bearer、目标白名单、幂等和原有投递链路。
-- 当前待发布源码中，未提供 `--provider` 时默认 `markdown`。成功创建私聊 Endpoint 或两种平台的群待验证申请后，公开说明会提醒默认 `markdown`、`event=markdown.message`，以及 OMP/OpenCode 需显式 `--provider`；该提醒不进入独立 Token 消息，创建失败也不会提示成功。已发布 `v1.3.0` 的历史默认不代表此待发布行为，见[公共契约](public-contract.md)。
+- 自 `v2.0.0` 起，未提供 `--provider` 时默认 `markdown`。成功创建私聊 Endpoint 或两种平台的群待验证申请后，公开说明会提醒默认 `markdown`、`event=markdown.message`，以及 OMP/OpenCode 需显式 `--provider`；该提醒不进入独立 Token 消息，创建失败也不会提示成功。历史 `v1.3.0` 的默认行为不同，迁移边界见[公共契约](public-contract.md)。
 - 只要出现 `--provider`，就必须紧跟一个独立的非 flag 值；不支持的值、缺值、重复指定、`--provider=value` 或值以 `--` 开头都会明确拒绝，不会静默回退到默认值。
 - `--provider` 只用于 `token new`；rotate、revoke、delete、verify 和 confirm 不接受切换 provider 的参数。
 - provider 在 Endpoint 创建时写入记录并保持不可变；不能通过 rotate、直接编辑 Registry 或管理员选择器原位修改。

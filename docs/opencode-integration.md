@@ -43,9 +43,9 @@ OpenCode Desktop 测试依赖已经部署的新 AstrBot 服务端和一条真实
 <唤醒词>whn token new private <名称> --provider opencode
 ```
 
-群 Endpoint 也必须在创建时显式使用 `--provider opencode`，群验证流程仍遵循当前 adapter 的规则。当前待发布源码未指定 `--provider` 时默认 `markdown`，只接收 `markdown.message`，不能用于 OpenCode envelope；错误 flag 不会回退默认值。
+群 Endpoint 也必须在创建时显式使用 `--provider opencode`，群验证流程仍遵循当前 adapter 的规则。自 `v2.0.0` 起未指定 `--provider` 时默认 `markdown`，只接收 `markdown.message`，不能用于 OpenCode envelope；错误 flag 不会回退默认值。
 
-Provider 支持集合以运行时 `ProviderRegistry` 为权威，当前注册 `markdown`、`omp` 与 `opencode`。Provider 只在创建时选择并写入 Endpoint 公共记录，后续 `rotate`、`revoke`、`delete` 不会改变 Provider，也没有将已有 Endpoint 原位切换协议的命令。显式历史 Provider 保留；旧记录只有 `provider` key 缺失才按 `markdown` 读取，不按 payload 猜协议。需要切换时应新建正确 Provider 的 Endpoint 并更新调用方凭据，旧 Endpoint 按需撤销/删除。待发布默认切换与 `v1.3.0` 历史发布的边界见[公共契约](public-contract.md)。
+Provider 支持集合以运行时 `ProviderRegistry` 为权威，当前注册 `markdown`、`omp` 与 `opencode`。Provider 只在创建时选择并写入 Endpoint 公共记录，后续 `rotate`、`revoke`、`delete` 不会改变 Provider，也没有将已有 Endpoint 原位切换协议的命令。显式历史 Provider 保留；旧记录只有 `provider` key 缺失才按 `markdown` 读取，不按 payload 猜协议。需要切换时应新建正确 Provider 的 Endpoint 并更新调用方凭据，旧 Endpoint 按需撤销/删除。`v2.0.0` 默认切换与 `v1.3.0` 历史发布的边界见[公共契约](public-contract.md)。
 
 创建成功后分别保存：
 

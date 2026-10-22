@@ -145,7 +145,7 @@ Caddy 自动 TLS 需要真实、可解析且满足签发条件的 DNS 域名。`
 
 普通 QQ 群需要额外的群验证流程；`aiocqhttp` 与 `qq_official` 的命令和确认步骤不同，请严格按[命令参考](command-reference.md)执行。
 
-群创建命令也须追加 `--provider omp`。当前待发布源码未指定 flag 默认 `markdown`，成功创建会提醒使用 `event=markdown.message`，错误 flag 不回退默认值；不能将默认 Markdown Endpoint 用于本教程。旧记录缺少 `provider` key 也按 Markdown 读取，而显式历史 Provider 不变；依赖缺失字段的旧 OMP 调用应新建显式 OMP Endpoint 并更新 URL/Token，不自动覆盖或根据 payload 猜协议。待发布与历史发布边界见[公共契约](public-contract.md)。
+群创建命令也须追加 `--provider omp`。自 `v2.0.0` 起未指定 flag 默认 `markdown`，成功创建会提醒使用 `event=markdown.message`，错误 flag 不回退默认值；不能将默认 Markdown Endpoint 用于本教程。旧记录缺少 `provider` key 也按 Markdown 读取，而显式历史 Provider 不变；依赖缺失字段的旧 OMP 调用应新建显式 OMP Endpoint 并更新 URL/Token，不自动覆盖或根据 payload 猜协议。版本与迁移边界见[公共契约](public-contract.md)。
 
 成功后分别取得：
 

@@ -12,7 +12,7 @@
 - 产品名称：Webhook Notifier
 - 目标仓库：`AsterleedsGuild0/astrbot_plugin_webhook_notifier`
 
-> 历史基线说明：本文保留 `v1.0.0` 的 OMP 专题规格和当时发布状态，不代表当前源码的 Provider 集合或默认值。当前待发布源码默认 `markdown`，旧记录缺失 `provider` 也按 Markdown 读取；现行协议、命令与迁移边界以[公共契约](public-contract.md)和[命令参考](command-reference.md)为准。以下 OMP 基线中的创建命令显式补充 `--provider omp`，不批量改写历史 OMP payload 或展示语义。
+> 历史基线说明：本文保留 `v1.0.0` 的 OMP 专题规格和当时发布状态，不代表当前源码的 Provider 集合或默认值。自 `v2.0.0` 起默认 `markdown`，旧记录缺失 `provider` 也按 Markdown 读取；现行协议、命令与迁移边界以[公共契约](public-contract.md)和[命令参考](command-reference.md)为准。以下 OMP 基线中的创建命令显式补充 `--provider omp`，不批量改写历史 OMP payload 或展示语义。
 
 ---
 

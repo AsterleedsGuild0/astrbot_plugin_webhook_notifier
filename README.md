@@ -6,7 +6,7 @@
 
 本插件提供 `markdown`、`omp` 和 `opencode` 三种 Provider，复用 Endpoint 鉴权、目标白名单、渲染与投递链路。当前源码默认使用 `markdown`；OMP 和 OpenCode 接入须在创建 Endpoint 时显式指定 Provider。
 
-**版本状态：** 当前已发布稳定版为 `v1.3.0`，源码版本标记仍为 `v1.3.0`，但本文的默认 Provider 切换属于**待发布源码变化**，不代表已发布 ZIP 已包含、已部署或已验证这些变化。历史正式 tag、Release 与远端 ZIP 的证据，以及尚未验证的插件市场安装/更新和生产远端资产 smoke 边界，见[公共契约](docs/public-contract.md)和[发布流程](docs/release.md)。
+**版本与升级：** 本文对应 `v2.0.0`，默认 Provider 已从 OMP 改为 Markdown。显式 Provider 不变；缺少 `provider` 的旧 OMP Endpoint 需要新建 `--provider omp` Endpoint 并更新调用方 URL/Token，不能仅轮换 Token。升级前阅读[公共契约](docs/public-contract.md)与[发布流程](docs/release.md)。正式版本和资产以 GitHub Releases 为准，测试包验收不代表插件市场安装/更新已验证。
 
 <!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
 
@@ -55,13 +55,13 @@ flowchart LR
 
 ### 1. 安装插件
 
-> 已发布稳定版 `v1.3.0` 的 Release 与正式 ZIP 已可用；下文新的默认 Markdown 流程以包含待发布变化的源码为准，不应将历史 ZIP 当作新默认的验证对象。插件市场搜索、安装和更新仍未完成验证，文件安装与源码安装的实际可用性仍取决于 AstrBot 运行环境。
+> 以下默认 Markdown 流程适用于 `v2.0.0`，不适用于历史 `v1.3.0` ZIP。插件市场搜索、安装和更新仍未完成验证；测试包的线上验证范围与限制见[发布流程](docs/release.md)。
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（推荐） | 从 [`v1.3.0 Release`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v1.3.0) 下载 [`astrbot_plugin_webhook_notifier-v1.3.0.zip`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/download/v1.3.0/astrbot_plugin_webhook_notifier-v1.3.0.zip)，在 WebUI 选择“从文件安装” |
+| Release ZIP（推荐） | 从 [`v2.0.0 Release`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v2.0.0) 下载 [`astrbot_plugin_webhook_notifier-v2.0.0.zip`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/download/v2.0.0/astrbot_plugin_webhook_notifier-v2.0.0.zip)，在 WebUI 选择“从文件安装”；仅在 Release 与资产可用后安装 |
 | RC 验收包 | `v1.1.0-rc.1` 与带 `rc-smoke` 标识的本地测试包仅用于稳定版发布前验收，不作为后续常规安装入口 |
-| 资产核对 | `v1.3.0` tag、Release 与正式 ZIP 已核对；插件市场资产与安装/更新路径仍待验证；RC 资产仅用于候选版回溯 |
+| 资产核对 | 安装前核对 Release 版本、ZIP 校验和与单一插件根目录；插件市场安装/更新和生产正式资产验收需单独留证 |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
 | 源码安装 | 将仓库克隆到 `AstrBot/data/plugins`，见下方命令 |
 

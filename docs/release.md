@@ -1,21 +1,31 @@
 # 发布流程
 
-本项目通过 GitHub Actions 自动构建插件 ZIP，并发布到 GitHub Release。本轮正式发布目标为 `v1.3.0`，现已完成正式发布：tag `v1.3.0` 精确指向 `9dadf96608ef4018d724d27059389db48ba33e97`，GitHub Release 为非 draft、`prerelease=false` 且为 Latest，正式 ZIP 已上传。远端当前稳定资产状态以 GitHub Releases 页面为准；本文档的本地准备步骤不创建 tag、GitHub Release 或远端资产。
+本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.0.0`，默认 Provider 从 OMP 改为 Markdown，属于兼容性变更；本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
 
-本次发布后的公开文档收尾仅更新仓库中的文档，不重新构建、替换或修改已发布 tag/asset。已发布 ZIP 内的 `docs/release.md` 保留 tag 时点的构建文档；本次 docs-only commit 不应被表述为重新生成了正式资产。
+版本号与文档表示源码契约，远端发布完成状态以 [GitHub Releases](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) 及对应 Actions run 为准。已发布 tag/asset 不覆盖、不重写；线上部署另行验收。
 
-`v1.3.0` 发布与部署必须遵循兼容顺序：先升级并重载 AstrBot 服务端，再部署并完全重启 OpenCode Client。旧服务端的严格 allowlist 不接受新增的 `session.rootName`；若客户端同时发送 `userWaitTimeline`，服务端也必须已支持上一版本的该字段。
+## v2.0.0 升级与验收
+
+- 升级前备份插件配置与数据。显式 `omp`、`opencode`、`markdown` Endpoint 保持原协议。
+- 新建 Endpoint 省略 `--provider` 默认 `markdown`；旧记录仅在缺少 `provider` key 时也按 Markdown 读取。依赖旧默认的 OMP 调用必须新建 `--provider omp` Endpoint 并更新 URL/Token，轮换 Token 不切换协议，不手工修改 Registry。
+- Webhook payload 版本、Registry 格式版本不变；当前 OpenCode Client 不因本次默认值变更而要求更新。从更旧服务端升级时，仍需遵守历史 Client 字段的服务端兼容要求。
+- 以 #27 中记录的本地 1224 项测试、Ruff、HTTP smoke 和 Chromium 帮助卡片检查为实现验收基线；正式版本另外执行下列发布门禁。
+- 测试包 `v1.3.0-test.20261022.0936.provider-default` 基于 `8af7e2b`，已安装至线上 AstrBot。截图覆盖默认 Markdown 私聊创建、提醒、Token 独立交付和帮助图片。
+- 2026-10-22 一次真实 Markdown 请求返回 HTTP 200、`code=0`、`delivered=true`、`rendered=true`、`render_mode=html_image`、`fallback_reason=null`；临时 Endpoint 已撤销并删除。此证据只覆盖测试包，不替代正式 ZIP 安装验收。
+- 线上 OMP/OpenCode 真实通知、群创建、缺字段旧记录迁移和通知图片接收端视觉确认尚未验证；插件市场安装/更新也未验证，不将本地回归写成这些线上路径通过。
+
+正式发布顺序：同步版本与更新日志 → 本地门禁和 ZIP 检查 → 提交并推送准备提交 → Actions dry-run 成功 → 将 `v2.0.0` tag 指向该提交并推送 → 核对正式 workflow、Release 标志及远端 ZIP。dry-run 后若修改源码，必须验证新提交后再打 tag。
 
 ---
 
 ## 发布前检查
 
 1. 确认目标版本号一致：
-   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮稳定版为 `v1.3.0`。
-   - `pyproject.toml` 使用规范 PEP 440 版本；本轮稳定版为 `1.3.0`。
+   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.0.0`。
+   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.0.0`，`uv.lock` 根项目版本同步更新。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
-   - `CHANGELOG.md` 顶部存在对应版本小节；本轮应为 `## v1.3.0 - 2026-08-19`。
-   - 发布准备阶段的本地准备与 dry-run 不创建 `v1.3.0` tag，也不创建或更新远端 Release；本轮正式 Release 已由 tag push workflow 完成。
+   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.0.0 - 2026-10-22`，包含破坏性变更与迁移说明。
+   - 发布准备与 dry-run 不创建 `v2.0.0` tag；仅在门禁通过后推送 tag 触发正式 Release。
 2. 维护本地锁定验证依赖：
 
    - `uv.lock` 必须随 `pyproject.toml` 的依赖声明一起维护并纳入提交。
@@ -28,6 +38,12 @@
    uv sync --frozen --group dev
    uv run --frozen ruff check .
    uv run --frozen pytest
+   ```
+
+   同时执行 OpenCode Client 回归：
+
+   ```bash
+   bun test integrations/opencode/webhook-notifier.test.ts
    ```
 
 4. 构建并验证 Plugin Page：
@@ -145,17 +161,17 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-正式发布时 tag 必须指向已经通过完整验证、版本三源均为目标版本的提交。本轮不执行任何 tag、push 或远端 Release 操作。
+正式发布时 tag 必须指向已经通过完整验证、版本三源均为目标版本的提交；上述 `v1.0.0` 命令不是本轮目标。
 
 ---
 
 ## 手动触发
 
-如果需要在 CI 中演练完整工作流而不发布，在 GitHub Actions 页面手动运行 `Release` workflow，填写目标版本 tag。手动触发始终为 dry-run，不会创建 Release。Artifact 名称会包含目标 tag，例如 `plugin-release-v1.3.0`。下载后可直接用于本地安装测试。
+如果需要在 CI 中演练完整工作流而不发布，在 GitHub Actions 页面手动运行 `Release` workflow，填写目标版本 tag。手动触发始终为 dry-run，不会创建 Release。Artifact 名称会包含目标 tag，例如 `plugin-release-v2.0.0`。下载后可用于安装测试，不能据此宣称正式 Release 已发布。
 
 ---
 
-## v1.3.0 正式版发布门槛
+## 历史记录：v1.3.0 正式版发布
 
 ### 发布前门槛
 
@@ -187,10 +203,10 @@ git push origin v1.0.0
 
 ## 手动兜底发布
 
-如果 Actions 不可用，且已经获得明确的远端发布授权，可以使用 GitHub CLI 手动发布目标版本。以下仅为流程示意，本轮不执行：
+如果 Actions 不可用，且已经获得明确的远端发布授权，可以使用 GitHub CLI 手动发布目标版本。以下仅为流程示意；优先修复并使用现有 Actions 流程，不自动切换兜底：
 
 ```bash
-TARGET_TAG=v1.3.0
+TARGET_TAG=v2.0.0
 uv sync --frozen --group dev
 uv run --frozen ruff check .
 uv run --frozen pytest
@@ -204,4 +220,4 @@ gh release create "$TARGET_TAG" \
   --notes-file tmp/release-notes.md
 ```
 
-手动兜底同样只能在发布前门槛全部满足后执行；`v1.3.0` 稳定版应确认 `prerelease=false`、`make_latest=true`。当前尚未执行该命令。
+手动兜底同样必须满足发布前门槛；稳定版应确认 `prerelease=false`、`make_latest=true`。已存在的 tag 必须核对其提交，不自动覆盖历史 tag 或资产。
