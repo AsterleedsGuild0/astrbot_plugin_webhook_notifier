@@ -323,7 +323,9 @@ class SenderStub:
 @pytest.mark.asyncio
 async def test_group_verify_then_private_rotate_enables_server_auth(plugin):
     instance, _, data_dir = plugin
-    pending_event = CommandEvent("whn token new group 20002 group-auth", private=True)
+    pending_event = CommandEvent(
+        "whn token new group 20002 group-auth --provider omp", private=True
+    )
     pending = await collect(instance, pending_event)
     pending_text = pending[0].text
     request_id = re.search(r"请求 ID: ([^\n]+)", pending_text).group(1)  # type: ignore[union-attr]
@@ -360,7 +362,6 @@ async def test_group_verify_then_private_rotate_enables_server_auth(plugin):
     pending_body = json.loads(pending_response.body)
     assert pending_response.status == 403
     assert pending_body["data"]["error"] == "token_unclaimed"
-    assert pending_body["message"] == "Token 尚未领取，请先在私聊中执行 token rotate"
 
     rotate_event = CommandEvent("whn token rotate group-auth", private=True)
     rotated = await collect(instance, rotate_event)

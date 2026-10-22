@@ -60,6 +60,92 @@ def _write_legacy(path: Path, records: dict, pending: dict | None = None) -> byt
     return payload
 
 
+@pytest.fixture(params=["v1", "v2", "v1-quarantine", "v2-quarantine"])
+def provider_record_file(tmp_path, request):
+    seed = EndpointRegistry(tmp_path)
+    token = "whn_existing_provider_token"
+    legacy = _legacy_record(
+        path="legacy/unchanged",
+        token_hash=hash_token(seed.server_secret, token),
+        targets=[] if request.param.endswith("quarantine") else None,
+    )
+    _write_legacy(tmp_path, {"owner\x1flegacy": legacy})
+    if request.param.startswith("v2"):
+        EndpointRegistry(tmp_path)
+    path = tmp_path / REGISTRY_FILENAME
+    payload = json.loads(path.read_text())
+    section = (
+        "quarantine"
+        if request.param == "v2-quarantine"
+        else "records"
+    )
+    record = next(iter(payload[section].values()))
+    return path, payload, record, token
+
+
+@pytest.mark.parametrize("provider", ["missing", "omp", "opencode"])
+def test_loaded_provider_preserves_delivery_identity(provider_record_file, provider):
+    path, payload, original, token = provider_record_file
+    if provider == "missing":
+        original.pop("provider")
+    else:
+        original["provider"] = provider
+    path.write_text(json.dumps(payload))
+
+    registry = EndpointRegistry(path.parent)
+    auth = registry.authenticate_delivery(original["path"], f"Bearer {token}")
+
+    assert auth.authorized and auth.record is not None
+    record = auth.record
+    assert record.provider == ("markdown" if provider == "missing" else provider)
+    assert record.path == original["path"]
+    assert record.token_hash == original["token_hash"]
+    assert record.token_hash_algorithm == original["token_hash_algorithm"]
+    assert record.status == original["status"]
+    assert record.created_at == original["created_at"]
+    assert record.owner_user_id == original["owner_user_id"]
+    assert [target.umo for target in record.targets] == [
+        target["umo"] for target in original["targets"]
+    ]
+    assert not registry.authenticate_delivery(original["path"], "Bearer wrong").authorized
+
+    # A subsequent mutation persists the selected protocol without rotating credentials.
+    assert registry.revoke_endpoint_by_path(original["path"])[0]
+    reloaded = EndpointRegistry(path.parent)
+    assert reloaded.authenticate_delivery(
+        original["path"], f"Bearer {token}"
+    ).error_code == "endpoint_revoked"
+
+
+@pytest.mark.parametrize("provider", [None, ""])
+def test_explicit_invalid_provider_is_not_treated_as_missing(
+    provider_record_file, provider
+):
+    path, payload, record, _token = provider_record_file
+    record["provider"] = provider
+    path.write_text(json.dumps(payload))
+    original = path.read_bytes()
+
+    with pytest.raises(RegistryLoadError):
+        EndpointRegistry(path.parent)
+
+    assert path.read_bytes() == original
+
+
+def test_missing_provider_does_not_reactivate_revoked_record(provider_record_file):
+    path, payload, record, token = provider_record_file
+    record.pop("provider")
+    record["status"] = EndpointStatus.REVOKED.value
+    path.write_text(json.dumps(payload))
+
+    registry = EndpointRegistry(path.parent)
+
+    assert registry.authenticate_delivery(
+        record["path"], f"Bearer {token}"
+    ).error_code == "endpoint_revoked"
+    assert registry.count_deliverable() == 0
+
+
 def test_create_is_platform_scoped_and_path_is_generated_in_transaction(tmp_path):
     registry = EndpointRegistry(tmp_path)
     first, first_token = registry.create_private_endpoint(

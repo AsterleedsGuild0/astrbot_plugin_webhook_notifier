@@ -39,8 +39,8 @@ from .core.notification_policy import (
 )
 from .core.omp import OmpProviderAdapter
 from .core.opencode import OpenCodeProviderAdapter
-from .core.markdown import MarkdownProviderAdapter
-from .core.providers import ProviderRegistry
+from .core.markdown import MARKDOWN_EVENT, MarkdownProviderAdapter
+from .core.providers import DEFAULT_PROVIDER, ProviderRegistry
 from .core.registry import (
     BIND_CURRENT_GROUP,
     PREBOUND_GROUP,
@@ -178,7 +178,7 @@ class WebhookNotifierPlugin(Star):
         self._sender: Sender | None = None
         self._server: WebhookServer | None = None
         self._server_config: ServerConfig | None = None
-        # 默认 ProviderRegistry 包含 OMP adapter，确保构造后即可用（测试无需 initialize）
+        # 构造期注册并冻结全部内置 Provider，供命令校验和 HTTP 路由共用。
         self._provider_registry: ProviderRegistry | None = None
         self._init_default_provider_registry()
         self._register_template_web_apis()
@@ -203,7 +203,7 @@ class WebhookNotifierPlugin(Star):
         os.makedirs(data_dir, exist_ok=True)
         logger.info(f"[WebhookNotifier] 插件数据目录: {data_dir}")
 
-        # 验证 ProviderRegistry 已初始化（构造器已创建默认 OMP Registry 并冻结）
+        # ProviderRegistry 在构造期完成注册并冻结。
         if self._provider_registry is None:
             logger.error("[WebhookNotifier] ProviderRegistry 未初始化，重新初始化")
             self._init_default_provider_registry()
@@ -721,9 +721,13 @@ class WebhookNotifierPlugin(Star):
     ):
         """优先返回内置帮助图片，任何渲染异常都降级为纯文本。"""
         is_admin = self._event_is_super_admin(event)
+        provider_registry = self._ensure_provider_registry()
+        providers = (
+            provider_registry.providers if provider_registry is not None else frozenset()
+        )
         try:
             rendered_html = render_help_card_html(
-                is_admin, commands.short, commands.config_error
+                is_admin, commands.short, commands.config_error, providers=providers
             )
             image_result = await self.html_render(
                 "{{ rendered_html | safe }}",
@@ -742,7 +746,10 @@ class WebhookNotifierPlugin(Star):
         except Exception as exc:
             logger.warning(f"[WebhookNotifier] 帮助卡片渲染失败，回退纯文本: {exc}")
             return self._plain_text_result(
-                event, build_help_text(is_admin, commands.short, commands.config_error)
+                event,
+                build_help_text(
+                    is_admin, commands.short, commands.config_error, providers=providers
+                ),
             )
 
     @staticmethod
@@ -1160,12 +1167,18 @@ class WebhookNotifierPlugin(Star):
                 f"  {commands.short} token new group current [名称]  (qq_official)"
             )
 
-        # 解析可选的 --provider 参数，未指定时默认 omp
+        # 只在完全省略 flag 时使用默认 Provider；错误参数不得静默回落。
         provider, filtered_args, provider_error = self._extract_provider_flag(args)
         if provider_error:
             return f"❌ {provider_error}"
+        provider_notice = ""
         if provider is None:
-            provider = "omp"
+            provider = DEFAULT_PROVIDER
+            provider_notice = (
+                f"\n\nℹ️ 未指定 --provider，已使用默认 {DEFAULT_PROVIDER} Provider；"
+                f"请发送 event={MARKDOWN_EVENT} 的 Markdown 消息。"
+                "OMP/OpenCode 接入请显式指定 --provider omp 或 --provider opencode。"
+            )
 
         mode = filtered_args[0].lower() if filtered_args else ""
         name_param = (
@@ -1179,16 +1192,20 @@ class WebhookNotifierPlugin(Star):
 
         if mode == "private":
             return await self._create_private_endpoint(
-                event, name_param, provider=provider
+                event, name_param, provider=provider, provider_notice=provider_notice
             )
         elif mode == "group":
             return await self._create_group_pending(
-                event, filtered_args[1:], commands, provider=provider
+                event,
+                filtered_args[1:],
+                commands,
+                provider=provider,
+                provider_notice=provider_notice,
             )
         else:
             return (
                 f"未知类型: {mode}\n"
-                f"用法: {commands.short} token new private [名称] [--provider <omp|opencode|markdown>]；"
+                f"用法: {commands.short} token new private [名称] [--provider <provider>]；"
                 "群聊请按当前平台使用数字群号或 current"
             )
 
@@ -1199,7 +1216,7 @@ class WebhookNotifierPlugin(Star):
         """从命令参数中提取 ``--provider <value>``。
 
         缺值、重复、``--provider=value`` 和以 ``--`` 开头的值均明确拒绝，
-        不得与“未提供 flag”混淆后静默回落到 omp。
+        不得与“未提供 flag”混淆后静默使用默认 Provider。
 
         Returns:
             (provider_value, remaining_args, error_message)
@@ -1235,21 +1252,16 @@ class WebhookNotifierPlugin(Star):
         Returns:
             (is_valid, error_or_empty_message)
         """
-        if provider not in ("omp", "opencode", "markdown"):
-            return (
-                False,
-                f"❌ 不支持的 provider: {provider}。当前支持的 provider: omp, opencode, markdown",
-            )
-        # 查询 Registry 确认 adapter 是否已注册
+        # Registry 是可用 Provider 的唯一运行时来源。
         reg = self._ensure_provider_registry()
         if reg is None:
             return False, "❌ ProviderRegistry 未初始化，请检查日志。"
         if reg.get(provider) is None:
-            msg = (
-                f"❌ Provider adapter 尚未注册: {provider}。"
-                "该 provider 可能在后续版本中可用。"
+            supported = ", ".join(sorted(reg.providers)) or "无"
+            return (
+                False,
+                f"❌ 不支持的 provider: {provider}。当前支持的 provider: {supported}",
             )
-            return False, msg
         return True, ""
 
     def _ensure_provider_registry(self) -> ProviderRegistry | None:
@@ -1268,7 +1280,8 @@ class WebhookNotifierPlugin(Star):
         self,
         event: AstrMessageEvent,
         name_param: str,
-        provider: str = "omp",
+        provider: str = DEFAULT_PROVIDER,
+        provider_notice: str = "",
     ) -> list[str] | str:
         """创建私聊 endpoint。"""
         registry = self._ensure_registry()
@@ -1312,6 +1325,7 @@ class WebhookNotifierPlugin(Star):
             f"Provider: {record.provider}\n"
             f"Endpoint Path: {endpoint_path}\n"
             "Base URL：请在 Plugin Page 中复制"
+            f"{provider_notice}"
             f"{private_notification_notice}"
         )
         return [summary, _TokenDeliveryText(f"Bearer Token: {token}", endpoint_name)]
@@ -1321,7 +1335,8 @@ class WebhookNotifierPlugin(Star):
         event: AstrMessageEvent,
         args: list[str],
         commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
-        provider: str = "omp",
+        provider: str = DEFAULT_PROVIDER,
+        provider_notice: str = "",
     ) -> str:
         """创建群聊待验证 endpoint。"""
         registry = self._ensure_registry()
@@ -1399,6 +1414,7 @@ class WebhookNotifierPlugin(Star):
             f"{binding_notice}"
             f"  {commands.short} token verify {request_id} {code}\n\n"
             f"{completion_notice}"
+            f"{provider_notice}"
         )
 
     async def _handle_token_verify(

@@ -22,6 +22,7 @@ from .models import (
     EndpointStatus,
     TargetAlias,
 )
+from .providers import DEFAULT_PROVIDER
 from .security import (
     TOKEN_HASH_ALGORITHM,
     generate_request_id,
@@ -291,10 +292,15 @@ class EndpointRegistry:
             if not isinstance(target, dict):
                 raise RegistryLoadError("target 格式非法")
             targets.append(TargetAlias(name=target["name"], umo=target["umo"]))
+        if "provider" not in data:
+            logger.warning(
+                f"[WebhookNotifier] 旧 Endpoint 记录缺少 provider，按默认 {DEFAULT_PROVIDER} 读取；"
+                "请核对调用方的 Webhook 协议。"
+            )
         return EndpointRecord(
             name=data.get("name"),
             path=data.get("path"),
-            provider=data.get("provider", "omp"),
+            provider=data.get("provider", DEFAULT_PROVIDER),
             token_hash=data.get("token_hash", ""),
             token_hash_algorithm=data.get("token_hash_algorithm", TOKEN_HASH_ALGORITHM),
             owner_user_id=data.get("owner_user_id"),
@@ -659,7 +665,7 @@ class EndpointRegistry:
         name: str,
         target_umo: str,
         description: str | None = None,
-        provider: str = "omp",
+        provider: str = DEFAULT_PROVIDER,
     ) -> tuple[EndpointRecord, str]:
         token_plain = generate_token()
         token_hash_value = hash_token(self._server_secret, token_plain)
@@ -703,7 +709,7 @@ class EndpointRegistry:
         group_binding_mode: str,
         target_group_id: str | None,
         description: str | None = None,
-        provider: str = "omp",
+        provider: str = DEFAULT_PROVIDER,
     ) -> tuple[EndpointRecord, str, str]:
         request_id = generate_request_id()
         code = generate_verification_code()

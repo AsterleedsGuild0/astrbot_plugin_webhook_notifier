@@ -151,6 +151,9 @@ async def test_respond_stage_like_prepare_to_send_contains_summary_only(
     assert len(yielded) == 1
     assert "Endpoint Path" in yielded[0].text
     assert "Bearer Token" not in yielded[0].text
+    assert "markdown.message" in yielded[0].text
+    assert "--provider omp" in yielded[0].text
+    assert "--provider opencode" in yielded[0].text
     prepare_records = [
         record for record in caplog.records if "Prepare to send" in record.getMessage()
     ]
@@ -159,3 +162,8 @@ async def test_respond_stage_like_prepare_to_send_contains_summary_only(
     assert len(event.sent) == 1
     secret = event.sent[0].chain[0].text.removeprefix("Bearer Token: ")
     assert secret not in caplog.text
+    assert_direct_chain(event, f"Bearer Token: {secret}")
+    saved = EndpointRegistry(tmp_path)
+    record = saved.get_scoped("aiocqhttp", "owner", "respond-stage")
+    assert record is not None and record.provider == "markdown"
+    assert saved.authenticate_delivery(record.path, f"Bearer {secret}").authorized

@@ -21,6 +21,7 @@ from core.models import (
     TargetAlias,
 )
 from core.providers import ProviderError, ProviderRegistry
+from core.registry import EndpointRegistry
 from core.renderer import (
     render_html,
     render_html_data,
@@ -307,6 +308,32 @@ def test_custom_template_cannot_access_raw_markdown_with_safe() -> None:
     assert "&lt;img" in rendered
     assert "49" not in rendered
     assert "{{ 7 * 7 }}" in rendered
+
+
+@pytest.mark.asyncio
+async def test_default_endpoint_routes_markdown_after_real_reload(tmp_path) -> None:
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        "test", "owner", "default-protocol", "test:GroupMessage:1"
+    )
+    sender = _Sender()
+    server = WebhookServer(
+        ServerConfig(),
+        EndpointRegistry(tmp_path),
+        sender,
+        plugin_config={"render_mode": "text", "min_completion_duration_seconds": 0},
+        provider_registry=_provider_registry(),
+    )
+    request = _Request(_payload())
+    request.path = f"/webhook/{record.path}"
+    request.headers = {"Authorization": f"Bearer {token}"}
+
+    response = await server._process_request(cast(Any, request), "default-markdown")
+
+    assert response.status == 200
+    assert json.loads(response.body)["data"]["delivered"] is True
+    assert sender.texts and "CPA 自动更新" in sender.texts[0]
+    assert not sender.images
 
 
 @pytest.mark.asyncio

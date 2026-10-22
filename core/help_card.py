@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .providers import DEFAULT_PROVIDER
 from .renderer import render_html_template
 
 HELP_CARD_CANVAS_WIDTH = 900
@@ -44,15 +45,15 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
         "description": "创建操作从私聊发起；群聊 Endpoint 需要在目标群完成验证。",
         "commands": (
             {
-                "syntax": "token new private [名称] [--provider <omp|opencode|markdown>]",
-                "description": "创建私聊 Endpoint；默认 omp，可选择 OpenCode 或通用 Markdown",
+                "syntax": "token new private [名称] [--provider <{providers}>]",
+                "description": f"创建私聊 Endpoint；默认 {DEFAULT_PROVIDER}，OMP/OpenCode 需显式指定",
             },
             {
-                "syntax": "token new group <数字群号> [名称] [--provider <omp|opencode|markdown>]",
+                "syntax": "token new group <数字群号> [名称] [--provider <{providers}>]",
                 "description": "aiocqhttp：私聊申请并预绑定数字群号",
             },
             {
-                "syntax": "token new group current [名称] [--provider <omp|opencode|markdown>]",
+                "syntax": "token new group current [名称] [--provider <{providers}>]",
                 "description": "qq_official：私聊申请，验证时绑定当前群",
             },
             {
@@ -132,13 +133,19 @@ def _load_help_card_template() -> str:
 
 
 def _sections_with_command_root(
-    sections: tuple[dict[str, Any], ...], command_root: str
+    sections: tuple[dict[str, Any], ...],
+    command_root: str,
+    providers: frozenset[str],
 ) -> tuple[dict[str, Any], ...]:
+    provider_choices = "|".join(sorted(providers)) or "无可用 Provider"
     return tuple(
         {
             **section,
             "commands": tuple(
-                {**command, "syntax": f"{command_root} {command['syntax']}"}
+                {
+                    **command,
+                    "syntax": f"{command_root} {command['syntax'].format(providers=provider_choices)}",
+                }
                 for command in section["commands"]
             ),
         }
@@ -147,13 +154,17 @@ def _sections_with_command_root(
 
 
 def _section_with_command_root(
-    section: dict[str, Any], command_root: str
+    section: dict[str, Any], command_root: str, providers: frozenset[str]
 ) -> dict[str, Any]:
-    return _sections_with_command_root((section,), command_root)[0]
+    return _sections_with_command_root((section,), command_root, providers)[0]
 
 
 def render_help_card_html(
-    is_admin: bool, command_root: str, config_error: bool = False
+    is_admin: bool,
+    command_root: str,
+    config_error: bool = False,
+    *,
+    providers: frozenset[str],
 ) -> str:
     """渲染插件内置帮助卡片，不读取或占用 active 通知模板。"""
     event = {
@@ -164,9 +175,11 @@ def render_help_card_html(
             if config_error
             else ""
         ),
-        "sections": _sections_with_command_root(PUBLIC_HELP_SECTIONS, command_root),
+        "sections": _sections_with_command_root(
+            PUBLIC_HELP_SECTIONS, command_root, providers
+        ),
         "admin_section": (
-            _section_with_command_root(ADMIN_HELP_SECTION, command_root)
+            _section_with_command_root(ADMIN_HELP_SECTION, command_root, providers)
             if is_admin
             else None
         ),
@@ -175,9 +188,14 @@ def render_help_card_html(
 
 
 def build_help_text(
-    is_admin: bool, command_root: str, config_error: bool = False
+    is_admin: bool,
+    command_root: str,
+    config_error: bool = False,
+    *,
+    providers: frozenset[str],
 ) -> str:
     """构造卡片失败时使用的结构化纯文本帮助。"""
+    provider_choices = "|".join(sorted(providers)) or "无可用 Provider"
     lines = [
         "Webhook Notifier 命令帮助",
         f"当前命令根：{command_root}",
@@ -193,8 +211,9 @@ def build_help_text(
         if section is ADMIN_HELP_SECTION:
             lines.append(str(section["description"]))
         for command in section["commands"]:
+            syntax = command["syntax"].format(providers=provider_choices)
             lines.append(
-                f"- {command_root} {command['syntax']}：{command['description']}"
+                f"- {command_root} {syntax}：{command['description']}"
             )
 
     lines.extend(("", "参数提示：[ ] 为可选参数，< > 为必填参数。"))

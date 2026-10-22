@@ -1,7 +1,4 @@
-"""单元测试 main.py 的 provider 命令辅助函数。
-
-不依赖 AstrBot 运行时，直接测试静态/实例方法逻辑。
-"""
+"""Provider selection through real command creation and persisted records."""
 
 # ruff: noqa: E402
 
@@ -19,293 +16,228 @@ if str(PLUGIN_PARENT) not in sys.path:
 
 from astrbot.api.star import Context
 
-from core.omp import OmpProviderAdapter
-from core.providers import ProviderRegistry
+from astrbot_plugin_webhook_notifier.core.omp import OmpProviderAdapter
+from astrbot_plugin_webhook_notifier.core.opencode import OpenCodeProviderAdapter
+from astrbot_plugin_webhook_notifier.core.providers import ProviderRegistry
+from astrbot_plugin_webhook_notifier.core.registry import EndpointRegistry
 from astrbot_plugin_webhook_notifier.main import WebhookNotifierPlugin
 
 
-# ─── _extract_provider_flag ──────────────────────────────────
-
-
-class TestExtractProviderFlag:
-    """覆盖：无 flag、正常 omp/opencode、flag 末尾缺值、连续 flag、重复 flag、未知值。"""
-
-    @staticmethod
-    def extract(args: list[str]) -> tuple[str | None, list[str], str | None]:
-        return WebhookNotifierPlugin._extract_provider_flag(args)  # type: ignore
-
-    def test_no_flag(self):
-        """无 --provider 时返回空 provider。"""
-        provider, remaining, error = self.extract(["private", "my_ep"])
-        assert provider is None
-        assert remaining == ["private", "my_ep"]
-        assert error is None
-
-    def test_flag_omp(self):
-        """--provider omp 应正确提取。"""
-        provider, remaining, error = self.extract(["private", "--provider", "omp"])
-        assert provider == "omp"
-        assert remaining == ["private"]
-        assert error is None
-
-    def test_flag_opencode(self):
-        """--provider opencode 应正确提取。"""
-        provider, remaining, error = self.extract(["private", "--provider", "opencode"])
-        assert provider == "opencode"
-        assert remaining == ["private"]
-        assert error is None
-
-    def test_flag_markdown(self):
-        """--provider markdown 应正确提取。"""
-        provider, remaining, error = self.extract(["private", "--provider", "markdown"])
-        assert provider == "markdown"
-        assert remaining == ["private"]
-        assert error is None
-
-    def test_flag_missing_value(self):
-        """--provider 末尾缺值应明确报错。"""
-        provider, remaining, error = self.extract(["private", "--provider"])
-        assert provider is None
-        assert remaining == ["private"]
-        assert error == "--provider 缺少值"
-
-    def test_consecutive_flags(self):
-        """provider 值后的其他 flag 保持为位置参数。"""
-        provider, remaining, error = self.extract(
-            ["private", "--provider", "omp", "--other"]
-        )
-        assert provider == "omp"
-        assert remaining == ["private", "--other"]
-        assert error is None
-
-    def test_flag_value_cannot_be_another_flag(self):
-        provider, remaining, error = self.extract(["private", "--provider", "--other"])
-        assert provider is None
-        assert remaining == ["private"]
-        assert error == "--provider 缺少有效值"
-
-    def test_equals_form_is_rejected(self):
-        provider, remaining, error = self.extract(["private", "--provider=markdown"])
-        assert provider is None
-        assert remaining == ["private"]
-        assert "独立参数" in str(error)
-
-    def test_duplicate_flag(self):
-        """重复 --provider 返回空 provider（由调用方拒绝）。"""
-        provider, remaining, error = self.extract(
-            ["private", "--provider", "omp", "--provider", "opencode"]
-        )
-        assert provider is None
-        assert remaining == ["private"]
-        assert error == "--provider 不能重复指定"
-
-    def test_duplicate_flag_same_value(self):
-        """即使两次相同值，重复 --provider 也被拒绝。"""
-        provider, remaining, error = self.extract(
-            ["private", "--provider", "omp", "--provider", "omp"]
-        )
-        assert provider is None
-        assert remaining == ["private"]
-        assert error == "--provider 不能重复指定"
-
-    def test_flag_in_middle_of_positional_args(self):
-        """--provider 在位置参数中间也应正确提取。"""
-        provider, remaining, error = self.extract(
-            ["group", "12345", "--provider", "omp", "my_ep"]
-        )
-        assert provider == "omp"
-        assert remaining == ["group", "12345", "my_ep"]
-        assert error is None
-
-    def test_flag_value_is_unknown(self):
-        """未知 provider 值也能提取，由 validate 阶段拒绝。"""
-        provider, remaining, error = self.extract(["private", "--provider", "unknown"])
-        assert provider == "unknown"
-        assert remaining == ["private"]
-        assert error is None
-
-
 class _PrivateEventStub:
-    unified_msg_origin = "test:FriendMessage:user"
     session = SimpleNamespace(message_type="friend")
+
+    def __init__(self, platform: str = "aiocqhttp") -> None:
+        self.platform = platform
+        self.unified_msg_origin = f"{platform}:FriendMessage:user"
 
     def get_sender_id(self) -> str:
         return "user"
 
     def get_platform_id(self) -> str:
-        return "test"
+        return self.platform
+
+    def get_platform_name(self) -> str:
+        return self.platform
 
 
-class TestHandleTokenNewProviderSyntax:
-    """证明 provider 语法错误在创建动作前明确返回，不回落 omp。"""
+@pytest.fixture
+def plugin(tmp_path):
+    instance = WebhookNotifierPlugin(Context(), {})  # type: ignore[arg-type]
+    instance._registry = EndpointRegistry(tmp_path)
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("args", "expected"),
-        [
-            (["private", "--provider"], "缺少值"),
-            (
-                ["private", "--provider", "omp", "--provider", "markdown"],
-                "不能重复",
-            ),
-            (["private", "--provider=markdown"], "独立参数"),
-            (["private", "--provider", "--other"], "缺少有效值"),
-        ],
-    )
-    async def test_invalid_provider_syntax_is_rejected(self, args, expected):
-        plugin = WebhookNotifierPlugin(Context(), {})  # type: ignore[arg-type]
+    async def no_start():
+        return None
 
-        async def must_not_create(*_args, **_kwargs):
-            raise AssertionError("provider 语法错误不得进入 Endpoint 创建")
+    instance._ensure_server_running = no_start  # type: ignore[method-assign]
+    return instance
 
-        plugin._create_private_endpoint = must_not_create  # type: ignore[method-assign]
-        result = await plugin._handle_token_new(_PrivateEventStub(), args)  # type: ignore[arg-type]
 
+def _assert_default_notice(message: str) -> None:
+    # These are protocol instructions a caller needs, not an exact prose snapshot.
+    assert "默认" in message
+    assert "markdown.message" in message
+    assert "--provider omp" in message
+    assert "--provider opencode" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "args", "name", "pending"),
+    [
+        ("aiocqhttp", ["private", "direct"], "direct", False),
+        ("aiocqhttp", ["group", "123456", "group"], "group", True),
+        ("qq_official", ["group", "current", "group"], "group", True),
+    ],
+)
+async def test_omitted_provider_persists_markdown_and_explains_protocol(
+    plugin, tmp_path, platform, args, name, pending
+):
+    result = await plugin._handle_token_new(_PrivateEventStub(platform), args)
+    saved = EndpointRegistry(tmp_path)
+    record = saved.get_scoped(platform, "user", name)
+
+    assert record is not None
+    assert record.provider == "markdown"
+    assert record.status == ("pending_verification" if pending else "active")
+    if pending:
         assert isinstance(result, str)
-        assert expected in result
+        _assert_default_notice(result)
+        assert "Bearer Token" not in result
+        assert saved.get_pending_descriptor(
+            platform, record.pending_request_id or ""
+        ) is not None
+    else:
+        assert isinstance(result, list) and len(result) == 2
+        summary, token_message = result
+        _assert_default_notice(summary)
+        assert "Bearer Token" not in summary
+        assert token_message.startswith("Bearer Token: ")
+        token = token_message.removeprefix("Bearer Token: ")
+        assert token not in summary
+        assert saved.authenticate_delivery(record.path, f"Bearer {token}").authorized
+        assert "markdown.message" not in token_message
+        assert "--provider" not in token_message
+        assert "默认" not in token_message
 
 
-# ─── _validate_create_provider ───────────────────────────────
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["omp", "opencode", "markdown"])
+@pytest.mark.parametrize(
+    ("platform", "args", "name"),
+    [
+        ("aiocqhttp", ["private", "explicit"], "explicit"),
+        ("aiocqhttp", ["group", "123456", "explicit"], "explicit"),
+        ("qq_official", ["group", "current", "explicit"], "explicit"),
+    ],
+)
+async def test_explicit_provider_is_preserved_without_default_notice(
+    plugin, tmp_path, provider, platform, args, name
+):
+    result = await plugin._handle_token_new(
+        _PrivateEventStub(platform), [*args, "--provider", provider]
+    )
+
+    record = EndpointRegistry(tmp_path).get_scoped(platform, "user", name)
+    assert record is not None and record.provider == provider
+    messages = result if isinstance(result, list) else [result]
+    assert all("markdown.message" not in message for message in messages)
+    assert all("--provider" not in message for message in messages)
 
 
-class TestValidateCreateProvider:
-    """覆盖 omp（已注册/未注册）、opencode（已注册/未注册）、未知值、registry None。"""
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--provider"],
+        ["--provider", "omp", "--provider", "markdown"],
+        ["--provider", "omp", "--provider", "omp"],
+        ["--provider=markdown"],
+        ["--provider", "--other"],
+        ["--provider", ""],
+        ["--provider", "   "],
+        ["--provider", "unknown"],
+    ],
+)
+async def test_invalid_provider_never_creates_or_falls_back(plugin, tmp_path, flags):
+    result = await plugin._handle_token_new(
+        _PrivateEventStub(), ["private", "invalid", *flags]
+    )
 
-    @staticmethod
-    def _plugin_with_registry(
-        providers: list[str] | None = None,
-    ) -> WebhookNotifierPlugin:
-        plugin = WebhookNotifierPlugin(Context(), {})  # type: ignore[arg-type]
-        if providers is None:
-            # 模拟 ProviderRegistry 未初始化
-            plugin._provider_registry = None
-        else:
-            reg = ProviderRegistry()
-            for p in providers:
-                if p == "omp":
-                    reg.register(OmpProviderAdapter())
-                else:
-                    from core.providers import ProviderAdapter
-                    from core.models import NormalizedEvent
-
-                    class FakeAdapter(ProviderAdapter):
-                        @property
-                        def provider(self) -> str:
-                            return p
-
-                        def parse(self, **kw):
-                            return NormalizedEvent(provider=p, event="test")
-
-                    reg.register(FakeAdapter())
-            reg.freeze()
-            plugin._provider_registry = reg
-        return plugin
-
-    def test_omp_registered(self):
-        """omp 已注册时应通过。"""
-        plugin = self._plugin_with_registry(["omp"])
-        ok, msg = plugin._validate_create_provider("omp")
-        assert ok is True
-        assert msg == ""
-
-    def test_omp_not_registered(self):
-        """omp 未注册时应拒绝。"""
-        plugin = self._plugin_with_registry([])
-        ok, msg = plugin._validate_create_provider("omp")
-        assert ok is False
-        assert "尚未注册" in msg
-
-    def test_opencode_registered(self):
-        """opencode 已注册时应通过（后续版本）。"""
-        plugin = self._plugin_with_registry(["omp", "opencode"])
-        ok, msg = plugin._validate_create_provider("opencode")
-        assert ok is True
-        assert msg == ""
-
-    def test_opencode_not_registered(self):
-        """opencode 未注册时应返回明确未注册消息。"""
-        plugin = self._plugin_with_registry(["omp"])
-        ok, msg = plugin._validate_create_provider("opencode")
-        assert ok is False
-        assert "未注册" in msg
-        assert "opencode" in msg
-
-    def test_markdown_registered(self):
-        """markdown 已注册时应通过。"""
-        plugin = self._plugin_with_registry(["omp", "markdown"])
-        ok, msg = plugin._validate_create_provider("markdown")
-        assert ok is True
-        assert msg == ""
-
-    def test_unknown_provider(self):
-        """未知 provider 值应返回 unsupported。"""
-        plugin = self._plugin_with_registry(["omp"])
-        ok, msg = plugin._validate_create_provider("custom")
-        assert ok is False
-        assert "不支持的 provider" in msg
-
-    def test_registry_none(self):
-        """ProviderRegistry 未初始化时应拒绝。"""
-        plugin = self._plugin_with_registry(None)  # 保持 _provider_registry=None
-        ok, msg = plugin._validate_create_provider("omp")
-        assert ok is False
-        assert "未初始化" in msg
+    assert isinstance(result, str)
+    assert result.startswith("❌")
+    assert "markdown.message" not in result
+    assert plugin._registry.list_all_for_admin() == []
+    assert EndpointRegistry(tmp_path).list_all_for_admin() == []
 
 
-# ─── Provider 创建后不可变 ──────────────────────────────────
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "args"),
+    [
+        ("aiocqhttp", ["private", "existing"]),
+        ("aiocqhttp", ["group", "123456", "existing"]),
+        ("qq_official", ["group", "current", "existing"]),
+    ],
+)
+async def test_creation_conflict_does_not_announce_default_success(
+    plugin, tmp_path, platform, args
+):
+    event = _PrivateEventStub(platform)
+    await plugin._handle_token_new(event, [*args, "--provider", "omp"])
+    before = EndpointRegistry(tmp_path).get_scoped(platform, "user", "existing")
+
+    result = await plugin._handle_token_new(event, args)
+
+    assert isinstance(result, str) and result.startswith("❌")
+    assert "markdown.message" not in result
+    assert "--provider" not in result
+    assert EndpointRegistry(tmp_path).get_scoped(platform, "user", "existing") == before
 
 
-class TestProviderImmutability:
-    """证明 provider 创建后不可修改。"""
+@pytest.mark.asyncio
+async def test_creation_rejects_unregistered_provider_and_reports_available_set(
+    plugin, tmp_path
+):
+    registered = OpenCodeProviderAdapter()
+    providers = ProviderRegistry()
+    providers.register(registered)
+    providers.freeze()
+    plugin._provider_registry = providers
 
-    def test_no_update_provider_method_in_registry(self):
-        """EndpointRegistry 没有 update/change provider 方法。"""
-        from core.registry import EndpointRegistry
+    accepted = await plugin._handle_token_new(
+        _PrivateEventStub(), ["private", "accepted", "--provider", registered.provider]
+    )
+    rejected = await plugin._handle_token_new(
+        _PrivateEventStub(), ["private", "rejected", "--provider", "markdown"]
+    )
+    unknown = await plugin._handle_token_new(
+        _PrivateEventStub(), ["private", "unknown", "--provider", "not-installed"]
+    )
 
-        # 列出所有公共方法名
-        public_methods = {
-            name
-            for name in dir(EndpointRegistry)
-            if not name.startswith("_") and callable(getattr(EndpointRegistry, name))
-        }
-        # 检查没有 update_provider / change_provider / set_provider 方法
-        update_like = {
-            m
-            for m in public_methods
-            if "provider" in m.lower() and "create" not in m.lower()
-        }
-        assert update_like == set(), f"发现可能修改 provider 的方法: {update_like}"
+    assert isinstance(accepted, list)
+    saved = EndpointRegistry(tmp_path)
+    assert saved.get_scoped("aiocqhttp", "user", "accepted").provider == registered.provider
+    assert saved.get_scoped("aiocqhttp", "user", "rejected") is None
+    assert saved.get_scoped("aiocqhttp", "user", "unknown") is None
+    assert isinstance(rejected, str) and rejected.startswith("❌")
+    assert isinstance(unknown, str) and unknown.startswith("❌")
+    assert registered.provider in unknown
+    for unavailable in {"omp", "opencode", "markdown"} - providers.providers:
+        assert unavailable not in unknown
 
-    def test_create_sets_provider_immutably(self, tmp_path):
-        """创建时设置的 provider 在记录生命周期内不变。"""
-        from core.registry import EndpointRegistry
 
-        reg = EndpointRegistry(tmp_path)
-        record, _ = reg.create_private_endpoint(
-            owner_platform_id="test",
-            owner_user_id="user",
-            name="immutable_test",
-            target_umo="test:Message:1",
-            provider="omp",
-        )
-        assert record.provider == "omp"
+@pytest.mark.asyncio
+async def test_missing_default_adapter_does_not_fall_back_to_registered_omp(
+    plugin, tmp_path
+):
+    providers = ProviderRegistry()
+    providers.register(OmpProviderAdapter())
+    providers.freeze()
+    plugin._provider_registry = providers
 
-        # 撤销后 provider 不变
-        reg.revoke_endpoint("test", "user", "immutable_test")
-        revoked = reg.get_by_owner_name("test", "user", "immutable_test")
-        assert revoked is not None
-        assert revoked.provider == "omp"
+    result = await plugin._handle_token_new(_PrivateEventStub(), ["private", "missing"])
 
-        # 轮换 token 后 provider 不变
-        record2, _ = reg.create_private_endpoint(
-            owner_platform_id="test",
-            owner_user_id="user2",
-            name="rotate_test",
-            target_umo="test:Message:1",
-            provider="opencode",
-        )
-        assert record2.provider == "opencode"
-        reg.rotate_token("test", "user2", "rotate_test")
-        rotated = reg.get_by_owner_name("test", "user2", "rotate_test")
-        assert rotated is not None
-        assert rotated.provider == "opencode"
+    assert isinstance(result, str) and result.startswith("❌")
+    assert "markdown.message" not in result
+    assert EndpointRegistry(tmp_path).list_all_for_admin() == []
+
+
+@pytest.mark.parametrize("provider", ["omp", "opencode", "markdown"])
+def test_provider_survives_rotation_revocation_and_reload(tmp_path, provider):
+    registry = EndpointRegistry(tmp_path)
+    record, token = registry.create_private_endpoint(
+        "aiocqhttp", "user", "immutable", "aiocqhttp:FriendMessage:user",
+        provider=provider,
+    )
+
+    ok, new_token = registry.rotate_token("aiocqhttp", "user", "immutable")
+    assert ok
+    reloaded = EndpointRegistry(tmp_path)
+    rotated = reloaded.get_scoped("aiocqhttp", "user", "immutable")
+    assert rotated is not None and rotated.provider == provider
+    assert not reloaded.authenticate_delivery(record.path, f"Bearer {token}").authorized
+    assert reloaded.authenticate_delivery(record.path, f"Bearer {new_token}").authorized
+    assert reloaded.revoke_endpoint("aiocqhttp", "user", "immutable")[0]
+    revoked = EndpointRegistry(tmp_path).get_scoped("aiocqhttp", "user", "immutable")
+    assert revoked is not None and revoked.provider == provider
+    assert revoked.status == "revoked"

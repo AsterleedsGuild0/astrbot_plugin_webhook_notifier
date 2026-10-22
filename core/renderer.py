@@ -3094,10 +3094,7 @@ def render_text(
 def render_text_default(
     event: NormalizedEvent, display_context: DisplayContext | None = None
 ) -> str:
-    """使用默认模板渲染 OMP session_stop 事件为纯文本。
-
-    与 FSD 中 OMP 示例格式保持一致。
-    """
+    """将标准化事件渲染为默认纯文本，兼容结构化事件与 Markdown 正文。"""
     if event.provider == "markdown" and isinstance(event.markdown, str):
         body = render_markdown_text(event.markdown)
         return (

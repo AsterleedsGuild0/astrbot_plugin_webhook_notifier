@@ -5,6 +5,8 @@ from typing import Any
 
 from .models import NormalizedEvent
 
+DEFAULT_PROVIDER = "markdown"
+
 
 class ProviderError(Exception):
     """Adapter 可预见的处理错误，由 HTTP 层转换为对应响应。
