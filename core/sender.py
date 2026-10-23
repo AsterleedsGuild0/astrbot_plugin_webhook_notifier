@@ -427,7 +427,13 @@ def _log_delivery_exception(
     elapsed_ms: int,
     delivery_context: DeliveryContext | None = None,
 ) -> None:
-    """记录投递异常日志：保留 sanitized traceback 和上下文。"""
+    """OMP 只记录固定失败类别；其他 Provider 保持既有清洗行为。"""
+    if delivery_context is not None and delivery_context.provider == "omp":
+        _log_delivery(
+            logger.error, reason="send_failed", target_name=target_name,
+            elapsed_ms=elapsed_ms, delivery_context=delivery_context,
+        )
+        return
     parts = [
         "[WebhookNotifier]",
         "phase=delivery",

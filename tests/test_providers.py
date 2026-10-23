@@ -11,7 +11,6 @@ from core.omp import (
     OMP_SOURCE_NAME,
     OmpProviderAdapter,
     is_omp_session_stop,
-    normalize_omp_payload,
 )
 from core.providers import (
     ProviderAdapter,
@@ -264,7 +263,6 @@ class TestOmpProviderAdapterParse:
         )
         assert event.provider == "omp"
         assert event.event == "omp.session_stop"
-        assert event.title == "会话完成"
         field_labels = {f["label"] for f in event.fields}
         assert "会话" in field_labels
         assert "模型" in field_labels
@@ -326,43 +324,3 @@ class TestOmpCharacterization:
         valid, msg = is_omp_session_stop({}, {"event": "omp.unknown"})
         assert valid is False
         assert "不支持" in msg
-
-    def test_normalize_omp_payload_minimal(self):
-        """锁定最小 payload 的 NormalizedEvent 输出。"""
-        event = normalize_omp_payload(
-            {"event": "omp.session_stop", "emittedAt": "2026-07-08T12:00:00.000Z"}
-        )
-        assert event.provider == "omp"
-        assert event.event == "omp.session_stop"
-        assert event.title == "会话完成"
-        assert event.status == "success"
-
-    def test_normalize_omp_payload_full(self):
-        """锁定完整 payload 的所有字段映射。"""
-        body = {
-            "event": "omp.session_stop",
-            "emittedAt": "2026-07-08T12:00:00.000Z",
-            "session": {
-                "id": "sess_001",
-                "name": "Test characterization",
-                "file": "/tmp/session.json",
-                "cwd": "/tmp",
-                "model": "gpt-5.5",
-            },
-            "round": {
-                "turnId": "turn_001",
-                "startedAt": "2026-07-08T11:59:00.000Z",
-                "endedAt": "2026-07-08T12:00:00.000Z",
-                "durationMs": 57700,
-                "promptLength": 977,
-                "messageCountDelta": 2,
-            },
-            "metadata": {"version": "0.1.0", "eventName": "session_stop"},
-        }
-        event = normalize_omp_payload(body)
-        assert event.id == "sess_001:turn_001"
-        assert event.source["name"] == OMP_SOURCE_NAME
-        labels = {f["label"] for f in event.fields}
-        assert "会话" in labels
-        assert "cwd" in labels
-        assert "模型" in labels

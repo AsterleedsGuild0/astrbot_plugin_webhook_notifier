@@ -243,59 +243,6 @@ class TestSenderDeliveryLogging:
         assert "target=test_alias" in msg
         assert "elapsed_ms=" in msg
 
-    @pytest.mark.asyncio
-    async def test_exception_log_contains_traceback_and_context(self, caplog):
-        """发送异常的日志包含 sanitized traceback 和上下文。"""
-        caplog.set_level(logging.ERROR)
-
-        ctx = Context()
-
-        async def failing_send(umo, chain):
-            raise RuntimeError(
-                "connection lost: whn_abcdefghijklmnopqrstuvwxyz1234567890abcdefg"
-            )
-
-        ctx.send_message = failing_send  # type: ignore[assignment]
-
-        sender = Sender(ctx)
-        endpoint = _make_endpoint(
-            targets=[TargetAlias(name="test_alias", umo="test:Msg:1")]
-        )
-        dc = DeliveryContext(
-            request_id="req-003",
-            provider="omp",
-            endpoint_name="test_ep",
-        )
-
-        results = await sender.send_text("hello", endpoint, delivery_context=dc)
-
-        assert results[0]["ok"] is False
-        assert results[0]["error"] == "send_failed"
-
-        delivery_records = [
-            r for r in caplog.records if "phase=delivery" in r.getMessage()
-        ]
-        assert len(delivery_records) >= 1
-        msg = delivery_records[0].getMessage()
-
-        # 上下文
-        assert "reason=send_failed" in msg
-        assert "request_id=req-003" in msg
-        assert "provider=omp" in msg
-        assert "endpoint=test_ep" in msg
-        assert "target=test_alias" in msg
-        assert "elapsed_ms=" in msg
-        assert "exc_type=RuntimeError" in msg
-
-        # traceback 保留
-        assert "Traceback" in msg
-        assert "RuntimeError" in msg
-        assert "connection lost" in msg
-        assert "failing_send" in msg  # 函数名保留
-
-        # 凭据消失
-        assert "whn_abcdefghijklmnopqrstuvwxyz1234567890abcdefg" not in msg
-        assert "[REDACTED_TOKEN]" in msg
 
     @pytest.mark.asyncio
     async def test_no_message_body_or_umo_in_logs(self, caplog):
@@ -393,40 +340,6 @@ class TestLogDeliveryHelpers:
         assert "provider=" not in msg
         assert "endpoint=" not in msg
 
-    def test_log_delivery_exception_sanitizes_and_preserves(self, caplog):
-        caplog.set_level(logging.ERROR)
-        secret = "whn_abcdefghijklmnopqrstuvwxyz1234567890abcdefg"
-        try:
-            raise RuntimeError(f"backend error with {secret}")
-        except RuntimeError as exc:
-            _log_delivery_exception(
-                exc,
-                target_name="tgt",
-                elapsed_ms=100,
-                delivery_context=DeliveryContext(
-                    request_id="req-x", provider="omp", endpoint_name="ep"
-                ),
-            )
-
-        records = [r for r in caplog.records if "phase=delivery" in r.getMessage()]
-        assert len(records) >= 1
-        msg = records[0].getMessage()
-
-        # 上下文
-        assert "reason=send_failed" in msg
-        assert "target=tgt" in msg
-        assert "elapsed_ms=100" in msg
-        assert "exc_type=RuntimeError" in msg
-        assert "request_id=req-x" in msg
-
-        # traceback 保留
-        assert "Traceback" in msg
-        assert "RuntimeError" in msg
-        assert "backend error" in msg
-
-        # 凭据消失
-        assert secret not in msg
-        assert "[REDACTED_TOKEN]" in msg
 
     def test_log_delivery_exception_sanitizer_fail_open(self, caplog):
         """sanitize_exception 自身失败时不影响业务。"""

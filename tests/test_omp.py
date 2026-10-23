@@ -92,7 +92,7 @@ class TestNormalizeOmpPayload:
         assert event.provider == "omp"
         assert event.event == "omp.session_stop"
         assert event.title != ""
-        assert event.status == "success"
+        assert event.status == "unknown"
 
     def test_full_payload(self):
         """完整 payload 应正确映射所有字段。"""
@@ -130,8 +130,9 @@ class TestNormalizeOmpPayload:
             },
         }
         event = normalize_omp_payload(body)
-        assert event.id == "sess_001:turn_001"
-        assert event.title == "会话完成"
+        assert event.id == normalize_omp_payload(body).id
+        assert "sess_001" not in event.id
+        assert event.status == "unknown"
         assert event.summary == ""
         assert event.source["name"] == OMP_SOURCE_NAME
 
@@ -152,7 +153,7 @@ class TestNormalizeOmpPayload:
             if field["label"] == "会话":
                 assert field["value"] == "Add post-conversation HTTP hook"
             elif field["label"] == "cwd":
-                assert field["value"] == "/home/user/project"
+                assert field["value"] == "project"
             elif field["label"] == "模型":
                 assert field["value"] == "openai/gpt-5.5"
             elif field["label"] == "开始时间":
@@ -165,9 +166,6 @@ class TestNormalizeOmpPayload:
             elif field["label"] == "消息变化":
                 assert field["value"] == "+2"
 
-        # raw 应包含未映射的字段
-        assert event.raw.get("metadata.version") == "0.1.0"
-        assert event.raw.get("round.stopHookActive") is True
 
     def test_summary_does_not_duplicate_session_or_model_fields(self):
         """summary 不应重复展示 fields 中已有的会话和模型。"""
@@ -202,7 +200,7 @@ class TestNormalizeOmpPayload:
         fields = event.fields
         session_fields = [f for f in fields if f["label"] == "会话"]
         assert session_fields == []
-        assert event.raw.get("session.file") == "/home/user/session.json"
+        assert "/home/user/session.json" not in str(event.to_dict())
 
     def test_session_model_fallback(self):
         """session.model 缺失时使用 round.lastAssistant.model。"""
@@ -272,7 +270,8 @@ class TestNormalizeOmpPayload:
             "round": {"turnId": 0},
         }
         event = normalize_omp_payload(body)
-        assert event.id == "sess_zero_turn:0"
+        assert event.id == normalize_omp_payload(body).id
+        assert event.id != normalize_omp_payload({"session": body["session"]}).id
 
     def test_duration_calculation(self):
         """durationMs 缺失时由 startedAt 和 endedAt 计算。"""
@@ -311,30 +310,7 @@ class TestNormalizeOmpPayload:
         started = next(f for f in event.fields if f["label"] == "开始时间")
         assert event.emitted_at == body["emittedAt"]
         assert started["value"] == body["round"]["startedAt"]
-        assert (
-            event.raw["round.lastAssistant.timestamp"]
-            == (body["round"]["lastAssistant"]["timestamp"])
-        )
 
-    def test_empty_session(self):
-        """session 为空时不崩溃。"""
-        body = {
-            "session": None,
-            "round": None,
-        }
-        event = normalize_omp_payload(body)
-        assert event.title != ""
-        assert event.status == "success"
-
-    def test_missing_last_assistant(self):
-        """round.lastAssistant 缺失时不崩溃。"""
-        body = {
-            "session": {"name": "test-session"},
-            "round": {},
-        }
-        event = normalize_omp_payload(body)
-        assert event.title != ""
-        assert event.status == "success"
 
     def test_prompt_length_fallback(self):
         """promptLength 缺失但 prompt 存在时使用字符串长度。"""
@@ -356,28 +332,6 @@ class TestNormalizeOmpPayload:
         event = normalize_omp_payload(body, request_time)
         assert event.emitted_at == request_time
 
-    def test_default_status_success(self):
-        """session_stop 默认状态为 success。"""
-        body = {"session": {"name": "test"}, "round": {}}
-        event = normalize_omp_payload(body)
-        assert event.status == "success"
-
-    def test_raw_fields(self):
-        """未映射的字段应进入 raw。"""
-        body = {
-            "session": {"name": "test"},
-            "round": {
-                "stopHookActive": True,
-            },
-            "metadata": {
-                "version": "1.2.3",
-                "eventName": "session_stop",
-            },
-        }
-        event = normalize_omp_payload(body)
-        assert event.raw.get("metadata.version") == "1.2.3"
-        assert event.raw.get("metadata.eventName") == "session_stop"
-        assert event.raw.get("round.stopHookActive") is True
 
     def test_task_duration_ms_from_round_duration_ms(self):
         """round.durationMs 应正确映射到 task_duration_ms。"""

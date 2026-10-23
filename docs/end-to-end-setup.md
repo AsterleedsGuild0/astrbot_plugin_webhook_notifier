@@ -7,7 +7,7 @@
 - 目标读者：首次部署 Webhook Notifier，并希望把 oh-my-pi 会话结束通知发送到 AstrBot 私聊或普通 QQ 群的管理员
 - 反向代理说明：本文使用 Caddy 作为参考实现；Nginx、Traefik 或其他能够保留请求路径并提供 HTTPS 的反向代理均可替代
 
-本文从 AstrBot 服务器配置开始，依次完成 Endpoint 创建、HTTPS 反向代理、请求模拟、OMP Hook 配置和真实 `session_stop` 验收。示例只使用保留域名和占位符；真实 URL、Endpoint Path、Token、群标识及日志只能在受控环境中处理。
+本文从 AstrBot 服务端配置开始，依次完成 Endpoint 创建、HTTPS 反向代理、请求模拟、Hook 配置和真实运行收束验收。操作须分别授权；示例仅使用保留域名与占位符，不读取或使用线上凭据。
 
 ---
 
@@ -27,10 +27,10 @@ flowchart LR
 
 职责边界如下：
 
-- oh-my-pi（OMP）提供 extension、Hook 加载机制和 `session_stop` 生命周期事件。
+- oh-my-pi（OMP）提供公开 ExtensionAPI 事件与 Hook 加载机制；`session_stop` 不等于最终成功。
 - 本仓库 [`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts) 负责把事件转换为 HTTP POST；它不是 OMP 原生 Webhook。
 - HTTPS 反向代理负责公网入口、TLS 和访问日志，不负责插件 Token 鉴权。
-- Webhook Notifier 负责 Endpoint 查找、Bearer 鉴权、OMP version 1 payload 标准化、渲染和 AstrBot 投递。
+- Webhook Notifier 负责 Endpoint 查找、Bearer 鉴权、OMP V1/V2 标准化、渲染和 AstrBot 投递。
 - AstrBot adapter 负责把通知送往 Endpoint 已绑定的私聊或普通 QQ 群；外部 payload 不能指定任意目标。
 
 ---
@@ -186,24 +186,29 @@ Token:        <独立保存，不放入 URL>
 curl --fail-with-body --silent --show-error \
   -X POST "${WHN_BASE_URL}/${WHN_ENDPOINT_PATH}" \
   -H 'Content-Type: application/json' \
-  -H 'X-OMP-Event: session_stop' \
+  -H 'X-OMP-Event: omp.run_finished' \
   -H "Authorization: Bearer ${WHN_TOKEN}" \
   --data-binary @- <<'JSON'
 {
-  "event": "omp.session_stop",
-  "version": 1,
-  "emittedAt": "2026-07-20T12:00:00Z",
-  "session": {"name": "OMP integration check", "model": "provider/model"},
-  "round": {"turnId": "omp-demo-1", "durationMs": 20000}
+  "event": "omp.run_finished",
+  "version": 2,
+  "id": "11111111111111111111111111111111",
+  "emittedAt": "2026-10-23T00:00:20Z",
+  "status": "completed",
+  "session": {"ref": "22222222222222222222222222222222", "scope": "root", "name": "OMP integration check"},
+  "cycle": {"ref": "33333333333333333333333333333333", "partial": false, "reasons": [], "startedAt": "2026-10-23T00:00:00Z", "endedAt": "2026-10-23T00:00:20Z", "durationMs": 20000}
 }
 JSON
 ```
+这是协议模拟，不证明原生 OMP 状态判定。演示 ID 固定，重复发送会触发幂等重放；独立新事件应生成新的随机 32 位十六进制 ID，同一事件的重试必须保持 ID。
+
 
 响应含义：
 
-- `message=ok`：至少一个目标成功投递。
-- `message=skipped`：请求已鉴权和处理，但目标被安全策略跳过；常见原因是私聊通知默认关闭，不应重试。
+- `message=ok` 且 `data.delivered=true`：服务端报告至少一个目标送达，仍需核对实际消息。
+- `message=skipped`：策略跳过或幂等重放；`skip_reason=idempotency_replay` 不证明本次送达，均不应换 ID 重试。
 - `message=partial_delivery`：部分目标成功，部分目标被跳过；查看脱敏后的逐目标结果。
+- `message=partial_failure`：有目标发送失败，服务端可能已终结幂等记录；不承诺自动补齐。
 - `401`：通常是 Bearer Token 缺失、格式错误或已经轮换失效。
 - `403`：Endpoint 可能被撤销、禁用，或群 Endpoint 尚未领取 Token。
 - `404`：通常是 Endpoint Path 不存在，或反向代理与 `base_path` 的路径组合错误。
@@ -232,9 +237,9 @@ JSON
 
 ## 验收真实会话
 
-启动一次受控 OMP 会话并正常结束，使其触发 `session_stop`。按链路顺序检查：
+使用隔离配置、单一扩展入口和专用测试目标启动受控 OMP，会话正常收束后检查：
 
-1. **OMP**：没有 Hook 加载错误；若发送失败，检查 warn 中的错误类型和 timeout，但不要公开完整 URL。
+1. **OMP**：核对加载入口与固定诊断分类；最终 `agent_end` 才发通知，重试、维护续跑和后台等待不提前完成。
 2. **Caddy**：访问日志出现对应 POST 和预期 HTTP 状态；检查时隐藏域名、Endpoint Path、源地址和其他部署标识。
 3. **AstrBot**：查看插件脱敏日志中的请求结果、鉴权错误枚举或投递摘要，不复制原始 payload。
 4. **Bot**：确认目标私聊或普通 QQ 群收到通知；私聊默认关闭时，确认 HTTP 返回 `skipped` 即可视为策略符合预期。
@@ -253,8 +258,8 @@ JSON
 | 鉴权失败 | `Authorization: Bearer`、Token 是否被轮换、Endpoint 状态 | 从独立变量发送 Token；无法确认旧 Token 时在私聊执行 rotate |
 | HTTP 200 `skipped` | 目标是否为私聊、`enable_private_notifications` | 这是默认安全策略，不重试；评估平台风险后再决定是否开启 |
 | HTML 图片失败但收到文本 | `render_mode`、`fallback_to_text`、AstrBot T2I/`html_render` | 根据 `fallback_reason` 修复渲染；可先保留文本降级保证通知链路 |
-| curl 成功但真实 Hook 没请求 | Hook 文件是否进入 OMP 可发现目录、环境变量是否传入实际进程、`session_stop` 是否触发 | 按客户端指南重新加载 Hook，并检查 OMP warn；没有 warn 不等于投递成功，当前 Hook 不检查 HTTP 响应 |
-| Hook 报 timeout | Caddy/AstrBot 响应时间、网络延迟、渲染耗时、超时值 | 先用文本模式验证；按受控网络情况调整毫秒值；注意 Hook 不重试 |
+| curl 成功但真实 Hook 没请求 | 独立加载入口、URL/Token 环境、最终 `agent_end` 及 `willContinue` | 按客户端指南核对固定诊断分类；没有报错不等于送达 |
+| Hook 报 timeout | Caddy/AstrBot 延迟、渲染耗时、100–30000ms 超时配置 | 有界重试保持同一 ID；超时不证明未发送，重放不证明送达 |
 | 升级或迁移后 Endpoint 不可管理 | adapter 实例的 `platform_id` 是否变化 | 不手工改 Registry；按 [platform_id 离线 Rebind Runbook](platform-id-rebind-runbook.md)停服迁移 |
 
 ---

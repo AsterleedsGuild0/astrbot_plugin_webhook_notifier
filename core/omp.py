@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import re
+import secrets
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +15,140 @@ from .providers import ProviderAdapter, ProviderError
 
 OMP_SOURCE_NAME = "oh-my-pi"
 _OMP_ADAPTER_ERROR_MSG = "OMP payload 处理失败"
+_ANON_KEY = secrets.token_bytes(32)
+_V2_EVENTS = {"omp.run_finished", "omp.action_required"}
+_RESULTS = {"completed", "failed", "aborted", "action_required", "unknown"}
+_REASONS = {
+    "missing_start", "session_changed", "shutdown", "expired", "capacity",
+    "unpaired_interaction", "incomplete_metadata", "clock_changed",
+}
+_TITLES = {
+    "completed": "运行正常结束", "failed": "运行失败", "aborted": "运行已中止",
+    "action_required": "需要处理", "unknown": "运行结果未知",
+}
+
+
+def _safe_name(value: Any, limit: int = 96, *, model: bool = False) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+    value = "".join(c for c in value if unicodedata.category(c) not in {"Cc", "Cf"}).strip()
+    if re.search(r"https?://|(?:^|\s)(?:[A-Za-z]:[\\/]|[~\\/])", value):
+        return ""
+    if not model and ("/" in value or "\\" in value):
+        return ""
+    return value[:limit]
+
+
+def _object(value: Any, required: set[str], optional: set[str]) -> dict:
+    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - optional:
+        raise ValueError("shape")
+    return value
+
+
+def _ref(value: Any) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{32}", value) is None:
+        raise ValueError("reference")
+
+
+def _timestamp(value: Any) -> datetime:
+    if not isinstance(value, str) or len(value) > 40:
+        raise ValueError("timestamp")
+    result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if result.tzinfo is None:
+        raise ValueError("timezone")
+    return result
+
+
+def _bounded_text(value: Any, limit: int = 96, *, model: bool = False) -> None:
+    if not isinstance(value, str) or not value or _safe_name(value, limit, model=model) != value:
+        raise ValueError("name")
+
+
+def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
+    _object(body, {"event", "version", "id", "emittedAt", "session", "cycle", "status"},
+            {"instance", "interaction", "target_alias"})
+    if type(body["version"]) is not int or body["version"] != 2:
+        raise ValueError("version")
+    if len(json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 65536:
+        raise ValueError("size")
+    _ref(body["id"])
+    emitted = _timestamp(body["emittedAt"])
+    status = body["status"]
+    if not isinstance(status, str) or status not in _RESULTS:
+        raise ValueError("status")
+    action = body["event"] == "omp.action_required"
+    if action != (status == "action_required") or action != ("interaction" in body):
+        raise ValueError("event_status")
+    session = _object(body["session"], {"ref", "scope"}, {"name", "cwdName", "agent"})
+    _ref(session["ref"])
+    if session["scope"] not in ("root", "subagent", "unknown"):
+        raise ValueError("scope")
+    for key in ("name", "cwdName", "agent"):
+        if key in session:
+            _bounded_text(session[key])
+    for key, limit in (("instance", 96), ("target_alias", 128)):
+        if key in body:
+            _bounded_text(body[key], limit)
+    cycle = _object(body["cycle"], {"ref", "partial", "reasons"},
+                    {"startedAt", "endedAt", "durationMs", "model", "thinking", "metadataChanged"})
+    _ref(cycle["ref"])
+    reasons = cycle["reasons"]
+    if (type(cycle["partial"]) is not bool or not isinstance(reasons, list)
+            or len(reasons) > len(_REASONS)
+            or any(not isinstance(r, str) or r not in _REASONS for r in reasons)
+            or len(set(reasons)) != len(reasons) or cycle["partial"] != bool(reasons)):
+        raise ValueError("partial")
+    start = _timestamp(cycle["startedAt"]) if "startedAt" in cycle else None
+    end = _timestamp(cycle["endedAt"]) if "endedAt" in cycle else None
+    if action and end is not None or not action and end is None:
+        raise ValueError("end")
+    if start is None and "missing_start" not in reasons:
+        raise ValueError("missing_start")
+    if "durationMs" in cycle:
+        duration = cycle["durationMs"]
+        if type(duration) is not int or not 0 <= duration <= 86400000 or start is None:
+            raise ValueError("duration")
+        if abs(((end or emitted) - start).total_seconds() * 1000 - duration) > 1:
+            raise ValueError("duration_bounds")
+    for key, limit in (("model", 128), ("thinking", 32)):
+        if key in cycle:
+            _bounded_text(cycle[key], limit, model=key == "model")
+    if "metadataChanged" in cycle and type(cycle["metadataChanged"]) is not bool:
+        raise ValueError("metadata")
+    if cycle.get("metadataChanged") and ("model" in cycle or "thinking" in cycle):
+        raise ValueError("mixed_metadata")
+    fields = []
+    for label, value in (
+        ("实例", body.get("instance")),
+        ("sessionName", session.get("name") or f"OMP Session {session['ref'][:12]}"),
+        ("projectName", session.get("cwdName")), ("agent", session.get("agent")),
+        ("model", cycle.get("model")), ("实际 thinking", cycle.get("thinking")),
+        ("taskStartedAt", cycle.get("startedAt")), ("durationMs", cycle.get("durationMs")),
+    ):
+        if value is not None:
+            fields.append({"label": label, "value": value, "short": True})
+    if cycle.get("metadataChanged"):
+        fields.append({"label": "模型与档位", "value": "运行中发生变化，省略单一值", "short": False})
+    if cycle["partial"]:
+        fields.append({"label": "观察范围", "value": "不完整", "short": True})
+    summary = "正常结束不代表业务目标已验证完成。" if status == "completed" else ""
+    if action:
+        interaction = _object(body["interaction"], {"ref", "kind"}, set())
+        _ref(interaction["ref"])
+        labels = {"approval": "审批请求（不证明 UI 已呈现）",
+                  "plan_review": "计划审阅已打开（区间可能包含处理时间）",
+                  "ask": "ask 调用待解决（不证明 UI 已呈现）"}
+        if interaction["kind"] not in labels:
+            raise ValueError("interaction_kind")
+        summary = labels[interaction["kind"]]
+    return NormalizedEvent(
+        provider="omp", event=body["event"], version=2, id=body["id"],
+        emitted_at=body["emittedAt"], title=_TITLES[status], status=status,
+        session_scope=SessionScope(session["scope"]), summary=summary,
+        source={"name": OMP_SOURCE_NAME, "url": None}, fields=fields,
+        task_duration_ms=cycle.get("durationMs") if not action else None,
+    )
 
 
 def is_omp_session_stop(
@@ -58,8 +198,7 @@ def is_omp_session_stop(
 
     # 有 event 但不支持
     if header_event or body_event:
-        provided = header_event or body_event or "unknown"
-        return (False, f"不支持的 OMP 事件类型: {provided}")
+        return (False, "不支持的 OMP 事件类型")
 
     return (False, "未识别到 OMP 事件")
 
@@ -85,8 +224,8 @@ def normalize_omp_payload(
 
     # 提取 session 信息
     session = body.get("session", {}) or {}
-    session_name = _string_or_empty(session.get("name"))
-    session_cwd = _string_or_empty(session.get("cwd"))
+    session_name = _safe_name(session.get("name"))
+    session_cwd = _safe_name(re.split(r"[/\\]", _string_or_empty(session.get("cwd")).rstrip("/\\"))[-1])
     session_id = _string_or_empty(session.get("id"))
 
     # 提取 round 信息
@@ -100,7 +239,6 @@ def normalize_omp_payload(
     image_count = round_data.get("imageCount")
     entry_count_delta = round_data.get("entryCountDelta")
     message_count_delta = round_data.get("messageCountDelta")
-    stop_hook_active = round_data.get("stopHookActive")
 
     # session.model 缺失时使用 round.lastAssistant.model
     last_assistant = round_data.get("lastAssistant", {}) or {}
@@ -112,9 +250,10 @@ def normalize_omp_payload(
         last_assistant.get("model"), fallback_provider=assistant_provider
     )
     assistant_stop_reason = _string_or_empty(last_assistant.get("stopReason"))
-    assistant_timestamp = _string_or_empty(last_assistant.get("timestamp"))
     if not session_model and assistant_model:
         session_model = assistant_model
+    session_model = _safe_name(session_model, 128, model=True)
+    status = {"error": "failed", "aborted": "aborted"}.get(assistant_stop_reason, "unknown")
 
     # 计算持续时间
     if duration_ms is None and started_at and ended_at:
@@ -126,14 +265,9 @@ def normalize_omp_payload(
             pass
 
     # 生成事件 ID
-    event_id = (
-        f"{session_id}:{turn_id}"
-        if session_id and turn_id
-        else session_id or turn_id or ""
-    )
-
-    # 生成标题
-    title = "会话完成"
+    legacy_id = f"{session_id}:{turn_id}" if session_id and turn_id else session_id or turn_id
+    event_id = hmac.new(_ANON_KEY, legacy_id.encode(), hashlib.sha256).hexdigest()[:32] if legacy_id else ""
+    title = _TITLES[status]
 
     # 生成摘要
     summary = ""
@@ -179,11 +313,8 @@ def normalize_omp_payload(
             {"label": "消息变化", "value": f"{sign}{delta_val}", "short": True}
         )
 
-    # 最后状态
-    if assistant_stop_reason:
-        fields.append(
-            {"label": "最后状态", "value": assistant_stop_reason, "short": True}
-        )
+    if assistant_stop_reason in {"stop", "error", "aborted", "length", "toolUse"}:
+        fields.append({"label": "最后状态", "value": assistant_stop_reason, "short": True})
 
     # 条目变化
     if entry_count_delta is not None:
@@ -193,19 +324,6 @@ def normalize_omp_payload(
             {"label": "条目变化", "value": f"{sign}{delta_val}", "short": True}
         )
 
-    # 构建 raw
-    raw: dict[str, Any] = {}
-    if session.get("file"):
-        raw["session.file"] = session["file"]
-    metadata = body.get("metadata", {}) or {}
-    if metadata.get("version"):
-        raw["metadata.version"] = metadata["version"]
-    if metadata.get("eventName"):
-        raw["metadata.eventName"] = metadata["eventName"]
-    if stop_hook_active is not None:
-        raw["round.stopHookActive"] = stop_hook_active
-    if assistant_timestamp:
-        raw["round.lastAssistant.timestamp"] = assistant_timestamp
 
     return NormalizedEvent(
         provider="omp",
@@ -214,16 +332,15 @@ def normalize_omp_payload(
         id=event_id,
         emitted_at=emitted_at,
         title=title,
-        status="success",
+        status=status,
         session_scope=SessionScope.UNKNOWN,
         summary=summary.strip(),
         source={"name": OMP_SOURCE_NAME, "url": None},
         actor={"name": None, "url": None},
         fields=fields,
         links=[],
-        raw=raw,
-        # round.durationMs 或 startedAt/endedAt 差值是可靠的当前 round 耗时
-        task_duration_ms=duration_ms if duration_ms is not None else None,
+        raw={},
+        task_duration_ms=duration_ms if type(duration_ms) in (int, float) and 0 <= duration_ms <= 86400000 else None,
     )
 
 
@@ -298,6 +415,16 @@ class OmpProviderAdapter(ProviderAdapter):
                     "provider_incompatible", "不兼容的 provider 请求", retryable=False
                 )
 
+        header_event = headers_lower.get("x-omp-event")
+        if isinstance(body_event_raw, str) and body_event_raw in _V2_EVENTS:
+            if header_event is not None and header_event != body_event_raw:
+                raise ProviderError("event_mismatch", "OMP 事件不匹配", retryable=False)
+            try:
+                return _normalize_v2(payload)
+            except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+                raise ProviderError("invalid_payload", _OMP_ADAPTER_ERROR_MSG, retryable=False) from None
+        if "version" in payload and (isinstance(payload["version"], bool) or payload["version"] not in (1, "1.0")):
+            raise ProviderError("unsupported_version", "不支持的 OMP 版本", retryable=False)
         is_valid, err_msg = is_omp_session_stop(headers, payload)
         if not is_valid:
             if "不一致" in err_msg:

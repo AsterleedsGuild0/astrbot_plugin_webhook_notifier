@@ -16,7 +16,7 @@
 
 > 历史基线说明：本文保留 `v1.0.0` 的 OMP 专题与当时发布状态，不代表当前源码的 Provider 集合或默认值。自 `v2.0.0` 起默认 `markdown`，旧记录缺失 `provider` 也按 Markdown 读取；现行操作与迁移边界以[公共契约](public-contract.md)和[命令参考](command-reference.md)为准。下方 OMP 创建命令显式补充 Provider，以免复制时误用新默认。
 >
-> OMP 客户端现已在本仓库建立维护入口，安装与来源说明见[客户端指南](client-integration.md)。下文外部社区 Hook 的表述仅描述历史集成来源，不是当前部署依赖；V1 payload 契约保持不变。
+> OMP 客户端现由本仓库维护，当前只发送 V2 独立事件。下文保留 V1 历史设计，不代表当前成功判定或隐私边界；现行兼容纠错见[公共契约](public-contract.md)，安装见[客户端指南](client-integration.md)。
 
 ---
 

@@ -92,7 +92,7 @@ def test_omp_explicitly_uses_unknown_scope_and_focused_allows_it() -> None:
     event = normalize_omp_payload({"event": "omp.session_stop"})
     assert isinstance(event, NormalizedEvent)
     assert event.session_scope == "unknown"
-    assert event.status == "success"
+    assert event.status == "unknown"
     adapter_event = OmpProviderAdapter().parse(
         headers={"x-omp-event": "session_stop"},
         payload={"event": "omp.session_stop"},

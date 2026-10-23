@@ -38,6 +38,8 @@ _STATUS_LABELS = {
     "fail": "失败",
     "错误": "失败",
     "失败": "失败",
+    "aborted": "已中止",
+    "unknown": "未知",
     "warning": "待处理",
     "warn": "待处理",
     "action_required": "待处理",

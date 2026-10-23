@@ -97,7 +97,7 @@ enable_private_notifications: false
 
 ## OMP 客户端 Hook 与数据外发
 
-OMP 原生提供 extension/Hook 加载机制和 `session_stop` 生命周期事件。HTTP POST、环境变量和 version 1 payload 由本仓库 [`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts) 实现，不是 OMP 内建 Webhook。部署步骤与来源说明见[OMP 客户端 Hook 集成指南](client-integration.md)。
+OMP 原生提供公开事件与扩展加载机制；HTTP POST 与 V2 协议由本仓库 [`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts) 实现，不是 OMP 内建 Webhook。先部署 V2 服务端再切换客户端，步骤见[接入指南](client-integration.md)。
 
 客户端主要环境变量：
 
@@ -107,11 +107,11 @@ OMP 原生提供 extension/Hook 加载机制和 `session_stop` 生命周期事�
 | `OMP_SESSION_WEBHOOK_TOKEN` | `ONEBOT_WEBHOOK_TOKEN` | 独立 Bearer Token；不得写入 URL |
 | `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | 请求超时毫秒值；默认约 5 秒 |
 
-该 Hook 可能外发 prompt、`cwd`、session file、会话/轮次标识、模型、耗时、图片与 entry/message 计数、lastAssistant 元数据。使用方必须评估业务数据、用户输入和本地路径离开 OMP 运行环境后的传输、接收、日志与留存风险。
+当前维护源只外发有界显式名称、cwd basename、匿名关联、时间和结构化状态；不外发正文、完整路径、原始 ID、工具参数、计划或原始错误。名称仍可能含业务信息；不要从正文截取名称。
 
-基线代码在网络异常时记录 warn、不重试，因此临时网络故障可能造成单次通知丢失；timeout 过小会增加此风险。它不检查 HTTP 状态码或响应正文，HTTP 4xx/5xx 不会产生该警告，不能仅凭无报错认定送达。失败日志包含目标 URL 和错误文本，未做脱敏；URL 路径和查询参数可能敏感，不得把 Token 放入 URL，公开日志前须脱敏并限制日志访问。
+客户端同时分类 HTTP 与受限业务响应，最多 3 次有界尝试且 ID 不变；策略跳过、部分失败与重放不绕过幂等重发。日志不含 URL、凭据、响应正文或异常原文；OMP Sender 不再保留 traceback。超时或重放不证明实际送达。
 
-本次客户端迁入保留既有本地 `onebot.ts` 的发送行为，不自动实现匿名化、字段裁剪或重试。生产环境应固定本仓库 commit 或发布版本，并在升级 OMP 或 Hook 后重新验证 payload 与日志行为；开发同步器不是发布门禁。
+维护源和部署副本分离，开发期间保持默认同步器停止并禁用。同步暂停并没有停用已加载 Hook；原生测试必须隔离配置、入口、环境与目标。生产切换、恢复同步、凭据使用均需独立授权。历史 V1 payload 仍接收，纠错与隐私变化见公共契约。
 
 ---
 

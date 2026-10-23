@@ -2,12 +2,12 @@
 
 ## 文档信息
 
-- 服务端协议：`omp.session_stop` version 1，自 v0.3.0 起支持
+- 服务端协议：新增 `omp.run_finished` / `omp.action_required` version 2，保留 V1 接收
 - 客户端维护入口：[`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts)
-- 基线日期：2026-10-22
-- 发布状态：仓库新增、尚未发布；已发布的 v2.0.0 ZIP 不含此客户端
+- 当前 API 研究及本机版本：OMP `18.12.6`，2026-10-23
+- 发布状态：V2 本地开发版，尚未部署；已发布的 v2.0.0 ZIP 不含此客户端
 
-本文说明如何把 OMP 会话结束事件发送到 Webhook Notifier。客户端现由本仓库维护，基于既有本地 `onebot.ts` 建立基线，保留原有事件、payload、环境变量与发送行为，不再要求部署时从外部社区仓库获取脚本。历史接入来源为 [`ParticleG/omp-config`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)，不将既有代码表述为全新原创。
+本文说明如何将 OMP 运行收束和交互观察发送到 Webhook Notifier。维护源只发送 V2，不自动降级。历史 V1 基线来自 [`ParticleG/omp-config`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)；V1 接收兼容和状态纠错见[公共契约](public-contract.md#v1-接收兼容与纠错)。
 
 macOS 开发环境可以通过[本地 Hook 自动同步](#本地-hook-自动同步)部署普通文件副本。创建仓库源文件不等于接管本机已加载的 Hook；切换文件名和启动同步需单独执行。
 
@@ -17,11 +17,9 @@ macOS 开发环境可以通过[本地 Hook 自动同步](#本地-hook-自动同�
 
 ## OMP 原生机制与客户端的边界
 
-OMP 原生提供 extension、Hook 加载机制，以及 `session_stop` 生命周期事件。HTTP POST、环境变量读取和 version 1 JSON payload 由本仓库的 `webhook-notifier.ts` 实现，不是 OMP 原生 Webhook。
+OMP 原生提供 ExtensionAPI 事件和加载机制，HTTP 协议由本仓库维护。`session_stop` 可能被其他扩展要求续跑，并不证明最终成功；Hook 等待维护路由后的 `agent_end`，结合 `willContinue`、重试结果和结构化 assistant 状态判断。子代理不依赖 `session_stop`。
 
-本插件的 `omp` provider 兼容并标准化 `omp.session_stop` version 1 payload；客户端入库没有改变该契约，也不表示 OMP 官方承诺该 HTTP 契约。
-
-OMP adapter 显式将 `session_scope` 标记为 `unknown`；在服务端 `notification_mode=focused` 下 OMP 行为不变，不会因缺少可靠 scope 而被抑制。
+V2 使用公开代理身份设置 `root|subagent|unknown`；服务端只过滤规范 `completed` 的成功短任务。审批、计划审阅和 ask 只观察公开事件，不修改工具输入／结果、不返回阻断值。源码依据不等于原生 OMP 场景已验收。
 
 ---
 
@@ -115,15 +113,14 @@ omp --hook /path/to/webhook-notifier.ts
 
 ### 触发并分层验证
 
-1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟-omp-hook)确认插件、OMP Endpoint、Token 和 AstrBot 投递链路；README 默认快速开始使用 Markdown，不能直接用于 OMP Endpoint。
-2. 启动已加载 Hook 的 OMP，完成一次真实的主代理对话，并让主代理正常完成一轮响应；这会触发 `session_stop`。任务或子代理会话不会触发该事件。
-3. 若没有请求，先用 `omp -p '/extensions'` 确认加载路径，再确认 URL 环境变量确实进入 OMP 进程。URL 未配置时脚本会静默跳过。
-4. 网络请求失败时，Hook 会通过 `pi.logger.warn("Failed to send OMP session webhook", ...)` 记录警告；当前基线不检查 HTTP 状态码或响应正文，HTTP 4xx/5xx 不会触发该警告。排障需结合接收端日志或 curl 返回值。
-5. 再检查反向代理访问日志、AstrBot 脱敏日志和 Bot 目标是否送达，不要公开完整 URL、Endpoint Path、Token 或 payload。
+1. 先在独立配置与回环测试目标执行下方本地 smoke；不得仅因默认同步器暂停就启动带真实环境变量的 OMP。
+2. 获得相应授权后，用隔离 HOME、独立扩展入口与测试凭据执行原生场景。当前 Hook 在最终 `agent_end` 收束时发送；`willContinue=true` 的重试、维护和后台等待不提前完成。
+3. 只有 URL、Token 同时有效才发送；缺失／非法时记录固定配置分类。客户端日志 `OMP webhook` 只含分类、HTTP 状态、尝试次数和匿名事件引用。
+4. 同时检查 HTTP 和受限业务结果；`delivered` 表示服务端报告送达，`replayed` 不能作为实际消息证明。线上还需核对测试目标消息。
 
 ### 更新策略
 
-生产部署固定插件仓库 commit 或发布版本；开发环境可选择下方自动同步器，不能将它当作稳定版本发布。更新前后复核新增外发字段、环境变量、日志内容和网络行为。本次入库保持本地工作版本行为，未进行真实 OMP 加载或线上投递验收。
+先升级支持 V2 的服务端，再单独授权切换客户端。保留单一生效入口；不恢复旧 `onebot.ts` 为第二入口。默认同步器在开发期间保持停止／禁用，不覆盖保留的真实部署副本。回滚客户端需从已核对的 V1 基线恢复同一入口并重启隔离／目标 OMP，不能靠修改 V2 的 version 字段回退。
 
 ---
 
@@ -154,78 +151,44 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 | --- | --- | --- |
 | `OMP_SESSION_WEBHOOK_URL` | `ONEBOT_WEBHOOK_URL` | Webhook Notifier 的完整 Endpoint URL |
 | `OMP_SESSION_WEBHOOK_TOKEN` | `ONEBOT_WEBHOOK_TOKEN` | 创建 Endpoint 时单独返回的 Bearer Token；本插件鉴权必需 |
-| `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | HTTP 请求超时，单位为毫秒；默认约 5 秒 |
+| `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | 100–30000 的整数毫秒，默认 5000 |
+| `OMP_SESSION_WEBHOOK_INSTANCE` | 无 | 显式实例别名，清洗控制字符并限制 96 字符 |
 
-优先使用 `OMP_SESSION_*` 主变量。`ONEBOT_*` fallback 保留既有本地配置兼容性，不应同时配置相互冲突的值。URL、Token 使用首个去除首尾空白后的非空值；timeout 使用首个有效正数，否则回退 5000 毫秒。
+主变量优先；`ONEBOT_*` 仅保留已承诺的配置兼容。URL、Token 取首个非空值，URL 必须为 http(s)，不得含用户信息、查询或 fragment；Token 不得含换行。timeout 取首个有效值，否则使用默认值。凭据不读文件、不写日志。
 
 ---
 
 ## 生命周期与 HTTP 契约
 
-Hook 在 `before_agent_start` 保存回合起点，在 OMP 原生 `session_stop` 事件中生成 payload，随后异步执行一次 HTTP POST：
+完整字段、状态、大小、匿名引用、运行／交互边界和重试语义以[OMP V2 公共契约](public-contract.md#omp-v2运行收束与交互观察未发布)为准。
 
-- 方法：`POST`
-- Body：JSON
-- `Content-Type`：`application/json`
-- 事件 Header：`X-OMP-Event: session_stop`
-- 鉴权 Header：配置 Token 时发送 `Authorization: Bearer <TOKEN>`
-- 超时：默认约 5 秒，可通过环境变量调整
-- 失败策略：网络异常记录 warn，不重试；不等待 HTTP 结果完成 OMP 事件回调
-- 响应限制：沿用本地基线，不检查 HTTP 状态或响应正文，不能把“没有 warn”当作投递成功
-
-客户端只向本插件 HTTP Endpoint 发送符合契约的 JSON；后续 AstrBot 消息投递由插件处理。
-
-### 服务端兼容字段
-
-| 区域 | 可能字段 | 服务端用途 |
-| --- | --- | --- |
-| 顶层 | `event`、`version`、`emittedAt` | 识别 `omp.session_stop` version 1 和事件时间 |
-| `session` | `id`、`file`、`cwd`、`name`、`model` | 生成事件 ID、上下文与模型展示 |
-| `round` | `turnId`、`startedAt`、`endedAt`、`durationMs` | 轮次标识与耗时 |
-| `round` | `prompt`、`promptLength`、`imageCount` | prompt 超过 2000 个 UTF-16 代码单元时截取前 2000 个并追加省略号，`promptLength` 保留原始长度 |
-| `round` | entry/message 的 before、after、delta 计数 | 轮次变化统计 |
-| `round.lastAssistant` | provider、model、stopReason、timestamp、durationMs 等 | 最后 assistant 状态和模型回退 |
-| `metadata` | `version`、`eventName` | 兼容诊断与 raw 保留 |
-
-字段可能缺失；本插件按可选字段进行标准化。Header 与 Body 事件同时存在但不一致时，请求会被拒绝。OpenCode 的 `session.scope` 属于另一条 provider 契约；OMP 不发送该字段，也不发送 `parentID`。
-
-时间字段在 OMP adapter 中保持客户端发送的 canonical ISO 值，不会提前按 AstrBot 主机本地时区格式化。通知展示时，服务端统一按全局 `display_timezone` 转换 `emittedAt`、`startedAt`、`endedAt` 和 HTML 页脚时间；默认值为 `Asia/Shanghai`，输出示例为 `2026-07-24 09:44:35 CST (UTC+08:00)`。这只影响文本和 HTML 展示，不改变 OMP payload、`NormalizedEvent` 或其他 Provider 的 transport 时间约定。
-
----
+- 新客户端只发送 `omp.run_finished`、`omp.action_required`，整数 `version=2`，Header 与 body 事件一致。
+- `completed` 是运行正常结束，不证明业务验收成功；最终失败、中止、待处理和未知分别表达。
+- 请求去重与解决撤销在客户端有界内存中进行；150ms 内解决不产生过期提醒，队列发送和重试前再次检查。ask 是调用观察，审批不证明已呈现 UI，计划审阅区间可能包含处理耗时。
+- 观察 handler 快速返回，不 await 网络；发送并发 2、队列 64、最多 3 次尝试，重试 ID 不变。退出不阻塞。
+- HTTP 401/403 不重试；429/5xx／网络失败有界重试。策略跳过、部分失败和幂等重放不换 ID 重发；HTTP 200 不自动视为送达。
+- 默认卡片复用现有文本／HTML 链路；时间统一按全局 `display_timezone` 展示，不改变传输时间。
 
 ## 数据与隐私
 
-Hook 可能外发：
+只发送有界实例／会话／代理名称、cwd basename、匿名引用、结构化状态、时间及公开模型／实际 thinking。名称不从 prompt、问题或回答截取；路径形态名称舍弃。名称本身仍可能包含业务信息。
 
-- session id、名称、模型；
-- session file 和工作目录 `cwd`；
-- round turnId、开始/结束时间、耗时；
-- prompt、prompt 长度和图片数量；
-- entry/message 计数；
-- lastAssistant 元数据。
+禁止出站或日志出现正文、完整路径、原始 ID、工具参数、计划、原始错误和原始对象。OMP Sender 只记录固定失败分类，不保留异常正文与 traceback。V1 继续接收，但标准化不再透出旧完整路径、raw 元数据或原始 ID；`error`／`aborted` 纠正，普通 `stop` 缺最终证据时为 `unknown`。
 
-其中 prompt、`cwd`、session file 可能包含业务内容、用户输入、仓库结构、用户名或本地路径。即使默认聊天通知不展示完整 prompt 或 session file，原始 HTTP payload 仍可能携带这些字段，使用方必须在启用前评估数据最小化、跨网络传输、日志留存和接收目标权限。
+## 本地验证与层级
 
-基线代码的网络失败日志包含目标 URL 和错误文本，未做脱敏；URL 中的路径及查询参数也可能敏感。不得将 Token 拼入 URL，公开日志前须脱敏，并限制日志采集与访问权限。本次迁入不改变该既有行为。
+在仓库根目录执行：
 
----
+```bash
+bun test integrations/omp integrations/opencode
+uv run pytest -q
+uv run ruff check .
+uv run python scripts/smoke_omp_hook.py
+```
 
-## 验证步骤
+smoke 在已有 `tmp/` 下创建临时 HOME、脚本与 Registry，退出清除。驱动维护源 Hook，经真实回环 HTTP、真实 Endpoint 鉴权、Adapter、策略、文本及 Sender，到内存消息接收器；不是线上 AstrBot。`--hook <测试ZIP提取入口>` 可验证打包副本，不默认使用真实部署文件。
 
-1. 先使用[端到端教程的 OMP curl 示例](end-to-end-setup.md#2-使用-curl-模拟-omp-hook)模拟 version 1 请求，确认 URL、Token、OMP Endpoint 和服务端投递链路。
-2. 再完成一次真实主代理响应以触发 `session_stop`；任务或子代理会话不触发该事件。
-3. 通过 curl 返回值或接收端记录检查 HTTP JSON 结果；当前 Hook 不展示这些结果：
-   - `message=ok`：至少一个目标成功投递。
-   - `message=skipped`：请求已处理，但目标被安全策略跳过；常见于私聊通知默认关闭，不应重试。
-   - `message=partial_delivery`：部分目标成功，部分目标被跳过或失败；查看逐目标结果和 `retryable`。
-   - 非 2xx 或鉴权错误：先检查 URL、Token 和 Endpoint 状态。
-4. 同时检查 `omp -p '/extensions'`、`~/.omp/logs/` 中的 warn 与 AstrBot 侧脱敏日志，但不要公开完整 URL、Token 或 payload。
-
-### 客户端基线验证记录
-
-2026-10-22 本地验证通过：OMP 与 OpenCode 的 Bun 测试合计 293 项，Python 全仓 1226 项，Ruff 检查通过。除新增维护说明注释外，仓库 Hook 代码与既有本地 `onebot.ts` 一致。
-
-实际构建验证 ZIP，确认包含 OMP 运行文件、排除 Bun 测试与同步器；从 ZIP 提取 Hook 后，由受控事件驱动它发送真实的回环 HTTP 请求，再调用现有 OMP 事件识别和标准化函数，验证了 Header、会话／轮次标识、耗时、模型及计数差值。该验证未启动 OMP 原生加载器，也未连接线上 AstrBot 或执行 Bot 消息投递，不替代这些运行链路的验收。
+本地行为回归、HTTP、原生 OMP 和线上投递必须分别留证，详见[验收记录](omp-v2-acceptance.md)。历史 2026-10-22 的 293 项 Bun／1226 项 Python 和旧 ZIP smoke 仅属于 V1 维护基线，不证明 V2。
 
 ---
 
@@ -245,11 +208,11 @@ Token 必须放在独立环境变量中。轮换后旧 Token 立即失效；不�
 
 ### 网络或 timeout
 
-确认 OMP 运行环境可访问插件 Endpoint、TLS 证书有效、反向代理允许 POST，并根据受控网络延迟调整 `OMP_SESSION_WEBHOOK_TIMEOUT_MS`。Hook 失败不重试，临时网络故障可能导致单次通知丢失。
+确认受控目标网络和 TLS，timeout 配置范围为 100–30000ms。最多 3 次有界尝试，超时属于结果未知，不能推断服务端未发送；重放结果也不证明送达。
 
 ### payload 变更
 
-确认 `event=omp.session_stop`、`version=1`，并检查 Header 与 Body 是否一致。字段缺失通常可兼容，事件名、版本或结构变化可能需要插件升级。
+新版必须使用 V2 独立事件名与整数 version 2；错误版本、未知字段、超限结构拒绝。V1 调用不自动升级，具体兼容值与状态纠错见公共契约。
 
 ### Hook 或 OMP 升级
 
@@ -259,10 +222,10 @@ Token 必须放在独立环境变量中。轮换后旧 Token 立即失效；不�
 
 ## 兼容性与责任边界
 
-- OMP 原生负责 extension/Hook 加载和 `session_stop` 生命周期事件。
-- 本仓库 `integrations/omp/webhook-notifier.ts` 负责 HTTP POST、环境变量和 version 1 payload。
-- Webhook Notifier 服务端负责接收、鉴权、兼容解析、标准化、渲染和 AstrBot 投递。
-- 初始维护版本来自本地 `onebot.ts`，没有借迁入修改协议、增加重试或实现 OpenCode 客户端的其他能力。
+- OMP 原生负责事件 producer 和扩展绑定；Hook 不改造上游调度。
+- 本仓库维护源负责 V2 白名单、观察状态、匿名关联和有界 HTTP 投递。
+- Webhook Notifier 负责鉴权、V1/V2 解析、规范策略、共用渲染和 AstrBot 投递。
+- 各层验收独立；未验证原生或线上场景不得记为通过。
 - OMP 原生 API 后续变化仍需独立验证；历史社区源码链接用于来源追溯，不是自动更新源。
 
 ---

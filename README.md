@@ -16,7 +16,7 @@
 
 ## 功能亮点
 
-- 支持 OMP `omp.session_stop` V1 通知，展示会话、工作目录、模型、耗时与输入规模；客户端维护入口为 `integrations/omp/webhook-notifier.ts`。
+- OMP 维护源只发送 V2 运行收束／待处理通知，区分正常、失败、中止和未知；匿名白名单、有界重试，保留 V1 接收。入口 `integrations/omp/webhook-notifier.ts`，迁移与证据见[接入指南](docs/client-integration.md)。
 - `v1.2.0` 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
 - 支持通用 `markdown.message`：复用 Endpoint Bearer、目标别名白名单、幂等、文本/HTML 图片与自动降级链路，不新增公开路由。
 - root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。顶部提供覆盖统计（总任务时长、子任务覆盖时长与覆盖率），不完整数据标为“已观测”。
@@ -263,7 +263,7 @@ Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](
 
 ### 这是 OMP 原生 Webhook 吗？
 
-不是。OMP 提供 Hook 机制和 `session_stop` 事件，HTTP 请求与 version 1 payload 由本仓库维护的 `integrations/omp/webhook-notifier.ts` 实现；服务端继续兼容既有 V1 请求格式。
+不是。OMP 提供公开事件与 Hook 加载机制；HTTP POST 和 V2 协议由本仓库维护。最终状态依据 `agent_end` 的续跑与结构化结果，不能把 `session_stop` 直接当成功。服务端保留 V1 接收，但会纠正失败／中止与缺证据状态。
 
 ### OpenCode provider 如何启用？
 

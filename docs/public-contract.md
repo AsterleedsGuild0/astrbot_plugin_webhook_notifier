@@ -19,6 +19,65 @@
 - Endpoint Provider 不可变，不能通过 rotate 或编辑 Registry 原位切换。`provider=markdown` 决定输入协议；`render_mode=text|html_image` 决定输出展示，Markdown 请求同样可以使用 HTML 图片与文本降级。
 - 此变更使用新的主版本号表达兼容性边界，Webhook payload 版本与 Registry 格式版本不变。测试、部署与发布证据分别记录，不将本地回归或测试包投递扩大为全部生产路径通过。
 
+## OMP V2：运行收束与交互观察（未发布）
+
+新 Hook 只发送 `omp.run_finished` 或 `omp.action_required`，`version` 必须是整数 `2`；`X-OMP-Event` 如提供，必须与 body 完全相同。旧服务端不识别这两个事件，不得自动降级为 `omp.session_stop`。仍使用显式 `provider=omp` Endpoint、Bearer 和既有目标别名白名单。
+
+### 信封与隐私
+
+必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`。各层未知字段拒绝，整个 JSON 至多 64 KiB。
+
+- `id` 是每条通知生成一次的随机 32 位小写十六进制标识；重试不得更换。
+- `session` 必须有 `ref`（32 位匿名引用）、`scope`（`root|subagent|unknown`），可选 `name`、`cwdName`、`agent`。名称不超过 96 个 Unicode 字符；缺失名称显示 `OMP Session <ref前12位>`。
+- `cycle` 必须有随机 `ref`、`partial`（布尔）、`reasons`（去重枚举列表），可选 `startedAt`、`endedAt`、`durationMs`、`model`、`thinking`、`metadataChanged`。时间为带时区 ISO-8601；耗时为非负整数毫秒，至多 24 小时。可靠起止才提供耗时；`endedAt` 只用于收束事件。`model` 至多 128 字符；`thinking` 来自公开 `getThinkingLevel()`，不是配置推测。运行中变化或缺失的元数据不冒充全周期单一值。
+- `instance` 是显式配置的实例别名，至多 96 字符；`target_alias` 至多 128 字符。
+- `interaction` 仅用于待处理事件，必填匿名 `ref` 与 `kind=approval|plan_review|ask`。不发送问题、选项、计划、工具名或参数。对应区间是请求观察区间，不是精确人工等待。
+- `reasons` 允许 `missing_start`、`session_changed`、`shutdown`、`expired`、`capacity`、`unpaired_interaction`、`incomplete_metadata`、`clock_changed`。恢复不读取私有历史；缺失起点不得补造。
+
+原始会话／代理／请求 ID 只在有界进程内存中关联，匿名会话引用使用每次加载随机密钥的 HMAC；运行／交互引用使用随机数，不依赖正文。不发送 prompt、回答、问题选项、计划、完整路径、原始错误或事件／details 对象。名称清除控制字符并限长，路径／URL 形态的名称舍弃；cwd 只取 basename。可读名称仍可能含业务信息。
+
+### 运行与状态
+
+`agent_start` 建立观察周期，维护／重试／后台恢复的再次开始沿用尚未收束的周期。`session_stop` 仅保存结构化结果，不投递；最终依据维护路由后的 `agent_end`，`willContinue=true` 时不收束，`awaitingAsyncWork=true` 单独表示后台等待。子代理同样依据 `agent_end`，不依赖缺失的 `session_stop`。工具失败不直接升级为任务失败。
+
+| 状态 | 证据与含义 |
+| --- | --- |
+| `completed` | 最终 `agent_end`，无重试未决／失败证据，最后 assistant 的结构化 `stopReason=stop`。表示本次运行正常结束，不证明业务目标通过验收。 |
+| `failed` | 最终 assistant `stopReason=error`，或重试已报告失败且运行最终收束。 |
+| `aborted` | 最终 assistant `stopReason=aborted`；优先于重试失败分类。 |
+| `action_required` | 有 UI 的可观察交互请求仍未解决，仅用于 `omp.action_required`。ask 事件不证明 UI 已呈现。 |
+| `unknown` | 缺少可靠结果、其他 stopReason、会话切换／退出等未完成观察。不得显示为完成。 |
+
+重试失败事件没有结构化“取消／耗尽”判别字段；不能解析 `finalError` 文本猜测原因。没有最终 `agent_end` 时不凭重试结果补造完成。会话切换只在已发生的 switch／branch／tree 后隔离旧周期，不在可取消的 before 事件中提前终结。
+
+交互用本地 session + agent + 请求 ID 配对去重。150ms 后及每次发送前再次检查；已解决／取消／无 UI 不补发提醒。审批 requested 早于上游 UI 检查，计划 review resolved 表示界面关闭且可能包含处理时间；ask 只看公开 `tool_call/tool_result`，主调用与标准 eval 间接调用沿用同一边界，不扫描 eval 代码。请求无对应结束时保留不完整语义。已发出的提醒不能撤回；解决后不再重试。
+
+### 资源与投递结果
+
+所有观察 handler 同步返回 `undefined`，不 await 网络，不更改事件或返回控制值。进程内至多 128 个会话、每周期 128 个交互去重项，保留至多 24 小时；到限停止保留并记录固定诊断，不建立持久队列。发送队列至多 64 条、并发 2、每条最多 3 次，重试间隔 250ms／1000ms；429 的 Retry-After 最多延长到 5 秒。超时默认 5 秒，配置限制 100–30000ms；受限响应正文至多 8 KiB。退出只尽力移交，不阻塞退出。
+
+| 客户端结果分类 | 判定及重试 |
+| --- | --- |
+| `delivered` | HTTP 2xx、`code=0`、`message=ok`、`data.delivered=true`；只代表接收端报告送达。 |
+| `policy_skipped` | 有效 `skipped`，非重放；不重试。 |
+| `partial_delivery` / `partial_failure` | 受限业务结果；不自动补齐目标，不换 ID 重试。服务端可能已终结幂等记录。 |
+| `replayed` | `skip_reason=idempotency_replay`；不证明本次或原请求实际送达，不重试。 |
+| `permanent_error` | 401/403 及其他非暂态 4xx；不重试。 |
+| `transient_error` / `transport_unknown` | 429、5xx、网络错误或超时，有界重试且保持同一 ID。超时不能推断服务端未发送。 |
+| `unknown` | 非 JSON、超限、错误 shape、200 缺少有效业务确认；不视为送达，不盲目重发。 |
+
+URL 与 Token 任一缺失／非法均不发送，日志只含固定分类、HTTP 状态、尝试次数及匿名事件引用，不含 URL、Token、响应正文、异常原文。拒绝重定向，避免凭据跨目标转发。有限内存投递不是 exactly-once 保证。
+
+### V1 接收兼容与纠错
+
+`omp.session_stop`／`session_stop` 的 body／header 兼容形式继续接收；省略 version、`1` 与历史 `"1.0"` 允许，其他 version 拒绝。V1 `lastAssistant.stopReason=error|aborted` 分别修正为 `failed|aborted`；`stop` 及其他缺证据情形为 `unknown`，因为 V1 没有最终 `willContinue` 证据。原始请求的字段继续解析，但不将完整路径、原始 ID 或 raw 元数据带入默认展示。
+
+仅规范 `completed` 参与最短完成时长过滤；V2 可靠短成功任务现在会被默认 15 秒阈值过滤，失败／中止／待处理／未知不受此过滤。V1 不伪造最终成功，因此不因上述纠错新增时长过滤；它没有 V2 的运行／交互／thinking 元数据。
+
+### API 与验收层级
+
+依据 OMP `v18.12.6` 的 [公开事件](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/extensibility/shared-events.ts)、[收束 producer](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/session/agent-session.ts#L4698-L4914)、[审批与工具包装](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/extensibility/extensions/wrapper.ts#L233-L520)、[计划审阅](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/modes/interactive-mode.ts#L6910-L6973)。本地事件回归、真实 HTTP、原生 OMP、线上 AstrBot 分别记录，源码调查不代替运行验收。先部署支持 V2 的服务端，再独立授权切换客户端；同步暂停不等于真实 Hook 停用。
+
 ---
 
 ## 公共契约范围
