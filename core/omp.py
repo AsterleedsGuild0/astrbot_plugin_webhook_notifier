@@ -26,6 +26,119 @@ _TITLES = {
     "completed": "运行正常结束", "failed": "运行失败", "aborted": "运行已中止",
     "action_required": "需要处理", "unknown": "运行结果未知",
 }
+_TIMELINE_REASONS = (
+    "missing_parent", "ambiguous_parent", "missing_start", "missing_end",
+    "loading_gap", "invalid_parent_graph", "depth_limit", "truncated",
+    "clamped", "clock_changed",
+)
+
+
+def _timeline(value: Any, cycle: dict, *, waits: bool = False) -> dict:
+    """同一标准化 timeline 结构；OMP timeBasis 明确区分观察与调度／纯人工等待。"""
+    list_key, count_key = ("intervals", "Interval") if waits else ("items", "Item")
+    observed, displayed = f"observed{count_key}Count", f"displayed{count_key}Count"
+    value = _object(value, {"version", "timeBasis", "partial", "partialReasons", "truncated", observed, displayed, list_key}, set())
+    expected_basis = "omp_interaction_observation" if waits else "omp_agent_observation"
+    if type(value["version"]) is not int or value["version"] != 1 or value["timeBasis"] != expected_basis:
+        raise ValueError("timeline_version")
+    reasons = value["partialReasons"]
+    if (not isinstance(reasons, list) or len(reasons) > len(_TIMELINE_REASONS) or any(not isinstance(r, str) or r not in _TIMELINE_REASONS for r in reasons)
+            or reasons != [r for r in _TIMELINE_REASONS if r in reasons]
+            or type(value["partial"]) is not bool or value["partial"] != bool(reasons)
+            or type(value["truncated"]) is not bool or value["truncated"] != ("truncated" in reasons)):
+        raise ValueError("timeline_partial")
+    for key, limit in ((observed, 4096), (displayed, 64)):
+        if type(value[key]) is not int or not 0 <= value[key] <= limit:
+            raise ValueError("timeline_count")
+    rows = value[list_key]
+    if not isinstance(rows, list) or len(rows) != value[displayed] or value[observed] < len(rows):
+        raise ValueError("timeline_items")
+    if value[observed] > len(rows) and not ({"truncated", "depth_limit"} & set(reasons)):
+        raise ValueError("timeline_omission")
+    if len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()) > (12 if waits else 24) * 1024:
+        raise ValueError("timeline_size")
+    refs: set[str] = set()
+    cycles: dict[str, tuple[str, int]] = {}
+    attempts: set[tuple[str, int]] = set()
+    for row in rows:
+        if waits:
+            _object(row, {"ref", "agentRef", "kind", "intervalState"}, {"result", "startOffsetMs", "endOffsetMs", "durationMs"})
+            _ref(row["agentRef"])
+            if row["kind"] not in ("approval", "plan_review", "ask", "background_wait"):
+                raise ValueError("interval_kind")
+        else:
+            _object(row, {"ref", "cycleRef", "parentRef", "depth", "attempt", "status", "timingQuality"},
+                    {"name", "agent", "model", "thinking", "metadataChanged", "startOffsetMs", "endOffsetMs", "durationMs"})
+            _ref(row["cycleRef"])
+            _ref(row["parentRef"])
+            if row["ref"] == cycle["ref"] or row["cycleRef"] == cycle["ref"] or row["parentRef"] == row["cycleRef"]:
+                raise ValueError("timeline_parent")
+            if type(row["depth"]) is not int or not 1 <= row["depth"] <= 8 or type(row["attempt"]) is not int or not 1 <= row["attempt"] <= 4096:
+                raise ValueError("timeline_depth")
+            if (row["attempt"] == 1) != (row["ref"] == row["cycleRef"]):
+                raise ValueError("timeline_cycle")
+            relation = (row["parentRef"], row["depth"])
+            if row["cycleRef"] in cycles and cycles[row["cycleRef"]] != relation:
+                raise ValueError("timeline_parent")
+            cycles[row["cycleRef"]] = relation
+            attempt = (row["cycleRef"], row["attempt"])
+            if attempt in attempts:
+                raise ValueError("timeline_attempt")
+            attempts.add(attempt)
+            if row["status"] not in ("running", "continued", "completed", "failed", "aborted", "unknown"):
+                raise ValueError("timeline_status")
+            for key, limit in (("name", 96), ("agent", 96), ("model", 128), ("thinking", 32)):
+                if key in row:
+                    _bounded_text(row[key], limit, model=key == "model")
+            if "metadataChanged" in row and type(row["metadataChanged"]) is not bool:
+                raise ValueError("timeline_metadata")
+            if row.get("metadataChanged") and ("model" in row or "thinking" in row):
+                raise ValueError("timeline_metadata")
+        _ref(row["ref"])
+        if row["ref"] in refs:
+            raise ValueError("timeline_duplicate")
+        refs.add(row["ref"])
+        for key in ("startOffsetMs", "endOffsetMs", "durationMs"):
+            if key in row and (type(row[key]) is not int or not 0 <= row[key] <= cycle.get("durationMs", 86400000)):
+                raise ValueError("timeline_offset")
+        start, end, duration = (row.get(k) for k in ("startOffsetMs", "endOffsetMs", "durationMs"))
+        if end is not None and start is not None and end < start:
+            raise ValueError("timeline_order")
+        if start is None and "missing_start" not in reasons and "clamped" not in reasons:
+            raise ValueError("timeline_start")
+        if end is None and "missing_end" not in reasons and "clamped" not in reasons:
+            raise ValueError("timeline_end")
+        if waits:
+            state = row["intervalState"]
+            expected = "complete" if start is not None and end is not None else "right_censored" if start is not None else "left_censored" if end is not None else "unknown"
+            if state != expected or (end is not None) != ("result" in row):
+                raise ValueError("interval_state")
+            if end is not None and row["result"] not in ("resolved", "cancelled", "unknown"):
+                raise ValueError("interval_result")
+            reliable = state == "complete"
+        else:
+            quality = row["timingQuality"]
+            expected = "unknown" if start is None and end is None else "partial" if start is None or end is None else None
+            if quality not in ("observed", "partial", "unknown") or (expected and quality != expected):
+                raise ValueError("timeline_quality")
+            if expected is None and quality != "observed" and not (quality == "partial" and "clamped" in reasons):
+                raise ValueError("timeline_quality")
+            reliable = quality == "observed"
+        if reliable:
+            if duration is None or duration != end - start:
+                raise ValueError("timeline_duration")
+        elif duration is not None:
+            raise ValueError("timeline_duration")
+    for node, (parent, depth) in cycles.items():
+        if parent == cycle["ref"]:
+            if depth != 1:
+                raise ValueError("timeline_depth")
+        elif parent in cycles:
+            if depth != cycles[parent][1] + 1:
+                raise ValueError("timeline_graph")
+        elif not ({"missing_parent", "truncated"} & set(reasons)):
+            raise ValueError("timeline_parent")
+    return {**value, "partialReasons": list(reasons), list_key: [dict(row) for row in rows]}
 
 
 def _safe_name(value: Any, limit: int = 96, *, model: bool = False) -> str:
@@ -67,7 +180,7 @@ def _bounded_text(value: Any, limit: int = 96, *, model: bool = False) -> None:
 
 def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
     _object(body, {"event", "version", "id", "emittedAt", "session", "cycle", "status"},
-            {"instance", "interaction", "target_alias"})
+            {"instance", "interaction", "target_alias", "subagentTimeline", "userWaitTimeline"})
     if type(body["version"]) is not int or body["version"] != 2:
         raise ValueError("version")
     if len(json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 65536:
@@ -91,7 +204,7 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
         if key in body:
             _bounded_text(body[key], limit)
     cycle = _object(body["cycle"], {"ref", "partial", "reasons"},
-                    {"startedAt", "endedAt", "durationMs", "model", "thinking", "metadataChanged"})
+                    {"startedAt", "endedAt", "durationMs", "model", "thinking", "metadataChanged", "timeBasis"})
     _ref(cycle["ref"])
     reasons = cycle["reasons"]
     if (type(cycle["partial"]) is not bool or not isinstance(reasons, list)
@@ -99,6 +212,8 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
             or any(not isinstance(r, str) or r not in _REASONS for r in reasons)
             or len(set(reasons)) != len(reasons) or cycle["partial"] != bool(reasons)):
         raise ValueError("partial")
+    if "timeBasis" in cycle and cycle["timeBasis"] != "receipt_monotonic":
+        raise ValueError("time_basis")
     start = _timestamp(cycle["startedAt"]) if "startedAt" in cycle else None
     end = _timestamp(cycle["endedAt"]) if "endedAt" in cycle else None
     if action and end is not None or not action and end is None:
@@ -109,7 +224,8 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
         duration = cycle["durationMs"]
         if type(duration) is not int or not 0 <= duration <= 86400000 or start is None:
             raise ValueError("duration")
-        if abs(((end or emitted) - start).total_seconds() * 1000 - duration) > 1:
+        tolerance = 10 if cycle.get("timeBasis") == "receipt_monotonic" else 1
+        if not (cycle.get("timeBasis") == "receipt_monotonic" and "clock_changed" in reasons) and abs(((end or emitted) - start).total_seconds() * 1000 - duration) > tolerance:
             raise ValueError("duration_bounds")
     for key, limit in (("model", 128), ("thinking", 32)):
         if key in cycle:
@@ -142,12 +258,24 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
         if interaction["kind"] not in labels:
             raise ValueError("interaction_kind")
         summary = labels[interaction["kind"]]
+    subagents = waits = None
+    if "subagentTimeline" in body or "userWaitTimeline" in body:
+        if action or session["scope"] != "root" or cycle.get("timeBasis") != "receipt_monotonic":
+            raise ValueError("timeline_scope")
+        if "subagentTimeline" in body:
+            subagents = _timeline(body["subagentTimeline"], cycle)
+        if "userWaitTimeline" in body:
+            waits = _timeline(body["userWaitTimeline"], cycle, waits=True)
+            known = {cycle["ref"]} | {item["cycleRef"] for item in (subagents or {}).get("items", [])}
+            if any(item["agentRef"] not in known for item in waits["intervals"]) and not ({"missing_parent", "truncated", "depth_limit"} & set(waits["partialReasons"])):
+                raise ValueError("interval_agent")
     return NormalizedEvent(
         provider="omp", event=body["event"], version=2, id=body["id"],
         emitted_at=body["emittedAt"], title=_TITLES[status], status=status,
         session_scope=SessionScope(session["scope"]), summary=summary,
         source={"name": OMP_SOURCE_NAME, "url": None}, fields=fields,
         task_duration_ms=cycle.get("durationMs") if not action else None,
+        subagent_timeline=subagents, user_wait_timeline=waits,
     )
 
 

@@ -25,11 +25,11 @@
 
 ### 信封与隐私
 
-必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`。各层未知字段拒绝，整个 JSON 至多 64 KiB。
+必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`、`subagentTimeline`、`userWaitTimeline`。各层未知字段拒绝，整个 JSON 至多 64 KiB。
 
 - `id` 是每条通知生成一次的随机 32 位小写十六进制标识；重试不得更换。
 - `session` 必须有 `ref`（32 位匿名引用）、`scope`（`root|subagent|unknown`），可选 `name`、`cwdName`、`agent`。名称不超过 96 个 Unicode 字符；缺失名称显示 `OMP Session <ref前12位>`。
-- `cycle` 必须有随机 `ref`、`partial`（布尔）、`reasons`（去重枚举列表），可选 `startedAt`、`endedAt`、`durationMs`、`model`、`thinking`、`metadataChanged`。时间为带时区 ISO-8601；耗时为非负整数毫秒，至多 24 小时。可靠起止才提供耗时；`endedAt` 只用于收束事件。`model` 至多 128 字符；`thinking` 来自公开 `getThinkingLevel()`，不是配置推测。运行中变化或缺失的元数据不冒充全周期单一值。
+- `cycle` 必须有随机 `ref`、`partial`（布尔）、`reasons`（去重枚举列表），可选 `startedAt`、`endedAt`、`durationMs`、`model`、`thinking`、`metadataChanged`、`timeBasis`。新 Hook 的 `timeBasis=receipt_monotonic`，耗时来自公开事件接收的单调时钟，非负整数且至多 24 小时；ISO 时间仅作墙钟展示，墙钟偏差超过 10ms 标记 `clock_changed`。省略 timeBasis 的早期 V2 请求仍按 ISO 差值校验。缺开始不提供耗时；`endedAt` 只用于收束事件。`model` 至多 128 字符，实际 `thinking` 至多 32 字符；运行中变化则省略单一模型／档位，缺失则不补造对应字段。
 - `instance` 是显式配置的实例别名，至多 96 字符；`target_alias` 至多 128 字符。
 - `interaction` 仅用于待处理事件，必填匿名 `ref` 与 `kind=approval|plan_review|ask`。不发送问题、选项、计划、工具名或参数。对应区间是请求观察区间，不是精确人工等待。
 - `reasons` 允许 `missing_start`、`session_changed`、`shutdown`、`expired`、`capacity`、`unpaired_interaction`、`incomplete_metadata`、`clock_changed`。恢复不读取私有历史；缺失起点不得补造。
@@ -51,6 +51,36 @@
 重试失败事件没有结构化“取消／耗尽”判别字段；不能解析 `finalError` 文本猜测原因。没有最终 `agent_end` 时不凭重试结果补造完成。会话切换只在已发生的 switch／branch／tree 后隔离旧周期，不在可取消的 before 事件中提前终结。
 
 交互用本地 session + agent + 请求 ID 配对去重。150ms 后及每次发送前再次检查；已解决／取消／无 UI 不补发提醒。审批 requested 早于上游 UI 检查，计划 review resolved 表示界面关闭且可能包含处理时间；ask 只看公开 `tool_call/tool_result`，主调用与标准 eval 间接调用沿用同一边界，不扫描 eval 代码。请求无对应结束时保留不完整语义。已发出的提醒不能撤回；解决后不再重试。
+
+### 多代理与交互观察时间线
+
+可选 timeline 只允许出现在 root `omp.run_finished`，并要求 `cycle.timeBasis=receipt_monotonic`。仍标准化到既有 `subagent_timeline`／`user_wait_timeline`，不新增传输事件或第二套状态机。缺失 timeline 表示没有资料，不等于可靠的零。
+
+关联使用同一模块内各已加载工厂的公开 `ctx.agent` 身份和 parent 关系；父实例的公开 `getAsyncJobSnapshot()` 必须能唯一证明 agent／owner 边。相同 Main 身份可能出现在多个根实例，不能只凭 parentId 猜根会话。多候选歧义保持不关联，不因某根先退出而猜剩余根；后到的唯一证据可补关联尚在有界内存中的记录。快照只辅助身份／加载缺口判断，不使用 label、command、startTime 或 endTime 制造生命周期。
+
+- 每个 run 使用随机 `cycleRef`，worker 身份复用会产生新 cycle。每次 `agent_start` → `agent_end` 为独立观察段；续跑段为 `continued`，不是最终成功。等待后台工作的间隙不扩大子代理覆盖。没有 workpool item 调度的公开证据时只记录 worker 运行，不宣称 item 级追踪。
+- 常规子代理完成只汇总到根通知；failed／aborted／unknown 和需处理提醒仍独立投递。缺开始不改写明确 error／aborted 证据，但不把无起点的 stop 推为 completed。
+- root 保存已关联的同一 Run 引用；child shutdown 不删除已收束观察。每根最多保留 64 个 child run、每 run 最多 64 段和 128 个交互；导出最多 64 段／64 个交互，深度 8；观察计数饱和于 4096。24 小时 TTL 在下一次公开事件到达时清理，不为保留数据启动常驻轮询。重启不恢复历史；根结束后的迟到结果不修改已发通知，也不并入新根周期。
+
+#### 组件字段
+
+两组件均必填整数 `version=1`、`timeBasis`、布尔 `partial`／`truncated`、`partialReasons`。原因按以下固定顺序去重：`missing_parent`、`ambiguous_parent`、`missing_start`、`missing_end`、`loading_gap`、`invalid_parent_graph`、`depth_limit`、`truncated`、`clamped`、`clock_changed`。`partial` 与原因非空一致，`truncated` 与同名原因一致；观察／展示计数是当前有界资料，不是完整调度计数。
+
+`subagentTimeline`：
+
+- `timeBasis=omp_agent_observation`；`observedItemCount` 为 0–4096，`displayedItemCount` 与 `items` 长度相同且不大于观察计数；组件至多 24 KiB。
+- 每项必填匿名 `ref`、`cycleRef`、`parentRef`、`depth`（1–8）、`attempt`（1–4096，本 cycle 的观察段序号，**不是重试次数**）、`status`（`running|continued|completed|failed|aborted|unknown`）、`timingQuality`（`observed|partial|unknown`）。第一段 ref 等于 cycleRef，后续段使用新 ref。parentRef 指向父 cycle，根为顶层 cycle.ref。重复段、非法父图／深度和自环拒绝。
+- 可选 `name`、`agent`（各 96 字符）、`model`（128）、实际 `thinking`（32）、`metadataChanged`、`startOffsetMs`／`endOffsetMs`／`durationMs`。时间相对根观察开始，严格非负整数且不越可靠根边界。只有完整可靠段允许 duration，等于 end−start；缺端点或裁剪段不补精确时长。name 来自公开显式名称；不从 task 参数、输出或原始 ID 提取可读任务名。
+
+`userWaitTimeline`：
+
+- `timeBasis=omp_interaction_observation`；`observedIntervalCount` 为 0–4096，`displayedIntervalCount` 与 `intervals` 长度相同且不大于观察计数；组件至多 12 KiB。字段名沿用共用结构，**不代表全部都是等待用户**。
+- 每项必填匿名 `ref`、所属 cycle 的 `agentRef`、`kind`（`approval|plan_review|ask|background_wait`）、`intervalState`。`complete` 必须有 start／end／duration／result；`right_censored` 只有 start；`left_censored` 只有 end／result；`unknown` 没有时间和 result。result 为 `resolved|cancelled|unknown`，只表达公开调用解决结果，不表示答案正文或业务成功。
+- 审批记录 requested→resolved；计划记录 review opened→resolved；ask 记录实际工具边界，不扫描 eval 源码；background_wait 记录 awaitingAsyncWork→下一次 agent_start。含处理时间或无 UI 的区间仍保留其原义。缺端点不参与精确统计。
+
+覆盖率复用共有 renderer 的可靠区间并集算法，分母仅用可靠根窗口。子代理观察与后台／交互不跨语义相加；同类或汇总观察区间重叠按并集去重。根窗口减去覆盖率的剩余时间不得标为“主代理执行”。不完整资料只能展示已观测量／下界，不能声称完整计时。
+
+公开来源：[身份与工厂绑定](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/sdk.ts#L2785-L2805)、[身份注入](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/sdk.ts#L3494-L3510)、[owner scoped snapshot](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/session/agent-session.ts#L3060-L3068)。不使用 `task:subagent:*` 私有通道。跨模块副本、跨进程或未加载实例没有历史补全保证；相同实例在新开始后收到没有 cycle ID 的旧事件也无法凭公开字段恢复其原始归属。
 
 ### 资源与投递结果
 

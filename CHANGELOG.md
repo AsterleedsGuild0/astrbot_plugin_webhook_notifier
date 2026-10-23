@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- #30 OMP 观察时间线：复用同一 Run／交互配对，公开 parent 身份＋owner scoped snapshot 关联已加载实例；按 cycle 区分 worker 复用，续跑段、后台等待和审批／计划／ask 分开计时。单调时钟、匿名有界组件、严格父图与边界校验，缺口／歧义／截断不补造历史；正常子代理完成聚合，异常仍提醒。
 - #29 OMP V2：新增独立 `omp.run_finished` / `omp.action_required`，观察最终 `agent_end`、续跑／重试和审批／计划／ask 配对；匿名白名单、有界非阻塞发送、HTTP＋业务分类和稳定 ID 重试。保留 V1 接收，纠正失败／中止，缺最终证据为未知；仅 V2 规范成功参与短任务过滤。
 - OMP 投递异常只记录固定失败分类，移除原始错误与 traceback；V1 标准化不再把完整路径、原始 ID 与 raw 元数据传入展示。OpenCode／Markdown 的投递契约不变。
 - 本次实施与分层证据见 [OMP V2 验收记录](docs/omp-v2-acceptance.md)。真实 Hook 部署副本未改动，默认同步器保持停止并禁用；下述“本机部署切换”是此前基线的历史记录，不是当前同步状态。

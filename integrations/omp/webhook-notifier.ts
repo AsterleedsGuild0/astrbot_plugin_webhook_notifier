@@ -8,11 +8,30 @@ type Kind = "approval" | "plan_review" | "ask";
 type Reason = "missing_start" | "session_changed" | "shutdown" | "expired" | "capacity" | "unpaired_interaction" | "incomplete_metadata" | "clock_changed";
 type Result = "delivered" | "policy_skipped" | "partial_delivery" | "partial_failure" | "replayed" | "permanent_error" | "transient_error" | "transport_unknown" | "unknown";
 type Session = { ref: string; scope: "root" | "subagent" | "unknown"; name?: string; cwdName?: string; agent?: string };
-type Cycle = { ref: string; partial: boolean; reasons: Reason[]; startedAt?: string; endedAt?: string; durationMs?: number; model?: string; thinking?: string; metadataChanged?: boolean };
-type Envelope = { event: "omp.run_finished" | "omp.action_required"; version: 2; id: string; emittedAt: string; session: Session; cycle: Cycle; status: Status; instance?: string; interaction?: { ref: string; kind: Kind } };
-type Interaction = { ref: string; kind: Kind; open: boolean; started: number; timer?: NodeJS.Timeout };
-type Run = { ref: string; start?: number; created: number; session: Session; reasons: Set<Reason>; interactions: Map<string, Interaction>; retrying: boolean; retryFailed: boolean; pendingEnd?: Status; stop?: Status; model?: string; thinking?: string; metadataChanged: boolean; metadataMissing: boolean; closed: boolean };
-type Binding = { owner: symbol; key: string; touched: number; run?: Run };
+type Cycle = { ref: string; partial: boolean; reasons: Reason[]; timeBasis: "receipt_monotonic"; startedAt?: string; endedAt?: string; durationMs?: number; model?: string; thinking?: string; metadataChanged?: boolean };
+export type Envelope = { event: "omp.run_finished" | "omp.action_required"; version: 2; id: string; emittedAt: string; session: Session; cycle: Cycle; status: Status; instance?: string; interaction?: { ref: string; kind: Kind }; subagentTimeline?: SubagentTimeline; userWaitTimeline?: WaitTimeline };
+type IntervalKind = Kind | "background_wait";
+type Resolution = "resolved" | "cancelled" | "unknown";
+type Interaction = { ref: string; kind: IntervalKind; open: boolean; started?: number; ended?: number; result?: Resolution; timer?: NodeJS.Timeout };
+type Span = { ref: string; started?: number; ended?: number; status: Status | "running" | "continued" };
+const TIMELINE_REASONS = ["missing_parent", "ambiguous_parent", "missing_start", "missing_end", "loading_gap", "invalid_parent_graph", "depth_limit", "truncated", "clamped", "clock_changed"] as const;
+type TimelineReason = typeof TIMELINE_REASONS[number];
+type TimelineItem = { ref: string; cycleRef: string; parentRef: string; depth: number; attempt: number; name?: string; agent?: string; model?: string; thinking?: string; metadataChanged?: boolean; status: Status | "running" | "continued"; timingQuality: "observed" | "partial" | "unknown"; startOffsetMs?: number; endOffsetMs?: number; durationMs?: number };
+type WaitInterval = { ref: string; agentRef: string; kind: IntervalKind; result?: Resolution; intervalState: "complete" | "right_censored" | "left_censored" | "unknown"; startOffsetMs?: number; endOffsetMs?: number; durationMs?: number };
+type TimelineBase = { version: 1; partial: boolean; partialReasons: TimelineReason[]; truncated: boolean };
+type SubagentTimeline = TimelineBase & { timeBasis: "omp_agent_observation"; observedItemCount: number; displayedItemCount: number; items: TimelineItem[] };
+type WaitTimeline = TimelineBase & { timeBasis: "omp_interaction_observation"; observedIntervalCount: number; displayedIntervalCount: number; intervals: WaitInterval[] };
+type SnapshotJob = { id: string; agentId?: string; ownerId?: string };
+type Snapshot = { running: SnapshotJob[]; recent: SnapshotJob[] } | null;
+type Run = {
+  ref: string; start?: number; monoStart?: number; created: number; session: Session; reasons: Set<Reason>;
+  interactions: Map<string, Interaction>; background?: Interaction; spans: Span[]; span?: Span; spanCount: number;
+  agentKey?: string; parentKey?: string; depth: number; parent?: Run; root?: Run; children?: Run[];
+  initialJobs: Set<string>; observedSegments: number; timelineReasons: Set<TimelineReason>;
+  retrying: boolean; retryFailed: boolean; pendingEnd?: Status; stop?: Status; model?: string; thinking?: string;
+  metadataChanged: boolean; metadataMissing: boolean; closed: boolean;
+};
+type Binding = { owner: symbol; key: string; touched: number; run?: Run; snapshot?: () => Snapshot };
 type Config = { url: string; token: string; timeout: number; instance?: string };
 type Job = { payload: Envelope; config: Config; live: () => boolean; log: Log };
 type Log = (category: string, id?: string, status?: number, attempt?: number) => void;
@@ -147,6 +166,109 @@ function lastStatus(messages: unknown[]): Status | undefined {
   for (let i = messages.length - 1; i >= 0; i--) { const status = assistantStatus(messages[i]); if (status) return status; }
 }
 
+function snapshotJobs(binding: Binding, initial = false): SnapshotJob[] {
+  try {
+    const snapshot = binding.snapshot?.();
+    if (!snapshot) { binding.run?.timelineReasons.add("loading_gap"); return []; }
+    if (initial && snapshot.running.length) binding.run?.timelineReasons.add("loading_gap");
+    if (snapshot.running.length + snapshot.recent.length > 128) binding.run?.timelineReasons.add("truncated");
+    return [...snapshot.running.slice(0, 128), ...snapshot.recent.slice(0, 128)].slice(0, 128);
+  } catch { binding.run?.timelineReasons.add("loading_gap"); return []; }
+}
+
+/** Factory 共享模块，只关联公开身份与父方快照均能证明的边；从不读取 task 参数或私有 bus。 */
+function linkRuns(): void {
+  for (const binding of bindings.values()) {
+    const run = binding.run;
+    if (!run || run.root || !run.parentKey || run.timelineReasons.has("ambiguous_parent")) continue;
+    const parents: Run[] = [];
+    for (const candidate of bindings.values()) {
+      const parent = candidate.run;
+      if (!parent || parent.closed || !parent.root || parent.root.closed || parent.agentKey !== run.parentKey) continue;
+      if (snapshotJobs(candidate).some(job => job.agentId && job.ownerId && anonymous(job.agentId) === run.agentKey && anonymous(job.ownerId) === parent.agentKey)) parents.push(parent);
+    }
+    run.timelineReasons.delete("missing_parent"); run.timelineReasons.delete("ambiguous_parent");
+    if (parents.length !== 1) { run.timelineReasons.add(parents.length ? "ambiguous_parent" : "missing_parent"); continue; }
+    const parent = parents[0];
+    if (run.depth !== parent.depth + 1) { parent.root!.timelineReasons.add("invalid_parent_graph"); continue; }
+    run.parent = parent; run.root = parent.root;
+    const root = run.root!;
+    root.observedSegments = Math.min(4096, root.observedSegments + run.spanCount);
+    if (root.children!.length < 64) root.children!.push(run);
+    else root.timelineReasons.add("truncated");
+    if (run.depth > 8) root.timelineReasons.add("depth_limit");
+  }
+}
+
+function timelines(root: Run, monoNow: number): { subagentTimeline: SubagentTimeline; userWaitTimeline: WaitTimeline } {
+  const reasons = new Set(root.timelineReasons);
+  const waitReasons = new Set(root.timelineReasons);
+  if (root.monoStart === undefined) { reasons.add("missing_start"); waitReasons.add("missing_start"); }
+  const duration = root.monoStart === undefined ? undefined : Math.min(TTL, Math.max(0, monoNow - root.monoStart));
+  const items: TimelineItem[] = [];
+  const intervals: WaitInterval[] = [];
+  let observedIntervals = 0;
+  for (const run of [root, ...(root.children ?? [])]) {
+    for (const reason of run.timelineReasons) { reasons.add(reason); waitReasons.add(reason); }
+    if (run.reasons.has("capacity")) waitReasons.add("truncated");
+    if (run !== root) {
+      if (run.depth > 8) reasons.add("depth_limit");
+      else for (let i = 0; i < run.spans.length; i++) {
+        if (items.length >= 64) { reasons.add("truncated"); break; }
+        const span = run.spans[i];
+        const start = root.monoStart === undefined || span.started === undefined ? undefined : span.started - root.monoStart;
+        const end = root.monoStart === undefined || span.ended === undefined ? undefined : span.ended - root.monoStart;
+        const clamped = (start !== undefined && start < 0) || (end !== undefined && (end < 0 || end > duration! || (start !== undefined && end < start)));
+        if (start === undefined) reasons.add("missing_start");
+        if (end === undefined) reasons.add("missing_end");
+        if (clamped) reasons.add("clamped");
+        const reliable = start !== undefined && end !== undefined && !clamped;
+        items.push({
+          ref: span.ref, cycleRef: run.ref, parentRef: run.parent?.ref ?? root.ref, depth: run.depth, attempt: i + 1,
+          name: run.session.name, agent: run.session.agent, status: span.status,
+          ...(!run.metadataChanged ? { model: run.model, thinking: run.thinking } : { metadataChanged: true }),
+          timingQuality: reliable ? "observed" : start === undefined && end === undefined ? "unknown" : "partial",
+          ...(start === undefined ? {} : { startOffsetMs: Math.max(0, Math.min(start, duration!)) }),
+          ...(end === undefined ? {} : { endOffsetMs: Math.max(0, Math.min(end, duration!)) }),
+          ...(reliable ? { durationMs: end - start } : {}),
+        });
+      }
+    }
+    observedIntervals = Math.min(4096, observedIntervals + run.interactions.size);
+    for (const interaction of run.interactions.values()) {
+      if (intervals.length >= 64) { waitReasons.add("truncated"); break; }
+      const start = root.monoStart === undefined || interaction.started === undefined ? undefined : interaction.started - root.monoStart;
+      const end = root.monoStart === undefined || interaction.ended === undefined ? undefined : interaction.ended - root.monoStart;
+      if (start === undefined) waitReasons.add("missing_start");
+      if (end === undefined) waitReasons.add("missing_end");
+      if ((start !== undefined && start < 0) || (end !== undefined && (end < 0 || end > duration! || (start !== undefined && end < start)))) {
+        waitReasons.add("clamped");
+        intervals.push({ ref: interaction.ref, agentRef: run.ref, kind: interaction.kind, intervalState: "unknown" });
+        continue;
+      }
+      intervals.push({
+        ref: interaction.ref, agentRef: run.ref, kind: interaction.kind,
+        intervalState: start !== undefined && end !== undefined ? "complete" : start !== undefined ? "right_censored" : end !== undefined ? "left_censored" : "unknown",
+        ...(start === undefined ? {} : { startOffsetMs: start }),
+        ...(end === undefined ? {} : { endOffsetMs: end, result: interaction.result ?? "unknown" }),
+        ...(start === undefined || end === undefined ? {} : { durationMs: end - start }),
+      });
+    }
+  }
+  const subagentTimeline: SubagentTimeline = { version: 1, timeBasis: "omp_agent_observation", partial: false, partialReasons: [], truncated: false, observedItemCount: root.observedSegments, displayedItemCount: 0, items };
+  while (items.length > 64 || Buffer.byteLength(JSON.stringify(subagentTimeline)) > 23 * 1024) { items.pop(); reasons.add("truncated"); }
+  if (root.observedSegments > items.length && !reasons.has("depth_limit")) reasons.add("truncated");
+  const visibleParents = new Set([root.ref, ...items.map(item => item.cycleRef)]);
+  if (items.some(item => !visibleParents.has(item.parentRef))) reasons.add("missing_parent");
+  subagentTimeline.partialReasons = TIMELINE_REASONS.filter(reason => reasons.has(reason));
+  subagentTimeline.partial = reasons.size > 0; subagentTimeline.truncated = reasons.has("truncated"); subagentTimeline.displayedItemCount = items.length;
+  const userWaitTimeline: WaitTimeline = { version: 1, timeBasis: "omp_interaction_observation", partial: false, partialReasons: [], truncated: false, observedIntervalCount: observedIntervals, displayedIntervalCount: 0, intervals };
+  while (intervals.length > 64 || Buffer.byteLength(JSON.stringify(userWaitTimeline)) > 11 * 1024) { intervals.pop(); waitReasons.add("truncated"); }
+  userWaitTimeline.partialReasons = TIMELINE_REASONS.filter(reason => waitReasons.has(reason));
+  userWaitTimeline.partial = waitReasons.size > 0; userWaitTimeline.truncated = waitReasons.has("truncated"); userWaitTimeline.displayedIntervalCount = intervals.length;
+  return { subagentTimeline, userWaitTimeline };
+}
+
 export default (pi: ExtensionAPI): void => {
   const owner = Symbol();
   let active: Binding | undefined;
@@ -167,26 +289,28 @@ export default (pi: ExtensionAPI): void => {
     if (!model || !thinking) run.metadataMissing = true;
     run.session.name = text(ctx.sessionManager.getSessionName());
   }
-  function cycle(run: Run, now: number, terminal: boolean): Cycle {
+  function cycle(run: Run, now: number, monoNow: number, terminal: boolean): Cycle {
     const reasons = new Set(run.reasons);
     if (run.metadataMissing) reasons.add("incomplete_metadata");
-    const elapsed = run.start === undefined ? undefined : now - run.start;
-    if (elapsed !== undefined && (elapsed < 0 || elapsed > TTL)) reasons.add("clock_changed");
+    const elapsed = run.monoStart === undefined ? undefined : monoNow - run.monoStart;
+    if (elapsed !== undefined && (elapsed < 0 || elapsed > TTL || Math.abs(now - run.start! - elapsed) > 10)) reasons.add("clock_changed");
     return {
-      ref: run.ref, partial: reasons.size > 0, reasons: [...reasons],
+      ref: run.ref, timeBasis: "receipt_monotonic", partial: reasons.size > 0, reasons: [...reasons],
       ...(run.start === undefined ? {} : { startedAt: new Date(run.start).toISOString() }),
       ...(terminal ? { endedAt: new Date(now).toISOString() } : {}),
       ...(elapsed === undefined || elapsed < 0 || elapsed > TTL ? {} : { durationMs: elapsed }),
-      ...(!run.metadataChanged && !run.metadataMissing ? { model: run.model, thinking: run.thinking } : {}),
+      ...(!run.metadataChanged ? { model: run.model, thinking: run.thinking } : {}),
       ...(run.metadataChanged ? { metadataChanged: true } : {}),
     };
   }
   function notify(run: Run, status: Status, interaction?: Interaction): void {
-    if (!config) return;
+    if (!config || interaction?.kind === "background_wait") return;
     const now = Date.now();
+    const monoNow = Math.floor(performance.now());
     const payload: Envelope = {
       event: interaction ? "omp.action_required" : "omp.run_finished", version: 2, id: ref(), emittedAt: new Date(now).toISOString(),
-      session: { ...run.session }, cycle: cycle(run, now, !interaction), status,
+      session: { ...run.session }, cycle: cycle(run, now, monoNow, !interaction), status,
+      ...(!interaction && run.session.scope === "root" ? timelines(run, monoNow) : {}),
       ...(config.instance ? { instance: config.instance } : {}),
       ...(interaction ? { interaction: { ref: interaction.ref, kind: interaction.kind } } : {}),
     };
@@ -196,16 +320,23 @@ export default (pi: ExtensionAPI): void => {
     const run = binding.run;
     if (!run || run.closed) return;
     if (reason) run.reasons.add(reason);
+    linkRuns();
+    if (run.root === run) {
+      const agents = new Set(run.children?.map(child => child.agentKey));
+      if (snapshotJobs(binding).some(job => !run.initialJobs.has(anonymous(job.id)) && job.agentId && !agents.has(anonymous(job.agentId)))) run.timelineReasons.add("loading_gap");
+    }
+    if (run.span) run.span.status = status;
     for (const interaction of run.interactions.values()) {
       if (interaction.open) run.reasons.add("unpaired_interaction");
       interaction.open = false;
       clearTimeout(interaction.timer);
     }
     run.closed = true;
-    notify(run, status);
+    // 常规子代理收束由主通知汇总；异常仍独立提醒，便于在 root 缺失时发现问题。
+    if (run.session.scope !== "subagent" || status !== "completed") notify(run, status);
   }
   function get(ctx: ExtensionContext): Binding | undefined {
-    const now = Date.now();
+    const now = Math.floor(performance.now());
     for (const [key, binding] of bindings) {
       if (now - binding.touched > TTL || (binding.run && now - binding.run.created > TTL)) {
         // 过期仅在本 owner 终结；其他 owner 的未发提醒由 closed 标志撤销。
@@ -227,10 +358,11 @@ export default (pi: ExtensionAPI): void => {
         }
       }
       if (bindings.size >= MAX_SESSIONS) { log("state_capacity"); return; }
-      binding = { key, owner, touched: now };
+      binding = { key, owner, touched: now, run: active?.key === key && active.run?.closed ? active.run : undefined };
       bindings.set(key, binding);
     }
     binding.touched = now;
+    binding.snapshot = ctx.getAsyncJobSnapshot?.bind(ctx);
     active = binding;
     return binding;
   }
@@ -238,13 +370,21 @@ export default (pi: ExtensionAPI): void => {
     if (binding.run && !binding.run.closed) return binding.run;
     const model = ctx.model ? text(`${ctx.model.provider}/${ctx.model.id}`, 128, true) : undefined;
     const thinking = text(pi.getThinkingLevel?.(), 32);
+    const monoNow = Math.floor(performance.now());
+    const runRef = ref();
+    const span: Span = { ref: runRef, started: observed ? monoNow : undefined, status: "running" };
     const run: Run = {
-      ref: ref(), start: observed ? Date.now() : undefined, created: Date.now(), closed: false,
+      ref: runRef, start: observed ? Date.now() : undefined, monoStart: observed ? monoNow : undefined, created: monoNow, closed: false,
       session: { ref: binding.key, scope: ctx.agent?.kind === "main" ? "root" : ctx.agent?.kind === "sub" ? "subagent" : "unknown", name: text(ctx.sessionManager.getSessionName()), cwdName: text(basename(ctx.cwd || ctx.sessionManager.getCwd())), agent: text(ctx.agent?.name) },
       reasons: new Set(observed ? [] : ["missing_start"]), interactions: new Map(), retrying: false, retryFailed: false,
       model, thinking, metadataChanged: false, metadataMissing: !model || !thinking,
+      agentKey: ctx.agent?.id ? anonymous(ctx.agent.id) : undefined, parentKey: ctx.agent?.parentId ? anonymous(ctx.agent.parentId) : undefined,
+      depth: ctx.agent?.depth ?? 0, spans: [span], span, spanCount: 1, initialJobs: new Set(), observedSegments: 0, timelineReasons: new Set(),
     };
     binding.run = run;
+    if (run.session.scope === "root") { run.root = run; run.children = []; }
+    run.initialJobs = new Set(snapshotJobs(binding, true).map(job => anonymous(job.id)));
+    linkRuns();
     return run;
   }
   function request(ctx: ExtensionContext, rawId: string, kind: Kind): void {
@@ -254,14 +394,14 @@ export default (pi: ExtensionAPI): void => {
     const key = anonymous(`${kind}\0${rawId}`);
     if (run.interactions.has(key)) return;
     if (run.interactions.size >= MAX_INTERACTIONS) { run.reasons.add("capacity"); log("interaction_capacity"); return; }
-    const interaction: Interaction = { ref: ref(), kind, open: true, started: Date.now() };
+    const interaction: Interaction = { ref: ref(), kind, open: true, started: Math.floor(performance.now()) };
     run.interactions.set(key, interaction);
     // requested 不证明 UI 呈现。无 UI 仅配对记录，不发待处理提醒。
     if (ctx.hasUI) interaction.timer = setTimeout(() => {
       try { if (interaction.open && !run.closed) notify(run, "action_required", interaction); } catch { log("observation_failed"); }
     }, 150);
   }
-  function resolve(ctx: ExtensionContext, rawId: string, kind: Kind): void {
+  function resolve(ctx: ExtensionContext, rawId: string, kind: Kind, result: Resolution): void {
     const binding = get(ctx);
     if (!binding || !rawId || binding.run?.closed) return;
     const run = begin(binding, ctx, false);
@@ -270,9 +410,12 @@ export default (pi: ExtensionAPI): void => {
     if (!interaction) {
       run.reasons.add("unpaired_interaction");
       if (run.interactions.size >= MAX_INTERACTIONS) { run.reasons.add("capacity"); return; }
-      interaction = { ref: ref(), kind, open: false, started: Date.now() };
+      interaction = { ref: ref(), kind, open: false };
       run.interactions.set(key, interaction);
     }
+    if (interaction.ended !== undefined) return;
+    interaction.ended = Math.floor(performance.now());
+    interaction.result = result;
     interaction.open = false;
     clearTimeout(interaction.timer);
   }
@@ -280,6 +423,14 @@ export default (pi: ExtensionAPI): void => {
     const binding = get(ctx);
     if (binding) {
       const run = begin(binding, ctx, true);
+      const now = Math.floor(performance.now());
+      if (run.background?.open) { run.background.open = false; run.background.ended = now; run.background.result = "resolved"; run.background = undefined; }
+      if (run.span?.ended !== undefined) {
+        run.span = { ref: ref(), started: now, status: "running" };
+        run.spanCount = Math.min(4096, run.spanCount + 1);
+        if (run.spans.length < 64) run.spans.push(run.span); else run.timelineReasons.add("truncated");
+        if (run.root && run.root !== run) run.root.observedSegments = Math.min(4096, run.root.observedSegments + 1);
+      }
       run.stop = undefined;
       run.pendingEnd = undefined;
       metadata(run, ctx);
@@ -306,17 +457,28 @@ export default (pi: ExtensionAPI): void => {
     if (!binding || binding.run?.closed) return;
     const run = begin(binding, ctx, false);
     metadata(run, ctx);
-    if (event.willContinue === true || event.awaitingAsyncWork === true) return;
-    const status = run.start === undefined ? "unknown" : run.stop ?? lastStatus(event.messages) ?? "unknown";
+    if (run.span && run.span.ended === undefined) run.span.ended = Math.floor(performance.now());
+    if (event.awaitingAsyncWork === true && !run.background) {
+      if (run.interactions.size < MAX_INTERACTIONS) {
+        run.background = { ref: ref(), kind: "background_wait", open: true, started: Math.floor(performance.now()) };
+        run.interactions.set(run.background.ref, run.background);
+      } else run.reasons.add("capacity");
+    }
+    if (event.willContinue === true || event.awaitingAsyncWork === true) {
+      if (run.span) run.span.status = "continued";
+      return;
+    }
+    const observedStatus = run.stop ?? lastStatus(event.messages) ?? "unknown";
+    const status = run.start === undefined && observedStatus === "completed" ? "unknown" : observedStatus;
     if (run.retrying) { run.pendingEnd = status; return; }
     finish(binding, status === "aborted" ? "aborted" : run.retryFailed ? "failed" : status);
   });
   observe("tool_approval_requested", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) request(ctx, event.toolCallId, "approval"); });
-  observe("tool_approval_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.toolCallId, "approval"); });
+  observe("tool_approval_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.toolCallId, "approval", event.approved ? "resolved" : "cancelled"); });
   observe("plan_review_requested", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) request(ctx, event.reviewId, "plan_review"); });
-  observe("plan_review_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.reviewId, "plan_review"); });
+  observe("plan_review_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.reviewId, "plan_review", event.choice === undefined ? "cancelled" : "resolved"); });
   observe("tool_call", (event, ctx) => { if (event.toolName === "ask") request(ctx, event.toolCallId, "ask"); });
-  observe("tool_result", (event, ctx) => { if (event.toolName === "ask") resolve(ctx, event.toolCallId, "ask"); });
+  observe("tool_result", (event, ctx) => { if (event.toolName === "ask") resolve(ctx, event.toolCallId, "ask", event.isError ? "unknown" : "resolved"); });
   for (const name of ["session_switch", "session_branch", "session_tree"] as const) observe(name, (_, ctx) => {
     if (active) finish(active, "unknown", "session_changed");
     active = undefined;

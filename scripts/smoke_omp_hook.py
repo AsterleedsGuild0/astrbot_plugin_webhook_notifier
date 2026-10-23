@@ -27,42 +27,88 @@ from core.omp import OmpProviderAdapter  # noqa: E402
 from core.providers import ProviderRegistry  # noqa: E402
 from core.registry import EndpointRegistry  # noqa: E402
 from core.sender import Sender  # noqa: E402
+from core.renderer import _timeline_coverage_union_ms, _timeline_reliable_interval  # noqa: E402
 from core.server import WebhookServer  # noqa: E402
 
 SENTINEL = "PRIVATE_OMP_SMOKE_SENTINEL"
 DRIVER = r'''
 const { default: register } = await import(process.env.SMOKE_HOOK);
-const handlers = new Map();
 const diagnostics = [];
+const first = Promise.withResolvers();
 const done = Promise.withResolvers();
-const ctx = {
-  agent: { kind: "main", id: "RAW_PRIVATE_OMP_SMOKE_SENTINEL", name: "main", depth: 0 },
-  hasUI: true, cwd: "/private/PRIVATE_OMP_SMOKE_SENTINEL/project",
-  model: { provider: "fixture", id: "model" },
-  sessionManager: { getSessionId: () => "RAW_PRIVATE_OMP_SMOKE_SENTINEL", getSessionName: () => "隔离 HTTP 验收", getCwd: () => "/private/PRIVATE_OMP_SMOKE_SENTINEL/project" },
-};
-register({
-  on: (name, fn) => handlers.set(name, fn), getThinkingLevel: () => "high",
-  logger: { warn: (_, data) => {
-    diagnostics.push(data);
-    if (!["transient_error", "transport_unknown"].includes(data.category) || data.attempt === 3) done.resolve();
-  } },
-});
-const emit = (name, event = {}) => {
-  const result = handlers.get(name)({ type: name, ...event }, ctx);
-  if (result !== undefined) throw new Error("observer_control_value");
-};
-const realNow = Date.now;
-Date.now = () => realNow() - (process.env.SMOKE_SCENARIO === "policy" ? 1000 : 20000);
-emit("agent_start", { prompt: "PRIVATE_OMP_SMOKE_SENTINEL" });
-Date.now = realNow;
-const stopReason = process.env.SMOKE_SCENARIO === "failed" ? "error" : process.env.SMOKE_SCENARIO === "aborted" ? "aborted" : "stop";
-emit("session_stop", { session_id: "PRIVATE_OMP_SMOKE_SENTINEL", last_assistant_message: { role: "assistant", stopReason, content: "PRIVATE_OMP_SMOKE_SENTINEL" } });
-emit("agent_end", { messages: [{ role: "assistant", stopReason, content: "PRIVATE_OMP_SMOKE_SENTINEL" }] });
+const scenario = process.env.SMOKE_SCENARIO;
+let elapsed = 0;
+const base = Date.now();
+Date.now = () => base + elapsed;
+performance.now = () => elapsed;
+function client(id, parent, depth, name) {
+  const handlers = new Map();
+  const jobs = [];
+  const ctx = {
+    agent: { kind: parent ? "sub" : "main", id, parentId: parent?.ctx.agent.id, name: parent ? "task" : "main", depth },
+    hasUI: !parent, cwd: "/private/PRIVATE_OMP_SMOKE_SENTINEL/project",
+    model: { provider: "fixture", id: "model" },
+    sessionManager: { getSessionId: () => id, getSessionName: () => name, getCwd: () => "/private/PRIVATE_OMP_SMOKE_SENTINEL/project" },
+    getAsyncJobSnapshot: () => ({ running: jobs, recent: [] }),
+  };
+  if (parent) parent.jobs.push({ id, agentId: id, ownerId: parent.ctx.agent.id });
+  register({
+    on: (name, fn) => handlers.set(name, fn), getThinkingLevel: () => "high",
+    logger: { warn: (_, data) => {
+      diagnostics.push(data);
+      if (!["transient_error", "transport_unknown"].includes(data.category) || data.attempt === 3) {
+        first.resolve();
+        if (!scenario.startsWith("action_") || diagnostics.length >= 2) done.resolve();
+      }
+    } },
+  });
+  return { ctx, jobs, emit(name, event = {}) {
+    const result = handlers.get(name)({ type: name, ...event }, ctx);
+    if (result !== undefined) throw new Error("observer_control_value");
+  } };
+}
+const root = client("RAW_PRIVATE_OMP_SMOKE_SENTINEL", undefined, 0, "隔离 HTTP 验收");
+const ending = (stopReason = "stop", more = {}) => ({ messages: [{ role: "assistant", stopReason, content: "PRIVATE_OMP_SMOKE_SENTINEL" }], ...more });
+root.emit("agent_start", { prompt: "PRIVATE_OMP_SMOKE_SENTINEL" });
+const children = [];
+if (scenario === "timeline") {
+  elapsed = 1000; const a = client("PRIVATE_OMP_SMOKE_SENTINEL_A", root, 1, "并行子任务甲"); a.emit("agent_start");
+  elapsed = 2000; const b = client("PRIVATE_OMP_SMOKE_SENTINEL_B", root, 1, "并行子任务乙"); b.emit("agent_start");
+  elapsed = 3000; const nested = client("PRIVATE_OMP_SMOKE_SENTINEL_N", a, 2, "嵌套任务"); nested.emit("agent_start");
+  elapsed = 4000; root.emit("tool_call", { toolName: "ask", toolCallId: "PRIVATE_OMP_SMOKE_SENTINEL", input: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  elapsed = 5000; root.emit("tool_result", { toolName: "ask", toolCallId: "PRIVATE_OMP_SMOKE_SENTINEL", content: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  elapsed = 6000; nested.emit("agent_end", ending()); nested.emit("session_shutdown");
+  elapsed = 8000; a.emit("agent_end", ending("stop", { willContinue: true, awaitingAsyncWork: true }));
+  elapsed = 11000; a.emit("agent_start");
+  elapsed = 13000; a.emit("agent_end", ending());
+  elapsed = 14000; b.emit("agent_end", ending());
+  elapsed = 15000; a.emit("agent_start");
+  elapsed = 16000; a.emit("agent_end", ending());
+  children.push(a, b);
+}
+if (scenario.startsWith("action_")) {
+  const kind = scenario.slice(7), sessionId = root.ctx.sessionManager.getSessionId();
+  if (kind === "approval") root.emit("tool_approval_requested", { sessionId, toolCallId: "PRIVATE_OMP_SMOKE_SENTINEL", reason: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  if (kind === "plan_review") root.emit("plan_review_requested", { sessionId, reviewId: "PRIVATE_OMP_SMOKE_SENTINEL", planContent: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  if (kind === "ask") {
+    root.emit("tool_call", { toolName: "eval", toolCallId: "eval", input: { code: "PRIVATE_OMP_SMOKE_SENTINEL" } });
+    root.emit("tool_call", { toolName: "ask", toolCallId: "PRIVATE_OMP_SMOKE_SENTINEL", input: { questions: ["PRIVATE_OMP_SMOKE_SENTINEL"] } });
+  }
+  await first.promise;
+  elapsed = 1000;
+  if (kind === "approval") root.emit("tool_approval_resolved", { sessionId, toolCallId: "PRIVATE_OMP_SMOKE_SENTINEL", approved: false });
+  if (kind === "plan_review") root.emit("plan_review_resolved", { sessionId, reviewId: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  if (kind === "ask") root.emit("tool_result", { toolName: "ask", toolCallId: "PRIVATE_OMP_SMOKE_SENTINEL", content: "PRIVATE_OMP_SMOKE_SENTINEL" });
+}
+elapsed = scenario === "policy" ? 1000 : 20000;
+const stopReason = scenario === "failed" ? "error" : scenario === "aborted" ? "aborted" : "stop";
+root.emit("session_stop", { session_id: "PRIVATE_OMP_SMOKE_SENTINEL", last_assistant_message: { role: "assistant", stopReason, content: "PRIVATE_OMP_SMOKE_SENTINEL" } });
+root.emit("agent_end", ending(stopReason));
 const timeout = setTimeout(() => done.reject(new Error("smoke_deadline")), 8000);
 await done.promise;
 clearTimeout(timeout);
-emit("session_shutdown");
+for (const child of children) child.emit("session_shutdown");
+root.emit("session_shutdown");
 console.log(JSON.stringify(diagnostics));
 '''
 
@@ -140,6 +186,8 @@ async def smoke(hook: Path) -> list[dict]:
                     "policy": ["policy_skipped"], "partial_failure": ["partial_failure"],
                     "partial_delivery": ["partial_delivery"], "unknown": ["unknown"],
                     "replay": ["transient_error", "replayed"], "timeout": ["transport_unknown", "replayed"],
+                    "timeline": ["delivered"],
+                    "action_approval": ["delivered", "delivered"], "action_plan_review": ["delivered", "delivered"], "action_ask": ["delivered", "delivered"],
                 }
                 try:
                     for case, expected in cases.items():
@@ -165,10 +213,24 @@ async def smoke(hook: Path) -> list[dict]:
                         actual = [entry["category"] for entry in diagnostics]
                         assert actual == expected, (case, actual)
                         sent = bodies[before_bodies:]
-                        assert len({item["id"] for item in sent}) == 1
-                        assert all(item["event"] == "omp.run_finished" and item["version"] == 2 for item in sent)
+                        expected_events = 2 if case.startswith("action_") else 1
+                        assert len({item["id"] for item in sent}) == expected_events
+                        assert all(item["version"] == 2 for item in sent)
+                        if case.startswith("action_"):
+                            assert [item["event"] for item in sent] == ["omp.action_required", "omp.run_finished"]
+                            assert len(sink._sent_messages) - before_messages == 2
+                        else:
+                            assert all(item["event"] == "omp.run_finished" for item in sent)
+                        if case == "timeline":
+                            event = providers.get("omp").parse(headers={}, payload=sent[0], received_at=sent[0]["emittedAt"])
+                            items = event.subagent_timeline["items"]
+                            assert len(items) == 5
+                            assert len({item["cycleRef"] for item in items}) == 4
+                            intervals = [_timeline_reliable_interval(item) for item in items]
+                            assert _timeline_coverage_union_ms(intervals, event.task_duration_ms) == 14000
+                            assert {item["kind"] for item in event.user_wait_timeline["intervals"]} == {"ask", "background_wait"}
                         assert SENTINEL not in json.dumps(sent) + stdout.decode() + stderr.decode()
-                        if case in {"completed", "failed", "aborted", "replay", "timeout"}:
+                        if case in {"completed", "failed", "aborted", "replay", "timeout", "timeline"}:
                             assert len(sink._sent_messages) - before_messages == 1
                             rendered = sink._sent_messages[-1][1].chain[0].text
                             assert SENTINEL not in rendered

@@ -36,3 +36,29 @@
 - #29 的默认 HTML 字段检查不是视觉验收；真实渲染表面由 #31 单独记录。
 - V1 `stop` 缺最终续跑证据，保留 unknown；只有 V2 规范 completed 进入最短时长过滤。重试取消／耗尽没有公开结构化判别字段，不读取原始错误猜原因。
 - #29 已达到后续本地开发依赖的接口和行为基线；上述原生与线上缺口不勾选为完成，不关闭 #29 或总任务。
+
+## #30：多代理与交互观察时间线
+
+### 变更组
+
+- 沿用 #29 的 Hook Run、交互 Map、周期和发送队列；增加公开 parent＋owner snapshot 关联、单调时钟观察段、根聚合和有界保留。普通 child 完成不单独发送，异常和待处理仍走 V2。
+- `core/omp.py` 严格验证可选组件，复用既有 `subagent_timeline`／`user_wait_timeline` 标准化字段；没有第二套 wire 协议或服务端运行状态机。没有复制 OpenCode 采集器或 renderer。
+- `tests/test_omp_timeline.py`、Bun 行为回归和同一 HTTP smoke 扩展；现有公共契约与接入说明同步。独立增量补丁、源码快照及 HTTP 回执保存在 `tmp/omp-upgrade/30-*`。
+
+### 已执行验证
+
+| 层级 | 场景与预期 | 实际结果 | 证据入口 |
+| --- | --- | --- | --- |
+| 本地确定性采集 | 批量／并发／嵌套、eval 来源实例、worker 身份复用、多个同名 Main 根、后到关联证据、歧义保持 | OMP Bun 57 项通过；child 无 session_stop 仍收束，普通完成仅根通知，旧 cycle 不合并 | `bun test integrations/omp/webhook-notifier.test.ts` |
+| 边界与资源 | 开始／结束缺失、恢复无历史、child shutdown、重复交互、后台续跑、深度 10、扇出 80、字节上限、24 小时过期、墙钟跳变 | 不补造边界；深度仅显示 8；截断可见；过期不因迟到结束复活；墙钟跳变仍保持单调耗时 | 同上 |
+| 规范数据／统计 | 拒绝非法结构、未知字段、布尔／负值／NaN 时长、父图、重复、越界、元数据混合、条数与组件字节超限 | OMP V2＋timeline Python 122 项通过；并发／嵌套 18s 段时长之和仅计 8s 覆盖并集 | `uv run pytest -q tests/test_omp_v2.py tests/test_omp_timeline.py` |
+| 全仓回归 | 既有 OpenCode、Markdown、V1、路由、渲染不变 | Python 全仓 1340 项通过；Ruff 通过 | `uv run pytest -q`、`uv run ruff check .` |
+| 真实回环 HTTP | 收集器 → Server → OMP Adapter；并发＋嵌套＋续跑＋worker 复用＋ask／后台等待 | 17 场景通过；timeline 收到 5 段／4 cycle，覆盖并集 14s；待处理→收束各自独立 ID，故障重试保持原 ID | `scripts/smoke_omp_hook.py`；`tmp/omp-upgrade/30-http.json` |
+| 隐私 | 参数、输出、完整路径、原始身份与错误哨兵不进入 wire／日志／默认消息 | 上述 Bun、Python 和 HTTP 检查通过；快照 label／command／调度时间未用于外发 | 相同行为与 smoke 断言 |
+
+### 未覆盖与限制
+
+- 上述“批量／eval／worker”来自确定性公开事件序列，不是实际 task、eval 或 workpool 调度证明。原生 OMP 事件层尚未执行；实际二进制仍只验过 `18.12.6` 版本。
+- 仅关联已加载且证据唯一的实例。快照为 owner scoped 有界可见记录，不能恢复全历史；未加载、跨模块副本、跨进程、旧事件缺 cycle 身份等情况不宣称精确归属或完整计时。
+- #30 的规范字段和区间并集已验收；卡片入口、分类标签、真实渲染和附图降级由 #31 验证。线上目标消息仍未授权、未执行。
+- #30 已达到 #31 本地展示集成的依赖基线；原生与线上验收未勾选，Issue 与总任务保持未完成。
