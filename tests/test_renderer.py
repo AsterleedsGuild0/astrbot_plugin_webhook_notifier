@@ -693,29 +693,57 @@ class TestRenderHtmlData:
 
     def test_html_status_badge_is_localized_without_changing_event_status(self):
         event = _make_event()
-        event.status = "action_required"
+        event.status = "warning"
         html = render_html_default(event)
-        assert "待处理" in html
-        assert "action_required" not in html
+        assert '<span class="status-badge status-warning">待处理</span>' in html
+        assert ">warning<" not in html
 
     def test_opencode_child_card_shows_escaped_session_hierarchy_in_order(self):
         event = _make_event(title="子会话 <Child>")
         event.provider = "opencode"
         event.event = "opencode.permission_asked"
         event.status = "action_required"
+        event.summary = "等待权限批准"
         event.fields = [
+            {"label": "permission[1].category", "value": "edit"},
             {"label": "permission[1].summary", "value": "Write config"},
+            {"label": "permission[1].target", "value": "src/<app>.toml"},
             {"label": "sessionRootName", "value": "主会话 <Root> & 审核"},
             {"label": "sessionName", "value": "子会话 <Child> & 执行"},
         ]
 
         html = render_html_default(event)
 
-        assert "<h1>子会话 &lt;Child&gt;</h1>" in html
-        assert "子会话 &lt;Child&gt; &amp; 执行" in html
-        assert "主会话 &lt;Root&gt; &amp; 审核" in html
-        assert html.index("会话名称") < html.index("所属主会话")
+        assert '<div class="action-headline">等待权限批准</div>' in html
+        assert "<h1>子会话 &lt;Child&gt; &amp; 执行</h1>" in html
+        assert "所属主会话：</span>主会话 &lt;Root&gt; &amp; 审核" in html
         assert html.count("所属主会话") == 1
+        assert html.index("Write config") < html.index("src/&lt;app&gt;.toml")
+        assert '<div class="action-block-title">edit</div>' in html
+
+    def test_opencode_question_card_parses_text_options_and_cross_day_start(self):
+        event = _make_event()
+        event.provider = "opencode"
+        event.event = "opencode.question_asked"
+        event.status = "action_required"
+        event.summary = "等待问题回答"
+        event.fields = [
+            {"label": "sessionName", "value": "Review"},
+            {"label": "taskStartedAt", "value": "2026-07-07T15:59:00Z"},
+            {"label": "durationMs", "value": "120000"},
+            {"label": "question[1]", "value": "Which env?"},
+            {"label": "question[1].options", "value": "dev: local only | prod: live (recommended=true)"},
+        ]
+
+        html = render_html_default(event)
+
+        assert "已运行 2 分钟" in html
+        assert "07-07 23:59:00 开始" in html
+        assert '<p class="action-block-text">Which env?</p>' in html
+        dev = html.index('<div class="action-option-label">dev</div>')
+        recommended = html.index('class="action-option action-option-recommended"')
+        assert dev < recommended < html.index("prod<span") < html.index("live</div>")
+        assert '<div class="action-block-title">' not in html
 
     def test_legacy_card_without_root_name_does_not_add_hierarchy_row(self):
         event = _make_event(

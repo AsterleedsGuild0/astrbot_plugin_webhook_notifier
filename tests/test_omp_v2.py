@@ -35,7 +35,7 @@ def test_result_display_and_duration_policy(status, label):
     event = parse(envelope(status))
     assert event.status == status
     assert label in render_text_default(event)
-    assert label in render_html_default(event)
+    assert (event.summary if status == "action_required" else label) in render_html_default(event)
     assert should_filter_by_duration(status, 1000, 15) is (status == "completed")
     if status != "completed":
         assert "已完成" not in render_text_default(event)
@@ -130,11 +130,18 @@ def test_ask_interaction_renders_like_opencode_question_card():
     event = parse(body)
     text, html = render_text_default(event), render_html_default(event)
     assert event.summary == "等待问题回答"
+    assert "问题 1 标题" in text and "取得方式" in text
+    assert "1. 手动复制，本机导入（推荐）" in text
     for content in (text, html):
-        assert "问题 1 标题" in content and "取得方式" in content
         assert "这次单次验证，用哪种方式取得 Cookie？" in content and "完成后是否清理临时设置？" in content
-        assert "1. 手动复制，本机导入（推荐）" in content
         assert "会修改 Surge 配置和 MITM 状态" in content
+    assert '<div class="action-headline">等待问题回答</div>' in html
+    assert "已运行 20 秒" in html and "<h1>测试会话</h1>" in html
+    assert "project<span" in html and "test/model(high)" in html and "08:00:00 开始" in html
+    assert '<div class="action-block-title">取得方式</div>' in html
+    assert '<div class="action-block-title">问题 2</div>' in html
+    recommended = html.index('class="action-option action-option-recommended"')
+    assert recommended < html.index("手动复制，本机导入") < html.index(">推荐<") < html.index("临时 MITM 捕获")
 
 
 @pytest.mark.parametrize("kind,label", [("approval", "审批工具"), ("plan_review", "计划标题")])

@@ -419,7 +419,8 @@ DEFAULT_HTML_TEMPLATE = """\
 
     .summary code,
     .field-value code,
-    .markdown-body code {
+    .markdown-body code,
+    .action-card code {
       padding: 0.08em 0.34em;
       border: 1px solid rgba(60, 60, 67, 0.14);
       border-radius: 6px;
@@ -846,6 +847,61 @@ DEFAULT_HTML_TEMPLATE = """\
     .meta-label {
       color: #9a9aa0;
     }
+
+    .action-card {
+      width: 780px;
+      max-width: 780px;
+      overflow: hidden;
+      border: 2px solid #ece7d6;
+      border-radius: 20px;
+      background: #ffffff;
+    }
+
+    .action-band {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 22px 32px 20px;
+      background: #ffd23f;
+    }
+
+    .action-headline { font-size: 30px; font-weight: 800; line-height: 1.25; letter-spacing: -0.01em; }
+    .action-elapsed { flex: none; color: #3d3200; font-size: 22px; font-weight: 600; }
+    .action-body { padding: 26px 32px 28px; }
+    .action-body h1 { font-size: 28px; line-height: 1.32; font-weight: 750; letter-spacing: -0.01em; }
+    .action-meta { margin: 10px 0 0; color: #4b505a; font-size: 19px; line-height: 1.5; overflow-wrap: anywhere; }
+    .action-meta-sep { padding: 0 8px; color: #b5b9c0; }
+    .action-block { margin-top: 24px; padding: 24px; border-radius: 16px; background: #f4f4f1; }
+    .action-block + .action-block { margin-top: 14px; }
+    .action-block-title { margin-bottom: 6px; color: #6b5300; font-size: 19px; font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
+    .action-block-text { margin: 0; font-size: 25px; font-weight: 700; line-height: 1.42; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
+    .action-options { margin: 16px 0 0; padding: 0; list-style: none; }
+    .action-option { display: flex; gap: 14px; padding: 16px 18px; border-radius: 12px; background: #ffffff; }
+    .action-option + .action-option { margin-top: 10px; }
+    .action-option-recommended { background: #fff1bf; }
+    .action-option-number {
+      flex: none;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: #e7e7e2;
+      font-size: 19px;
+      font-weight: 800;
+      line-height: 34px;
+      text-align: center;
+    }
+    .action-option-recommended .action-option-number { color: #ffd23f; background: #1d1d1f; }
+    .action-option-main { min-width: 0; }
+    .action-option-label { font-size: 22px; font-weight: 700; line-height: 1.42; overflow-wrap: anywhere; }
+    .action-option-tag { margin-left: 10px; color: #7a5c00; font-size: 18px; font-weight: 800; }
+    .action-option-description,
+    .action-detail { margin-top: 4px; color: #2e3239; font-size: 19px; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
+    .action-detail-label,
+    .action-extra-label { color: #6b707a; font-weight: 600; }
+    .action-extras { margin: 20px 0 0; padding: 0; list-style: none; color: #2e3239; font-size: 18px; line-height: 1.55; }
+    .action-extras li { overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
+    .action-footer { margin: 22px 0 0; color: #6b707a; font-size: 16px; }
   </style>
 </head>
 <body>
@@ -866,6 +922,51 @@ DEFAULT_HTML_TEMPLATE = """\
   {% set generated_time = event.generated_at|default('', true) %}
   {% set event_time = event.event_time|default(event.emitted_at|default('', true), true) %}
 
+  {% set action = event.action_view|default(none) %}
+  {% if action %}
+  <main class="action-card">
+    <div class="action-band">
+      <div class="action-headline">{{ action.headline|e }}</div>
+      {% if action.elapsed %}<div class="action-elapsed">已运行 {{ action.elapsed|e }}</div>{% endif %}
+    </div>
+    <div class="action-body">
+      <h1>{{ action.session|e }}</h1>
+      {% if action.meta %}
+      <p class="action-meta">{% for item in action.meta %}{% if not loop.first %}<span class="action-meta-sep">·</span>{% endif %}{{ item|e }}{% endfor %}</p>
+      {% endif %}
+      {% for block in action.blocks %}
+      <section class="action-block">
+        {% if block.title %}<div class="action-block-title">{{ block.title|e }}</div>{% endif %}
+        {% if block.text %}<p class="action-block-text">{{ block.text|inline_code }}</p>{% endif %}
+        {% for detail in block.details %}
+        <div class="action-detail"><span class="action-detail-label">{{ detail.label|e }}：</span>{{ detail.value|inline_code }}</div>
+        {% endfor %}
+        {% if block.options %}
+        <ol class="action-options">
+          {% for option in block.options %}
+          <li class="action-option{% if option.recommended %} action-option-recommended{% endif %}">
+            <div class="action-option-number">{{ loop.index }}</div>
+            <div class="action-option-main">
+              <div class="action-option-label">{{ option.label|inline_code }}{% if option.recommended %}<span class="action-option-tag">推荐</span>{% endif %}</div>
+              {% if option.description %}<div class="action-option-description">{{ option.description|inline_code }}</div>{% endif %}
+            </div>
+          </li>
+          {% endfor %}
+        </ol>
+        {% endif %}
+      </section>
+      {% endfor %}
+      {% if action.extras %}
+      <ul class="action-extras">
+        {% for extra in action.extras %}
+        <li><span class="action-extra-label">{{ extra.label|e }}：</span>{{ extra.value|inline_code }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <p class="action-footer">{{ source|e }} · {{ event_time|default('未提供', true)|e }}</p>
+    </div>
+  </main>
+  {% else %}
   <main class="card">
     <div class="ambient-line"></div>
     <div class="card-inner">
@@ -988,6 +1089,7 @@ DEFAULT_HTML_TEMPLATE = """\
       </div>
     </div>
   </main>
+  {% endif %}
 </body>
 </html>"""
 

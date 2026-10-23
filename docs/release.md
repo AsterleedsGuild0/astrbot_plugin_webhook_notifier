@@ -21,7 +21,7 @@ uv run --frozen python scripts/package_plugin.py --dev-version --test-label omp-
 
 ### 脚本部署到线上 AstrBot
 
-`scripts/deploy_dev.py` 通过 Dashboard Open API（`/api/v1/plugins*`，依据 AstrBot v4.27.2）执行与 WebUI 相同的步骤：卸载现有插件 → 上传 ZIP → 轮询确认线上版本 → 向 OMP Endpoint 发送 3 条合成 V2 事件（简单完成、多代理时间线、失败）并检查 `delivered=true`。
+`scripts/deploy_dev.py` 通过 Dashboard Open API（`/api/v1/plugins*`，依据 AstrBot v4.27.2）执行与 WebUI 相同的步骤：卸载现有插件 → 上传 ZIP → 轮询确认线上版本 → 向 OMP Endpoint 发送 4 条合成 V2 事件（简单完成、多代理时间线、失败、待处理 ask）并检查 `delivered=true`。
 
 ```bash
 uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --label omp-concise   # 新建测试包并部署

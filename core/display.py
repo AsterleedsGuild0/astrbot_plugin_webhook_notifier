@@ -86,6 +86,15 @@ _QUESTION_LABEL_RE = re.compile(
 _PERMISSION_LABEL_RE = re.compile(
     r"^permission\[(\d+)\]\.(category|summary|title|description|action|target|patterns)$"
 )
+_PERMISSION_PART_LABELS = {
+    "category": "类型",
+    "summary": "摘要",
+    "title": "标题",
+    "description": "说明",
+    "action": "操作",
+    "target": "目标",
+    "patterns": "范围",
+}
 _ENGLISH_DURATION_RE = re.compile(
     r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>ms|[smhd])", re.IGNORECASE
 )
@@ -156,16 +165,7 @@ def localize_field_label(label: Any) -> str:
     permission_match = _PERMISSION_LABEL_RE.match(raw)
     if permission_match:
         index, suffix = permission_match.groups()
-        labels = {
-            "category": "类型",
-            "summary": "摘要",
-            "title": "标题",
-            "description": "说明",
-            "action": "操作",
-            "target": "目标",
-            "patterns": "范围",
-        }
-        return f"权限 {index} {labels[suffix]}"
+        return f"权限 {index} {_PERMISSION_PART_LABELS[suffix]}"
     return raw
 
 
@@ -356,9 +356,11 @@ def _normalise_option_items(value: Any) -> list[Any]:
     return [text]
 
 
-def _format_option_lines(value: Any) -> Any:
-    lines: list[str] = []
-    for index, item in enumerate(_normalise_option_items(value), start=1):
+def _option_items(value: Any) -> list[dict[str, Any]]:
+    """把结构化或 `label: description (recommended=…)` 文本选项统一成展示项。"""
+
+    items: list[dict[str, Any]] = []
+    for item in _normalise_option_items(value):
         if isinstance(item, dict):
             label = item.get("label", item.get("name", item.get("text", "")))
             description = item.get("description", item.get("summary", ""))
@@ -370,12 +372,24 @@ def _format_option_lines(value: Any) -> Any:
 
         if not label_text and description_text:
             label_text, description_text = description_text, ""
-        if not label_text:
-            continue
-        marker = "（推荐）" if recommended else ""
-        lines.append(f"{index}. {label_text}{marker}")
-        if description_text:
-            lines.append(f"   {description_text}")
+        if label_text:
+            items.append(
+                {
+                    "label": label_text,
+                    "description": description_text,
+                    "recommended": recommended,
+                }
+            )
+    return items
+
+
+def _format_option_lines(value: Any) -> Any:
+    lines: list[str] = []
+    for index, item in enumerate(_option_items(value), start=1):
+        marker = "（推荐）" if item["recommended"] else ""
+        lines.append(f"{index}. {item['label']}{marker}")
+        if item["description"]:
+            lines.append(f"   {item['description']}")
     return "\n".join(lines) if lines else value
 
 
@@ -549,6 +563,175 @@ def _order_opencode_display_fields(
     return [field for _, field in sorted(enumerate(fields), key=sort_key)]
 
 
+_ACTION_CARD_PROVIDERS = {"omp", "opencode"}
+_ACTION_ELAPSED_LABELS = ("当前任务耗时", "耗时")
+_ACTION_START_LABELS = ("当前任务开始时间", "开始时间", "会话开始时间")
+_ACTION_META_LABELS = ("项目", "执行代理", "模型", "模型提供方")
+_ACTION_SUBJECT_LABELS = ("审批工具", "计划标题")
+_INTERACTION_DISPLAY_LABEL_RE = re.compile(r"^(?:问题|权限) \d+")
+_DISPLAY_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\b")
+
+
+def _action_start_text(value: Any, event_time: Any) -> str:
+    """开始时间与事件同日时只保留时分秒，跨日补月日；无法解析时原样保留。"""
+
+    text = "" if value is None else str(value)
+    start = _DISPLAY_TIME_RE.match(text)
+    if start is None:
+        return f"开始 {text}"
+    event = _DISPLAY_TIME_RE.match("" if event_time is None else str(event_time))
+    if event is not None and event.group(1) == start.group(1):
+        return f"{start.group(2)} 开始"
+    return f"{start.group(1)[5:]} {start.group(2)} 开始"
+
+
+def _action_questions(
+    raw_fields: list[Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """按序号聚合问题；问题级推荐值只在能对应到选项时并入选项。"""
+
+    grouped: dict[int, dict[str, Any]] = {}
+    for field in raw_fields:
+        if not isinstance(field, dict):
+            continue
+        match = _QUESTION_LABEL_RE.match(str(field.get("label", "")))
+        if match is None:
+            continue
+        index, suffix = int(match.group(1)), match.group(2)
+        question = grouped.setdefault(
+            index, {"header": "", "text": "", "options": [], "recommended": None}
+        )
+        value = field.get("value")
+        if suffix is None:
+            question["text"] = "" if value is None else str(value).strip()
+        elif suffix == "header":
+            question["header"] = "" if value is None else str(value).strip()
+        elif suffix == "options":
+            question["options"] = _option_items(value)
+        else:
+            question["recommended"] = value
+
+    blocks: list[dict[str, Any]] = []
+    extras: list[dict[str, Any]] = []
+    for index in sorted(grouped):
+        question = grouped[index]
+        recommended = question["recommended"]
+        if recommended is not None:
+            target = str(recommended).strip()
+            matched = [
+                option for option in question["options"] if option["label"] == target
+            ]
+            if matched and not any(
+                option["recommended"] for option in question["options"]
+            ):
+                matched[0]["recommended"] = True
+            elif (
+                not matched
+                and not _is_recommended(recommended)
+                and target.lower() != "false"
+            ):
+                extras.append({"label": f"问题 {index} 推荐选项", "value": target})
+        if not question["text"] and not question["options"]:
+            continue
+        title = question["header"] or (f"问题 {index}" if len(grouped) > 1 else "")
+        blocks.append(
+            {
+                "title": title,
+                "text": question["text"],
+                "options": question["options"],
+                "details": [],
+            }
+        )
+    return blocks, extras
+
+
+def _action_permissions(raw_fields: list[Any]) -> list[dict[str, Any]]:
+    grouped: dict[int, dict[str, str]] = {}
+    for field in raw_fields:
+        if not isinstance(field, dict):
+            continue
+        match = _PERMISSION_LABEL_RE.match(str(field.get("label", "")))
+        value = field.get("value")
+        if match is None or value is None or not str(value).strip():
+            continue
+        grouped.setdefault(int(match.group(1)), {})[match.group(2)] = str(value).strip()
+
+    blocks: list[dict[str, Any]] = []
+    for index in sorted(grouped):
+        parts = grouped[index]
+        text_key = next((key for key in ("summary", "title") if key in parts), None)
+        details = [
+            {"label": _PERMISSION_PART_LABELS[key], "value": parts[key]}
+            for key in ("title", "description", "action", "target", "patterns")
+            if key in parts and key != text_key
+        ]
+        blocks.append(
+            {
+                "title": parts.get("category")
+                or (f"权限 {index}" if len(grouped) > 1 else ""),
+                "text": parts[text_key] if text_key else "",
+                "options": [],
+                "details": details,
+            }
+        )
+    return blocks
+
+
+def _build_action_view(
+    result: dict[str, Any],
+    raw_fields: Any,
+    display_fields: list[dict[str, Any]],
+    context: DisplayContext,
+) -> dict[str, Any]:
+    """待处理卡视图：状态条、会话标题、单行元信息、交互块与剩余字段。"""
+
+    by_label: dict[str, Any] = {}
+    for field in display_fields:
+        by_label.setdefault(str(field.get("label", "")), field.get("value", ""))
+
+    elapsed_label = next(
+        (label for label in _ACTION_ELAPSED_LABELS if by_label.get(label)), None
+    )
+    start_label = next(
+        (label for label in _ACTION_START_LABELS if by_label.get(label)), None
+    )
+    meta = [
+        str(by_label[label]) for label in _ACTION_META_LABELS if by_label.get(label)
+    ]
+    if start_label is not None:
+        meta.append(
+            _action_start_text(
+                by_label[start_label],
+                format_timestamp(result.get("emitted_at"), context),
+            )
+        )
+
+    fields = raw_fields if isinstance(raw_fields, list) else []
+    question_blocks, extras = _action_questions(fields)
+    subject_blocks = [
+        {"title": label, "text": str(by_label[label]), "options": [], "details": []}
+        for label in _ACTION_SUBJECT_LABELS
+        if by_label.get(label)
+    ]
+
+    consumed = {"会话名称", *_ACTION_META_LABELS, *_ACTION_SUBJECT_LABELS}
+    consumed.update(label for label in (elapsed_label, start_label) if label)
+    for field in display_fields:
+        label = str(field.get("label", ""))
+        if label in consumed or _INTERACTION_DISPLAY_LABEL_RE.match(label):
+            continue
+        extras.append({"label": label, "value": field.get("value", "")})
+
+    return {
+        "headline": str(result.get("summary") or "") or "需要处理",
+        "elapsed": str(by_label[elapsed_label]) if elapsed_label else "",
+        "session": str(by_label.get("会话名称") or result.get("title") or "需要处理"),
+        "meta": meta,
+        "blocks": subject_blocks + question_blocks + _action_permissions(fields),
+        "extras": extras,
+    }
+
+
 def build_display_event_data(
     data: dict[str, Any],
     *,
@@ -573,6 +756,13 @@ def build_display_event_data(
         if session_elapsed is not None:
             display_fields.append({"label": "会话已持续", "value": session_elapsed})
         display_fields = _order_opencode_display_fields(display_fields)
+    if (
+        result.get("provider") in _ACTION_CARD_PROVIDERS
+        and str(result.get("status", "")).strip().lower() == "action_required"
+    ):
+        result["action_view"] = _build_action_view(
+            result, data.get("fields"), display_fields, context
+        )
     result["fields"] = display_fields
     result["display_timezone"] = context.timezone_name
     return result

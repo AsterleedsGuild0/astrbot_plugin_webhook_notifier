@@ -198,10 +198,19 @@ def smoke_payloads(marker: str) -> list[tuple[str, dict]]:
                                                        "durationMs": 4000}]}
         return body
 
+    action = envelope("action_required", "待处理")
+    action["event"] = "omp.action_required"
+    del action["cycle"]["endedAt"]
+    action["interaction"] = {"ref": _ref(), "kind": "ask", "questionCount": 1, "questions": [{
+        "header": "冒烟选择", "text": "部署后的待处理卡是否显示完整？",
+        "options": [{"label": "显示完整", "description": "状态条、会话标题、问题与选项都可读。", "recommended": True},
+                    {"label": "需要调整"}],
+    }]}
     return [
         ("简单完成", envelope("completed", "简单完成")),
         ("多代理时间线", envelope("completed", "多代理时间线", timeline=True)),
         ("失败", envelope("failed", "失败")),
+        ("待处理", action),
     ]
 
 
@@ -260,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             results = smoke(smoke_env["WEBHOOK_NOTIFIER_URL"], smoke_env["WEBHOOK_NOTIFIER_TOKEN"], version)
             if not all(item["ok"] for item in results):
                 raise DeployError("冒烟未全部送达：" + json.dumps(results, ensure_ascii=False))
-            print("冒烟全部送达；请在聊天中确认 3 张卡片的显示效果。")
+            print(f"冒烟全部送达；请在聊天中确认 {len(results)} 张卡片的显示效果。")
         return 0
     except (DeployError, subprocess.CalledProcessError) as exc:
         print(f"部署失败：{exc}", file=sys.stderr)
