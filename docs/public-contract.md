@@ -36,6 +36,8 @@
 
 原始会话／代理／请求 ID 只在有界进程内存中关联，匿名会话引用使用每次加载随机密钥的 HMAC；运行／交互引用使用随机数，不依赖正文。不发送 prompt、回答、问题选项、计划、完整路径、原始错误或事件／details 对象。名称清除控制字符并限长，路径／URL 形态的名称舍弃；cwd 只取 basename。可读名称仍可能含业务信息。
 
+模型名称可以是 `provider/model` 或 `provider/org/model`，但绝对路径、用户目录路径及 Windows 路径不会因加上 provider 前缀而变成可公开名称；客户端舍弃，V2 接收端拒绝。
+
 ### 运行与状态
 
 `agent_start` 建立观察周期，维护／重试／后台恢复的再次开始沿用尚未收束的周期。`session_stop` 仅保存结构化结果，不投递；最终依据维护路由后的 `agent_end`，`willContinue=true` 时不收束，`awaitingAsyncWork=true` 单独表示后台等待。子代理同样依据 `agent_end`，不依赖缺失的 `session_stop`。工具失败不直接升级为任务失败。
@@ -81,6 +83,14 @@
 覆盖率复用共有 renderer 的可靠区间并集算法，分母仅用可靠根窗口。子代理观察与后台／交互不跨语义相加；同类或汇总观察区间重叠按并集去重。根窗口减去覆盖率的剩余时间不得标为“主代理执行”。不完整资料只能展示已观测量／下界，不能声称完整计时。
 
 公开来源：[身份与工厂绑定](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/sdk.ts#L2785-L2805)、[身份注入](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/sdk.ts#L3494-L3510)、[owner scoped snapshot](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/coding-agent/src/session/agent-session.ts#L3060-L3068)。不使用 `task:subagent:*` 私有通道。跨模块副本、跨进程或未加载实例没有历史补全保证；相同实例在新开始后收到没有 cycle ID 的旧事件也无法凭公开字段恢复其原始归属。
+
+### 共用卡片与降级
+
+- OMP root `omp.run_finished` 直接进入共有主卡／时间线入口，不改写为 OpenCode 事件。简单流程在主卡摘要，复杂或缺失边界的流程使用同一个时间线附图、布局计算和图片投递链路。
+- 主卡展示实例、会话、cwd basename、规范结果、公开模型／实际 thinking、当前运行耗时及子代理统计；缺失名称匿名回退，其他缺失元数据自然省略。模型与 thinking 在 `agent_start`、`turn_start`、`before_provider_request`、`agent_end` 边界采样，只读公开元数据，不读取请求 payload。观察到切换后即使恢复原值，也不把该周期显示为单一模型／档位。
+- 子代理条目用“周期／段”区分复用和续跑。OMP 标签明确为“观察”，审批、计划审阅、ask、后台等待各有独立轨道；汇总按并集，不称为纯人工等待。不完整组件显示已观测量、下界或不可用；没有可靠区间时不显示精确的零覆盖率。
+- 文本使用相同规范字段、观察统计和等待分类。图片生成失败沿用文本降级；仅附图失败时仍发送有效主卡。没有从 raw、正文、上下文占用或模型请求参数补充展示数据。
+- OpenCode 保留 Question／Permission 与既有时间线语义，Markdown 保留原有内容渲染及目标路由。OMP 的观察语义不覆盖其他 Provider 的契约。
 
 ### 资源与投递结果
 

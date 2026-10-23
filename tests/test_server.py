@@ -81,6 +81,8 @@ def _make_complex_event(
         )
     event = _make_event()
     event.event = "opencode.session_idle"
+    event.provider = "opencode"
+    event.source = {"name": "OpenCode", "url": None}
     event.session_scope = SessionScope.ROOT
     event.subagent_timeline = {
         "version": 1,

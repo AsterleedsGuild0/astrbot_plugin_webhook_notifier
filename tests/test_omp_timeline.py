@@ -181,3 +181,19 @@ def test_timeline_byte_limit_is_independent_of_envelope_limit(waits):
     timeline.update({rows_key: rows, f"observed{count_key}Count": len(rows), f"displayed{count_key}Count": len(rows)})
     with pytest.raises(ProviderError):
         parse(body)
+
+
+@pytest.mark.parametrize("model", [
+    "local//private/PRIVATE_SENTINEL/model",
+    r"local/C:\private\PRIVATE_SENTINEL\model",
+    "local/~/PRIVATE_SENTINEL/model",
+    r"local/\server\PRIVATE_SENTINEL\model",
+])
+@pytest.mark.parametrize("child", [False, True])
+def test_composed_model_path_rejected_before_display(model, child):
+    body = timeline_envelope()
+    target = body["subagentTimeline"]["items"][0] if child else body["cycle"]
+    target["model"] = model
+    with pytest.raises(ProviderError) as error:
+        parse(body)
+    assert "PRIVATE_SENTINEL" not in str(error.value)

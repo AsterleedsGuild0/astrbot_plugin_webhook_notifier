@@ -146,7 +146,7 @@ def _safe_name(value: Any, limit: int = 96, *, model: bool = False) -> str:
         return ""
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     value = "".join(c for c in value if unicodedata.category(c) not in {"Cc", "Cf"}).strip()
-    if re.search(r"https?://|(?:^|\s)(?:[A-Za-z]:[\\/]|[~\\/])", value):
+    if re.search(r"https?://|(?:^|\s|/)(?:[A-Za-z]:[\\/]|[~\\/])", value):
         return ""
     if not model and ("/" in value or "\\" in value):
         return ""

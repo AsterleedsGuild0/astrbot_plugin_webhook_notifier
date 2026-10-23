@@ -52,7 +52,7 @@ function anonymous(value: string): string { return createHmac("sha256", salt).up
 function text(value: unknown, limit = 96, model = false): string | undefined {
   if (typeof value !== "string") return;
   const clean = value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
-  if (!clean || /(?:https?:\/\/|(?:^|\s)(?:[A-Za-z]:[\\/]|[~\\/]))/.test(clean) || (!model && /[\\/]/.test(clean))) return;
+  if (!clean || /(?:https?:\/\/|(?:^|\s|\/)(?:[A-Za-z]:[\\/]|[~\\/]))/.test(clean) || (!model && /[\\/]/.test(clean))) return;
   return Array.from(clean).slice(0, limit).join("");
 }
 function configured(keys: string[]): string | undefined {
@@ -435,6 +435,10 @@ export default (pi: ExtensionAPI): void => {
       run.pendingEnd = undefined;
       metadata(run, ctx);
     }
+  });
+  for (const name of ["turn_start", "before_provider_request"] as const) observe(name, (_, ctx) => {
+    const binding = get(ctx);
+    if (binding?.run && !binding.run.closed) metadata(binding.run, ctx);
   });
   observe("session_stop", (event, ctx) => {
     const binding = get(ctx);

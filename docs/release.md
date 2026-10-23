@@ -4,6 +4,46 @@
 
 版本号与文档表示源码契约，远端发布完成状态以 [GitHub Releases](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) 及对应 Actions run 为准。已发布 tag/asset 不覆盖、不重写；线上部署另行验收。
 
+## OMP V2 测试包与切换门禁（未发布）
+
+OMP V2 属于当前未发布变更，不把下方 v2.0.0 的历史部署证明作为本次验收。开发维护源与真实自动加载入口保持隔离；本次仅授权本地实现与隔离验证，部署、凭据使用、同步恢复、提交和发布另行授权。
+
+### 本地测试包
+
+```bash
+uv run --frozen python scripts/package_plugin.py --dev-version --test-label omp-v2
+```
+
+- 产物沿用 `dist/`，为单一 `astrbot_plugin_webhook_notifier/` 根目录；不改工作区正式版本号。
+- 检查 ZIP 内 `metadata.yaml`、`main.py` 与 `pyproject.toml` 的规范版本等价；OMP／OpenCode 客户端、core、静态资源、模板、接入与公共契约齐全。测试、缓存、临时 HOME、凭据和同步器不进入安装包。
+- 将 ZIP 解压到仓库既有 `tmp/` 下，再执行 `uv run --frozen python scripts/smoke_omp_hook.py --hook <解压后的integrations/omp/webhook-notifier.ts>`。这证明打包入口经真实回环 HTTP 可用，不证明 AstrBot WebUI 安装、原生 OMP 事件或线上目标消息。
+- 当前构建版本、ZIP／运行文件哈希和提取 smoke 回执单独保存在 `tmp/omp-upgrade/31-package.json` 与 `31-package-http.json`；分层证据见 [OMP V2 验收记录](omp-v2-acceptance.md)。这些本地验收产物不随插件 ZIP 分发。
+
+### 授权后的切换顺序
+
+1. 备份目标服务端配置／插件和唯一 Hook 入口，记录版本、哈希、普通文件属性及权限；确认默认同步器仍停止、禁用。`in_sync` 是历史记录，不能替代 loaded 检查。
+2. 先安装支持 V2 且仍接收 V1 的服务端，用专用测试 Endpoint 验证 HTTP 业务结果及实际目标消息；V2 新事件不得发向旧服务端。
+3. 原生 OMP 使用隔离 HOME／配置、显式单一扩展入口、独立测试目标和已授权的测试凭据。暂停同步没有停用现有 Hook；禁止继承生产 URL／Token 或同时自动发现旧入口。
+4. 分别核对正常结束、失败／中止、交互解决／取消、续跑／重试、task／eval／worker 多代理观察；先看实际公开事件，再核对通知。源码研究和合成回归不能代替这一层。
+5. 通过上述门禁后，才在对应授权下切换真实客户端。是否启用同步须单独决定；没有恢复默认同步器的隐含步骤。
+
+### 授权后的客户端回滚
+
+1. 保持同步器停止、禁用；停止或退出此次切换涉及的 OMP 实例，避免已加载的 V2 Hook 继续发送。不能仅覆盖文件就认为旧模块已经卸载。
+2. 核对预先保存的 V1 副本及目标唯一入口。对本次维护基线，保留副本的 SHA-256 为 `aaf06e753f9428eea0794dea2db586d4b38f2445480c8a49fbb37373461d9c99`；不得用正在开发的 V2 源文件充当回滚副本。
+3. 仅在授权后，将已校验的 V1 文件恢复到同一个 `webhook-notifier.ts` 入口，保留普通文件及 `0600` 权限。示例中的变量必须指向已核对的备份和入口：
+
+   ```bash
+   shasum -a 256 "$VERIFIED_V1_BACKUP"
+   install -m 0600 "$VERIFIED_V1_BACKUP" "$SINGLE_HOOK_ENTRY"
+   cmp "$VERIFIED_V1_BACKUP" "$SINGLE_HOOK_ENTRY"
+   ```
+
+4. 确认自动发现目录没有第二份 `onebot.ts`／新旧重复入口，再以隔离测试目标启动对应实例并核对 V1 接收。开发源仍为 V2 时不要恢复自动同步，否则会再次覆盖回滚文件。
+5. 如还需回滚服务端，先停止所有 V2 客户端，再执行独立授权的服务端回滚。不要只改 event／version 绕过拒绝，也不要换 ID 绕过幂等。只回滚客户端不会撤销新服务端的 V1 状态纠错：普通 stop 仍为 unknown，error／aborted 正确分类，不新增成功时长过滤。
+
+本节是操作说明，不表示已执行安装、切换、回滚或恢复同步。
+
 ## v2.0.0 升级与验收
 
 - 升级前备份插件配置与数据。显式 `omp`、`opencode`、`markdown` Endpoint 保持原协议。

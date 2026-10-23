@@ -491,3 +491,25 @@ it("恢复时只有快照不补造历史，缺开始的根不能报告精确时�
   expect(payload.subagentTimeline.partialReasons).toEqual(["missing_start", "loading_gap"]);
   expect(payload.subagentTimeline.items).toEqual([]);
 });
+
+it("模型／thinking 运行中切换后恢复原值也不能冒充全周期单一值", async () => {
+  const root = client(); root.emit("agent_start");
+  root.setThinking("low"); root.emit("turn_start");
+  root.setThinking("high"); root.emit("before_provider_request", { payload: { prompt: SENTINEL } });
+  root.emit("agent_end", end()); await advance();
+  expect(rootPayload().cycle.metadataChanged).toBe(true);
+  expect(rootPayload().cycle.model).toBeUndefined();
+  expect(rootPayload().cycle.thinking).toBeUndefined();
+  expect(JSON.stringify(rootPayload())).not.toContain(SENTINEL);
+});
+
+it.each([`/private/${SENTINEL}/model`, `C:\\private\\${SENTINEL}\\model`, `~/${SENTINEL}/model`, `\\server\\${SENTINEL}\\model`])("模型路径不能借 provider 前缀进入出站：%s", async (id) => {
+  const root = client();
+  const model = root.ctx.model;
+  if (!model) throw new Error("Missing model fixture");
+  model.id = id;
+  root.emit("agent_start"); root.emit("agent_end", end()); await advance();
+  expect(rootPayload().cycle.model).toBeUndefined();
+  expect(rootPayload().cycle.reasons).toContain("incomplete_metadata");
+  expect(JSON.stringify(requests.map(row => row.body)) + JSON.stringify(root.logs)).not.toContain(SENTINEL);
+});

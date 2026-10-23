@@ -62,3 +62,35 @@
 - 仅关联已加载且证据唯一的实例。快照为 owner scoped 有界可见记录，不能恢复全历史；未加载、跨模块副本、跨进程、旧事件缺 cycle 身份等情况不宣称精确归属或完整计时。
 - #30 的规范字段和区间并集已验收；卡片入口、分类标签、真实渲染和附图降级由 #31 验证。线上目标消息仍未授权、未执行。
 - #30 已达到 #31 本地展示集成的依赖基线；原生与线上验收未勾选，Issue 与总任务保持未完成。
+
+## #31：共用卡片与分层集成
+
+### 变更组
+
+- `core/renderer.py`：解除 OpenCode 专属入口限制，复用同一主卡、时间线模板、布局和统计；OMP 使用观察标签、周期／段、实际 thinking 与四类独立轨道，缺口不显示精确零。文本与图片保持关键事实一致。
+- Hook 增加公开元数据采样边界，不消费 `before_provider_request.payload`；周期中切换后恢复原值仍标记混合。`tests/test_omp_rendering.py` 覆盖并集、分类、缺失、混合元数据和主卡／附图降级；修正旧 Server 测试中混用 OMP Provider 与 OpenCode 事件的输入，没有放宽生产校验。
+- 隐私边界补充：客户端与 `core/omp.py` 的模型路径判定覆盖 `provider/` 前缀后的绝对路径、用户目录和 Windows 路径；正常 `provider/org/model` 保留，不把路径作为模型名称展示。
+- 公共契约、接入说明、发布门禁／回滚与更新日志同步；独立增量补丁和源码快照保存在 `tmp/omp-upgrade/31-*`，继续保留 #29／#30 的独立快照。未提交或暂存。
+
+### 已执行验证
+
+| 层级 | 场景与预期 | 实际结果 | 证据入口 |
+| --- | --- | --- | --- |
+| 本地 Hook | 实际 thinking 采样、元数据切换后恢复、全部 #29／#30 行为 | 两客户端 Bun 341 项通过（OMP 62、OpenCode 279），Bun 1.3.14 | `bun test integrations/omp/webhook-notifier.test.ts integrations/opencode/webhook-notifier.test.ts` |
+| Python／跨 Provider | OMP 五状态、并集、四类轨道、缺口／混合元数据、附图／主卡失败；既有 OpenCode、Markdown、V1 与路由 | Python 3.13 全仓 1355 项通过，Ruff 通过 | `uv run --frozen pytest -q`、`uv run --frozen ruff check .` |
+| 实际浏览器表面 | 完成／失败／中止／待处理／未知、并发／嵌套、长名称、64 段＋64 交互、深度 8、partial／截断，以及 OpenCode、Markdown、V1 | Chrome 150.0.7871.24：15 个主卡／附图表面无水平溢出、名称越界或条带越界；已查看实际截图，非只检查模板字符串 | `tmp/omp-upgrade/31-browser.json`、`render/*.png` |
+| 真实 HTTP＋图片 | 维护源 Hook → Server → 标准化 → 主卡／附图 HTML → 离线 Chromium PNG → 校验／trim → Sender | Chrome 155.0.8059.85：HTTP 200、业务 delivered，内存消息边界收到同一消息的两张 Image；含 5 段／4 周期，覆盖并集 14s | `tmp/omp-upgrade/31-image-http.json`、`render/http-images-*.png` |
+| 真实 HTTP 降级 | 附图渲染失败不得丢主卡；主图失败回退文本 | 两场景均 delivered；分别为一张主 Image、一个 Plain，文本保留 14s 并集和观察语义，错误哨兵不出日志 | 同一图片 HTTP 回执 |
+| 旧协议拒绝 | 从未推送的本地基线加载旧 OMP Adapter，在真实 Server HTTP 链路接收新 Hook V2 事件 | HTTP 400，客户端 permanent_error，不重试、不发送目标消息；未把新事件误认成 V1 成功 | 回执 `old_adapter_v2`，旧 Adapter 来源 commit `1e68c1378671f4209e582474ffc4440db2c14a7d` |
+| 隐私 | 出站、客户端／接收端日志、文本、HTML／浏览器可见文字不得包含正文／原始身份／路径／错误哨兵 | 通过；截图由检查过的实际 DOM 生成，无 raw 补正文；不把 PNG 压缩字节搜索当作图片隐私验收 | Bun／Python、浏览器及真实 HTTP 断言 |
+| 模型路径回归 | provider 前缀不得隐藏原始文件路径 | 修复前客户端 4／服务端 8 个用例失败，修复后全部通过；另用绝对模型路径哨兵执行 17 个真实 HTTP 场景，出站／日志／消息不含路径 | 新增 Bun／Python 回归、`tmp/omp-upgrade/31-privacy-http.json` |
+
+测试包按 [发布门禁](release.md#omp-v2-测试包与切换门禁未发布)构建。具体测试版本、单根目录、版本三源、运行文件与文档哈希、提取入口 HTTP 回归结果以 `31-package.json`／`31-package-http.json` 为准；这些回执与 ZIP 都是本地产物，不是发布或安装证明。
+
+### 未覆盖与验收门禁
+
+- 原生 OMP：实际版本为 18.12.6，但未执行真实 producer 的最终收束、重试／维护／后台恢复、审批／计划／直接及 eval 间接 ask、task／eval／workpool 场景。缺口是独立原生场景授权、隔离配置与入口、专用测试目标及对应测试凭据；不得使用正在生效的生产 Hook 或继承其环境补验。
+- 线上 AstrBot：未上传／安装测试 ZIP，未使用线上凭据或专用 Endpoint，未验证真实 T2I 服务、QQ／其他目标消息和接收端视觉效果。缺口是部署及凭据授权和专用测试目标。离线 Chromium 与内存 Sender 边界不替代这一层。
+- 旧端拒绝证据使用基线 Adapter＋当前 Server 传输链路，不声称重新安装并启动过整个旧版本 AstrBot。
+- 卡片布局与显示结论仅限已列出的有界输入和浏览器版本；时间线表示可见观察，不保证完整调度历史、精确人工等待或业务目标成功。
+- #29 → #30 → #31 的本地依赖工作已经推进；必需的原生及线上验收仍未勾选，Issue／总任务未关闭，不宣称 #28 整体完成。
