@@ -19,6 +19,20 @@ uv run --frozen python scripts/package_plugin.py --dev-version --test-label omp-
 - 将 ZIP 解压到仓库既有 `tmp/` 下，再执行 `uv run --frozen python scripts/smoke_omp_hook.py --hook <解压后的integrations/omp/webhook-notifier.ts>`。这证明打包入口经真实回环 HTTP 可用，不证明 AstrBot WebUI 安装、原生 OMP 事件或线上目标消息。
 - 当前构建版本、ZIP／运行文件哈希和提取 smoke 回执单独保存在 `tmp/omp-upgrade/31-package.json` 与 `31-package-http.json`；分层证据见 [OMP V2 验收记录](omp-v2-acceptance.md)。这些本地验收产物不随插件 ZIP 分发。
 
+### 脚本部署到线上 AstrBot
+
+`scripts/deploy_dev.py` 通过 Dashboard Open API（`/api/v1/plugins*`，依据 AstrBot v4.27.2）执行与 WebUI 相同的步骤：卸载现有插件 → 上传 ZIP → 轮询确认线上版本 → 向 OMP Endpoint 发送 3 条合成 V2 事件（简单完成、多代理时间线、失败）并检查 `delivered=true`。
+
+```bash
+uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --label omp-concise   # 新建测试包并部署
+uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --zip dist/<包>.zip   # 部署已有包
+uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --dry-run              # 只核对线上版本
+```
+
+- 凭据文件为 `KEY=VALUE`：`ASTRBOT_DASHBOARD_URL`、`ASTRBOT_API_KEY`（Dashboard 中创建、仅需 `plugin` scope）、`WEBHOOK_NOTIFIER_URL`、`WEBHOOK_NOTIFIER_TOKEN`。放在 Git 忽略的私有位置，不进入仓库。
+- 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上传或加载失败时，自动回装 `tmp/deploy-dev/last-deployed.json` 记录的上次成功包并以非零退出。
+- 冒烟卡片发送到凭据中的 Endpoint 目标；脚本只验证 HTTP 与业务结果，卡片显示效果仍需在目标聊天中查看。AstrBot 升级后先用 `--dry-run` 和接口源码核对路由是否变化。
+
 ### 授权后的切换顺序
 
 1. 备份目标服务端配置／插件和唯一 Hook 入口，记录版本、哈希、普通文件属性及权限；确认默认同步器仍停止、禁用。`in_sync` 是历史记录，不能替代 loaded 检查。
