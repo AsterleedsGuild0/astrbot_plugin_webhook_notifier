@@ -937,10 +937,12 @@ DEFAULT_HTML_TEMPLATE = """\
           {% if timeline.timing_summary %}
           <div class="subagent-summary-meta">{{ timeline.timing_summary|e }}</div>
           {% endif %}
+          {% if timeline.wait_visible %}
           <div class="user-wait-summary">
             <div class="user-wait-summary-main">{{ timeline.wait_summary_text|e }}</div>
-            <div class="user-wait-summary-detail">{{ timeline.wait_summary_detail|e }}</div>
+            {% if timeline.wait_summary_detail %}<div class="user-wait-summary-detail">{{ timeline.wait_summary_detail|e }}</div>{% endif %}
           </div>
+          {% endif %}
           {% if timeline.flags %}
           <div class="subagent-flags">
             {% for flag in timeline.flags %}<span class="subagent-flag">{{ flag|e }}</span>{% endfor %}
@@ -970,7 +972,7 @@ DEFAULT_HTML_TEMPLATE = """\
           {% endfor %}
         </ol>
         {% if timeline.main_hidden_count > 0 %}<div class="subagent-more">另有 {{ timeline.main_hidden_count }} 项未展开</div>{% endif %}
-        {% else %}
+        {% elif not timeline.observation_only %}
         <div class="subagent-complex">
           {% for metric in timeline.metrics %}
           <div class="subagent-metric"><span class="subagent-metric-value">{{ metric.value|e }}</span><span class="subagent-metric-label">{{ metric.label|e }}</span></div>
@@ -981,7 +983,7 @@ DEFAULT_HTML_TEMPLATE = """\
       {% endif %}
 
       <div class="meta">
-        <div class="meta-item"><span class="meta-label">生成时间：</span>{{ generated_time|default('未提供', true)|e }}</div>
+        {% if event.provider != 'omp' %}<div class="meta-item"><span class="meta-label">生成时间：</span>{{ generated_time|default('未提供', true)|e }}</div>{% endif %}
         <div class="meta-item"><span class="meta-label">事件时间：</span>{{ event_time|default('未提供', true)|e }}</div>
       </div>
     </div>
@@ -2255,6 +2257,16 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     raw_items = timeline.get("items") if isinstance(timeline, dict) else []
     if not isinstance(raw_items, list):
         raw_items = []
+    if omp and not any(
+        isinstance(part, dict)
+        and (part.get(count_key) or part.get("partial"))
+        for part, count_key in (
+            (timeline, "observedItemCount"),
+            (wait_timeline, "observedIntervalCount"),
+        )
+    ):
+        # 无子代理、无交互且观察完整：主卡不展示空时间线，也不生成附图。
+        return None
     if len(raw_items) > SUBAGENT_TIMELINE_MAX_ITEMS:
         raise ValueError("subagent timeline items exceed renderer wire limit")
     indexed_items = [
@@ -2705,7 +2717,7 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             f"{wait_label} {format_duration_ms(wait_union_ms or 0)}"
             f" · {complete_wait_count} 次"
         )
-        wait_summary_detail = "观测完整"
+        wait_summary_detail = "" if omp else "观测完整"
         wait_state_label = "观测完整"
         wait_state_time = format_duration_ms(wait_union_ms or 0)
 
@@ -2716,8 +2728,7 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     ]
     if wait_kind_parts:
         wait_summary_detail += " · " + " · ".join(wait_kind_parts)
-    if omp:
-        wait_summary_detail += " · 同类／汇总按并集；不等于纯人工等待"
+    wait_summary_detail = wait_summary_detail.removeprefix(" · ")
     if wait_censored_count:
         wait_summary_detail += f" · {wait_censored_count} 个边界区间未计时"
     if wait_rate is not None:
@@ -2735,7 +2746,11 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     if status_parts:
         summary_text += " · " + " · ".join(status_parts)
     if omp:
-        summary_text = f"{observed_count} 个子代理观察段 · 当前展示 {len(cycle_numbers)} 个运行周期"
+        summary_text = (
+            f"{observed_count} 个子代理观察段 · {len(cycle_numbers)} 个运行周期"
+            if observed_count
+            else "无子代理观察段"
+        )
         if status_parts:
             summary_text += " · " + " · ".join(status_parts)
 
@@ -2811,7 +2826,7 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             else "不可用"
         )
     )
-    timing_summary = " · ".join(timing_parts)
+    timing_summary = "" if omp and not observed_count else " · ".join(timing_parts)
 
     flags: list[str] = []
     if partial:
@@ -2844,7 +2859,12 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     else:
         notice = ""
     if omp:
-        notice = (notice + " 仅公开事件观察；不代表完整调度，未分类时间不是主代理执行时间。").strip()
+        # 完整观察不重复免责声明；只有缺口、截断或降级时提示统计范围。
+        notice = (
+            "部分观察边界缺失或被截断，统计仅覆盖已观测范围；未分类时间不是主代理执行时间。"
+            if observation_limited or partial or mode == "degraded"
+            else ""
+        )
 
     main_items = item_views[:SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT]
     main_hidden_count = max(0, observed_count - len(main_items))
@@ -2907,6 +2927,7 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         "label": wait_label, "kinds": wait_kinds, "intervals": wait_interval_views,
         "state_label": wait_state_label, "state_time": wait_state_time,
     }]
+    wait_visible = not omp or not wait_available or bool(observed_kinds) or wait_observation_limited
     if omp and observed_kinds:
         wait_tracks = []
         for kind in observed_kinds:
@@ -2920,10 +2941,13 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
                 "state_time": (("至少 " if wait_observation_limited else "") + format_duration_ms(measured))
                 if counted else "未计时",
             })
+    if not wait_visible:
+        wait_tracks = []
 
     return {
         "mode": mode,
         "observation_only": omp,
+        "wait_visible": wait_visible,
         "section_label": "OMP 观察时间线" if omp else "根任务时间线" if wait_available else "子任务执行",
         "timeline_title": "OMP 运行观察时间线" if omp else "根任务执行时间线",
         "interval_label": "公开事件观察区间" if omp else "执行区间",
@@ -3216,6 +3240,8 @@ def _append_subagent_timeline_text(
     omp = event.provider == "omp"
     if not _timeline_is_root_completion(event):
         return
+    if omp and _build_subagent_timeline_view(event) is None:
+        return
     if not isinstance(timeline, dict):
         if not isinstance(wait_timeline, dict):
             return
@@ -3224,7 +3250,7 @@ def _append_subagent_timeline_text(
             return
         lines.append("")
         lines.append(f"{view['section_label']}：")
-        if omp:
+        if omp and view["notice"]:
             lines.append(str(view["notice"]))
         _append_timeline_aggregate_text(lines, view)
         return
@@ -3241,7 +3267,8 @@ def _append_subagent_timeline_text(
         states.append("部分数据")
     if timeline.get("truncated") is True:
         states.append("已截断")
-    lines.append(f"状态：{'、'.join(states) if states else '已观测范围完整' if omp else '完整'}")
+    if states or not omp:
+        lines.append(f"状态：{'、'.join(states) if states else '完整'}")
 
     items = timeline.get("items")
     if not isinstance(items, list):
@@ -3301,19 +3328,24 @@ def _append_subagent_timeline_text(
     view = _build_subagent_timeline_view(event)
     if view is not None:
         if omp:
-            lines.append(str(view["timing_summary"]))
-            lines.append(str(view["notice"]))
+            for part in (view["timing_summary"], view["notice"]):
+                if part:
+                    lines.append(str(part))
         _append_timeline_aggregate_text(lines, view)
 
 
 def _append_timeline_aggregate_text(lines: list[str], view: dict[str, Any]) -> None:
     """Append bounded wait and residual-time summaries without another heading."""
 
-    lines.append(str(view["wait_summary_text"]))
-    lines.append(str(view["wait_summary_detail"]))
+    if view["wait_visible"]:
+        lines.append(str(view["wait_summary_text"]))
+        if view["wait_summary_detail"]:
+            lines.append(str(view["wait_summary_detail"]))
     if view["observation_only"]:
         for track in view["wait_tracks"]:
             lines.append(f"- {track['label']}：{track['state_time']} · {len(track['intervals'])} 个已展示区间")
+        if not view["observed_count"]:
+            return
     unclassified = next(
         (
             metric

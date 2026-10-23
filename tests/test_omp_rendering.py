@@ -43,7 +43,8 @@ def test_omp_shared_view_separates_kinds_and_unions_overlapping_observations():
     assert attachment is not None
     for content in (text, html, attachment.html):
         assert "等待用户" not in content
-        assert "不等于纯人工等待" in content
+        assert "交互／后台观察" in content
+        assert "不等于纯人工等待" not in content  # 完整观察不重复免责声明
     assert "隔离测试机" in text and "隔离测试机" in html
     assert "thinking high" in text and "thinking high" in attachment.html
 
@@ -70,6 +71,36 @@ def test_missing_observations_never_display_precise_zero_coverage():
     assert view["wait_union_ms"] is None
     assert view["wait_rate"] is None
     assert view["unclassified_observation_limited"] is True
+    html, text = render_html_default(event), render_text_default(event)
+    for content in (html, text):
+        assert "统计仅覆盖已观测范围" in content  # 缺口时才提示范围限制
+
+
+def test_trivial_complete_run_has_no_timeline_or_boilerplate():
+    body = timeline_envelope()
+    body["subagentTimeline"].update(items=[], observedItemCount=0, displayedItemCount=0)
+    body["userWaitTimeline"].update(intervals=[], observedIntervalCount=0, displayedIntervalCount=0)
+    event = parse(body)
+    assert prepare_subagent_timeline(event).view is None
+    assert render_subagent_timeline(event) is None
+    html, text = render_html_default(event), render_text_default(event)
+    for content in (html, text):
+        assert "观察时间线" not in content
+        assert "正常结束不代表" not in content
+        assert "执行代理" not in content  # 默认 main 不显示
+        assert "未分类时间" not in content
+    assert "生成时间" not in html and "事件时间" in html  # OMP 只保留事件时间
+
+
+def test_private_use_icon_glyphs_are_dropped_from_names():
+    body = timeline_envelope()
+    body["session"]["name"] = "\U000f0219 GROK: 核查"
+    body["subagentTimeline"]["items"][0]["name"] = "\ue7a8"
+    event = parse(body)
+    text = render_text_default(event)
+    assert "会话名称：GROK: 核查" in text
+    assert "\ue7a8" not in text and "\U000f0219" not in text
+    assert "name" not in event.subagent_timeline["items"][0]
 
 
 def test_censored_interactions_do_not_enter_exact_total():

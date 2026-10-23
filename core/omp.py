@@ -153,6 +153,13 @@ def _safe_name(value: Any, limit: int = 96, *, model: bool = False) -> str:
     return value[:limit]
 
 
+def _visible(value: Any) -> str | None:
+    """去掉私用区图标字符（如 Nerd Font），避免卡片显示方框；只影响展示。"""
+    if not isinstance(value, str):
+        return None
+    return "".join(c for c in value if unicodedata.category(c) != "Co").strip() or None
+
+
 def _object(value: Any, required: set[str], optional: set[str]) -> dict:
     if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - optional:
         raise ValueError("shape")
@@ -235,12 +242,14 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
     if cycle.get("metadataChanged") and ("model" in cycle or "thinking" in cycle):
         raise ValueError("mixed_metadata")
     fields = []
+    agent = _visible(session.get("agent"))
     for label, value in (
-        ("实例", body.get("instance")),
-        ("sessionName", session.get("name") or f"OMP Session {session['ref'][:12]}"),
-        ("projectName", session.get("cwdName")), ("agent", session.get("agent")),
-        ("model", cycle.get("model")), ("实际 thinking", cycle.get("thinking")),
-        ("taskStartedAt", cycle.get("startedAt")), ("durationMs", cycle.get("durationMs")),
+        ("实例", _visible(body.get("instance"))),
+        ("sessionName", _visible(session.get("name")) or f"OMP Session {session['ref'][:12]}"),
+        ("projectName", _visible(session.get("cwdName"))),
+        ("agent", agent if agent != "main" else None),
+        ("model", cycle.get("model")), ("thinking", cycle.get("thinking")),
+        ("开始时间", cycle.get("startedAt")), ("耗时", cycle.get("durationMs")),
     ):
         if value is not None:
             fields.append({"label": label, "value": value, "short": True})
@@ -248,7 +257,7 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
         fields.append({"label": "模型与档位", "value": "运行中发生变化，省略单一值", "short": False})
     if cycle["partial"]:
         fields.append({"label": "观察范围", "value": "不完整", "short": True})
-    summary = "正常结束不代表业务目标已验证完成。" if status == "completed" else ""
+    summary = ""
     if action:
         interaction = _object(body["interaction"], {"ref", "kind"}, set())
         _ref(interaction["ref"])
@@ -269,6 +278,14 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
             known = {cycle["ref"]} | {item["cycleRef"] for item in (subagents or {}).get("items", [])}
             if any(item["agentRef"] not in known for item in waits["intervals"]) and not ({"missing_parent", "truncated", "depth_limit"} & set(waits["partialReasons"])):
                 raise ValueError("interval_agent")
+        for item in (subagents or {}).get("items", []):
+            for key in ("name", "agent"):
+                if key in item:
+                    visible = _visible(item[key])
+                    if visible:
+                        item[key] = visible
+                    else:
+                        del item[key]
     return NormalizedEvent(
         provider="omp", event=body["event"], version=2, id=body["id"],
         emitted_at=body["emittedAt"], title=_TITLES[status], status=status,
