@@ -108,13 +108,71 @@ def test_missing_required_field_rejected(key):
         parse(body)
 
 
+def test_relative_path_in_session_name_is_accepted():
+    body = envelope()
+    body["session"]["name"] = "NODE: 测试 Phowx/script 的 … 用法"
+    assert "Phowx/script" in render_text_default(parse(body))
+
+
+def ask_questions():
+    return [
+        {"text": "这次单次验证，用哪种方式取得 Cookie？", "header": "取得方式", "options": [
+            {"label": "手动复制，本机导入", "description": "你在浏览器中复制 Cookie 后告知", "recommended": True},
+            {"label": "临时 MITM 捕获", "description": "会修改 Surge 配置和 MITM 状态"},
+        ]},
+        {"text": "完成后是否清理临时设置？"},
+    ]
+
+
+def test_ask_interaction_renders_like_opencode_question_card():
+    body = envelope("action_required")
+    body["interaction"].update(questionCount=2, questions=ask_questions())
+    event = parse(body)
+    text, html = render_text_default(event), render_html_default(event)
+    assert event.summary == "等待问题回答"
+    for content in (text, html):
+        assert "问题 1 标题" in content and "取得方式" in content
+        assert "这次单次验证，用哪种方式取得 Cookie？" in content and "完成后是否清理临时设置？" in content
+        assert "1. 手动复制，本机导入（推荐）" in content
+        assert "会修改 Surge 配置和 MITM 状态" in content
+
+
+@pytest.mark.parametrize("kind,label", [("approval", "审批工具"), ("plan_review", "计划标题")])
+def test_approval_and_plan_titles_are_shown(kind, label):
+    body = envelope("action_required")
+    body["interaction"].update(kind=kind, title="bash")
+    assert f"{label}：bash" in render_text_default(parse(body))
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda i: i.update(questionCount=1, questions=[]),
+    lambda i: i.update(questionCount=1, questions=ask_questions()),
+    lambda i: i.update(questionCount=5, questions=ask_questions() * 3),
+    lambda i: i.update(questionCount=2, questions=[{"text": "x" * 301}, {"text": "y"}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "/private/PRIVATE_SENTINEL"}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "answer": "PRIVATE_SENTINEL"}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "options": [{"label": "a"}, {"label": "a"}]}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "options": [{"label": "a", "recommended": True}, {"label": "b", "recommended": True}]}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "options": [{"label": "a", "description": "x" * 201}]}]),
+    lambda i: i.update(title="PRIVATE_SENTINEL"),
+    lambda i: i.update(kind="approval", questionCount=1, questions=[{"text": "q"}]),
+    lambda i: i.update(kind="approval", title="x" * 201),
+])
+def test_invalid_interaction_detail_rejected_without_echo(mutate):
+    body = envelope("action_required")
+    mutate(body["interaction"])
+    with pytest.raises(ProviderError) as error:
+        parse(body)
+    assert "PRIVATE_SENTINEL" not in str(error.value)
+
+
 @pytest.mark.parametrize("kind", ["approval", "plan_review", "ask"])
 def test_action_contract_is_separate_from_completion(kind):
     body = envelope("action_required")
     body["interaction"]["kind"] = kind
     event = parse(body)
     assert event.task_duration_ms is None
-    assert "不证明 UI" in event.summary or "包含处理时间" in event.summary
+    assert event.summary in {"等待工具审批", "等待计划审阅", "等待问题回答"}
     invalid = copy.deepcopy(body)
     invalid["cycle"]["endedAt"] = invalid["emittedAt"]
     with pytest.raises(ProviderError):

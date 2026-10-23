@@ -9,10 +9,13 @@ type Reason = "missing_start" | "session_changed" | "shutdown" | "expired" | "ca
 type Result = "delivered" | "policy_skipped" | "partial_delivery" | "partial_failure" | "replayed" | "permanent_error" | "transient_error" | "transport_unknown" | "unknown";
 type Session = { ref: string; scope: "root" | "subagent" | "unknown"; name?: string; cwdName?: string; agent?: string };
 type Cycle = { ref: string; partial: boolean; reasons: Reason[]; timeBasis: "receipt_monotonic"; startedAt?: string; endedAt?: string; durationMs?: number; model?: string; thinking?: string; metadataChanged?: boolean };
-export type Envelope = { event: "omp.run_finished" | "omp.action_required"; version: 2; id: string; emittedAt: string; session: Session; cycle: Cycle; status: Status; instance?: string; interaction?: { ref: string; kind: Kind }; subagentTimeline?: SubagentTimeline; userWaitTimeline?: WaitTimeline };
+type AskOption = { label: string; description?: string; recommended?: true };
+type AskQuestion = { text: string; header?: string; options?: AskOption[] };
+type InteractionDetail = { title?: string; questionCount?: number; questions?: AskQuestion[] };
+export type Envelope = { event: "omp.run_finished" | "omp.action_required"; version: 2; id: string; emittedAt: string; session: Session; cycle: Cycle; status: Status; instance?: string; interaction?: { ref: string; kind: Kind } & InteractionDetail; subagentTimeline?: SubagentTimeline; userWaitTimeline?: WaitTimeline };
 type IntervalKind = Kind | "background_wait";
 type Resolution = "resolved" | "cancelled" | "unknown";
-type Interaction = { ref: string; kind: IntervalKind; open: boolean; started?: number; ended?: number; result?: Resolution; timer?: NodeJS.Timeout };
+type Interaction = { ref: string; kind: IntervalKind; open: boolean; started?: number; ended?: number; result?: Resolution; timer?: NodeJS.Timeout; detail?: InteractionDetail };
 type Span = { ref: string; started?: number; ended?: number; status: Status | "running" | "continued" };
 const TIMELINE_REASONS = ["missing_parent", "ambiguous_parent", "missing_start", "missing_end", "loading_gap", "invalid_parent_graph", "depth_limit", "truncated", "clamped", "clock_changed"] as const;
 type TimelineReason = typeof TIMELINE_REASONS[number];
@@ -49,11 +52,37 @@ let pumpScheduled = false;
 
 function ref(): string { return randomBytes(16).toString("hex"); }
 function anonymous(value: string): string { return createHmac("sha256", salt).update(value).digest("hex").slice(0, 32); }
+const ABSOLUTE_OR_URL = /(?:^|\s|\/)(?:[A-Za-z]:[\\/]|[~\\/])|https?:\/\//;
+/**
+ * 名称与交互内容的公共清洗：去控制字符、压缩空白；URL 和绝对／用户目录路径整段替换为 …，
+ * 相对路径（如 `core/omp.py`）保留。模型名不做替换，含路径即舍弃。
+ */
 function text(value: unknown, limit = 96, model = false): string | undefined {
   if (typeof value !== "string") return;
-  const clean = value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
-  if (!clean || /(?:https?:\/\/|(?:^|\s|\/)(?:[A-Za-z]:[\\/]|[~\\/]))/.test(clean) || (!model && /[\\/]/.test(clean))) return;
-  return Array.from(clean).slice(0, limit).join("");
+  let clean = value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\s+/gu, " ").replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
+  if (!model) clean = clean.replace(/https?:\/\/\S+/g, "…").replace(/(^|\s)(?:[A-Za-z]:[\\/]|~[\\/]|[\\/])\S*/g, "$1…").trim();
+  if (!clean || /^[…\s]+$/.test(clean) || ABSOLUTE_OR_URL.test(clean)) return;
+  return Array.from(clean).slice(0, limit).join("").trim() || undefined;
+}
+/** ask 与 OpenCode 问题卡一致：发送题干、标题、选项标签、描述和推荐项；最多 4 题、每题 8 个选项。不读取答案。 */
+function askDetail(input: unknown): InteractionDetail | undefined {
+  const raw = (input as { questions?: unknown } | undefined)?.questions;
+  if (!Array.isArray(raw) || !raw.length) return;
+  const questions: AskQuestion[] = [];
+  for (const item of raw.slice(0, 4) as { question?: unknown; header?: unknown; options?: unknown; recommended?: unknown }[]) {
+    const questionText = text(item?.question, 300);
+    if (!questionText) continue;
+    const header = text(item.header, 40);
+    const options: AskOption[] = [];
+    if (Array.isArray(item.options)) item.options.slice(0, 8).forEach((option, index) => {
+      const label = text((option as { label?: unknown } | undefined)?.label, 80);
+      if (!label || options.some(existing => existing.label === label)) return;
+      const description = text((option as { description?: unknown }).description, 200);
+      options.push({ label, ...(description ? { description } : {}), ...(item.recommended === index ? { recommended: true as const } : {}) });
+    });
+    questions.push({ text: questionText, ...(header ? { header } : {}), ...(options.length ? { options } : {}) });
+  }
+  return questions.length ? { questionCount: Math.min(raw.length, 99), questions } : undefined;
 }
 function configured(keys: string[]): string | undefined {
   for (const key of keys) { const value = process.env[key]?.trim(); if (value) return value; }
@@ -287,7 +316,11 @@ export default (pi: ExtensionAPI): void => {
     const thinking = text(pi.getThinkingLevel?.(), 32);
     if (run.model !== model || run.thinking !== thinking) run.metadataChanged = true;
     if (!model || !thinking) run.metadataMissing = true;
-    run.session.name = text(ctx.sessionManager.getSessionName());
+    run.session.name = sessionName(ctx);
+  }
+  /** 子代理会话通常没有标题；用 OMP 展示的任务名（agent.id，如 ReleaseManagementSmoke）兜底。 */
+  function sessionName(ctx: ExtensionContext): string | undefined {
+    return text(ctx.sessionManager.getSessionName()) ?? (ctx.agent?.kind === "sub" ? text(ctx.agent.id) : undefined);
   }
   function cycle(run: Run, now: number, monoNow: number, terminal: boolean): Cycle {
     const reasons = new Set(run.reasons);
@@ -312,7 +345,7 @@ export default (pi: ExtensionAPI): void => {
       session: { ...run.session }, cycle: cycle(run, now, monoNow, !interaction), status,
       ...(!interaction && run.session.scope === "root" ? timelines(run, monoNow) : {}),
       ...(config.instance ? { instance: config.instance } : {}),
-      ...(interaction ? { interaction: { ref: interaction.ref, kind: interaction.kind } } : {}),
+      ...(interaction ? { interaction: { ref: interaction.ref, kind: interaction.kind as Kind, ...interaction.detail } } : {}),
     };
     enqueue({ payload, config, live: interaction ? () => interaction.open && !run.closed : () => true, log });
   }
@@ -375,7 +408,7 @@ export default (pi: ExtensionAPI): void => {
     const span: Span = { ref: runRef, started: observed ? monoNow : undefined, status: "running" };
     const run: Run = {
       ref: runRef, start: observed ? Date.now() : undefined, monoStart: observed ? monoNow : undefined, created: monoNow, closed: false,
-      session: { ref: binding.key, scope: ctx.agent?.kind === "main" ? "root" : ctx.agent?.kind === "sub" ? "subagent" : "unknown", name: text(ctx.sessionManager.getSessionName()), cwdName: text(basename(ctx.cwd || ctx.sessionManager.getCwd())), agent: text(ctx.agent?.name) },
+      session: { ref: binding.key, scope: ctx.agent?.kind === "main" ? "root" : ctx.agent?.kind === "sub" ? "subagent" : "unknown", name: sessionName(ctx), cwdName: text(basename(ctx.cwd || ctx.sessionManager.getCwd())), agent: text(ctx.agent?.name) },
       reasons: new Set(observed ? [] : ["missing_start"]), interactions: new Map(), retrying: false, retryFailed: false,
       model, thinking, metadataChanged: false, metadataMissing: !model || !thinking,
       agentKey: ctx.agent?.id ? anonymous(ctx.agent.id) : undefined, parentKey: ctx.agent?.parentId ? anonymous(ctx.agent.parentId) : undefined,
@@ -387,14 +420,14 @@ export default (pi: ExtensionAPI): void => {
     linkRuns();
     return run;
   }
-  function request(ctx: ExtensionContext, rawId: string, kind: Kind): void {
+  function request(ctx: ExtensionContext, rawId: string, kind: Kind, detail?: InteractionDetail): void {
     const binding = get(ctx);
     if (!binding || !rawId) return;
     const run = begin(binding, ctx, false);
     const key = anonymous(`${kind}\0${rawId}`);
     if (run.interactions.has(key)) return;
     if (run.interactions.size >= MAX_INTERACTIONS) { run.reasons.add("capacity"); log("interaction_capacity"); return; }
-    const interaction: Interaction = { ref: ref(), kind, open: true, started: Math.floor(performance.now()) };
+    const interaction: Interaction = { ref: ref(), kind, open: true, started: Math.floor(performance.now()), ...(detail ? { detail } : {}) };
     run.interactions.set(key, interaction);
     // requested 不证明 UI 呈现。无 UI 仅配对记录，不发待处理提醒。
     if (ctx.hasUI) interaction.timer = setTimeout(() => {
@@ -477,11 +510,19 @@ export default (pi: ExtensionAPI): void => {
     if (run.retrying) { run.pendingEnd = status; return; }
     finish(binding, status === "aborted" ? "aborted" : run.retryFailed ? "failed" : status);
   });
-  observe("tool_approval_requested", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) request(ctx, event.toolCallId, "approval"); });
+  observe("tool_approval_requested", (event, ctx) => {
+    if (event.sessionId !== ctx.sessionManager.getSessionId()) return;
+    const tool = text(event.toolName, 64);
+    request(ctx, event.toolCallId, "approval", tool ? { title: tool } : undefined);
+  });
   observe("tool_approval_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.toolCallId, "approval", event.approved ? "resolved" : "cancelled"); });
-  observe("plan_review_requested", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) request(ctx, event.reviewId, "plan_review"); });
+  observe("plan_review_requested", (event, ctx) => {
+    if (event.sessionId !== ctx.sessionManager.getSessionId()) return;
+    const title = text(event.title, 180);
+    request(ctx, event.reviewId, "plan_review", title ? { title } : undefined);
+  });
   observe("plan_review_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.reviewId, "plan_review", event.choice === undefined ? "cancelled" : "resolved"); });
-  observe("tool_call", (event, ctx) => { if (event.toolName === "ask") request(ctx, event.toolCallId, "ask"); });
+  observe("tool_call", (event, ctx) => { if (event.toolName === "ask") request(ctx, event.toolCallId, "ask", askDetail(event.input)); });
   observe("tool_result", (event, ctx) => { if (event.toolName === "ask") resolve(ctx, event.toolCallId, "ask", event.isError ? "unknown" : "resolved"); });
   for (const name of ["session_switch", "session_branch", "session_tree"] as const) observe(name, (_, ctx) => {
     if (active) finish(active, "unknown", "session_changed");

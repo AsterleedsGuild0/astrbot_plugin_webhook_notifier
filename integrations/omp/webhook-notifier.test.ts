@@ -164,6 +164,12 @@ describe("OMP V2 运行闭环", () => {
     const c = client(ctx); c.emit("agent_start", { prompt: SENTINEL }); c.emit("agent_end", end()); await advance();
     expect(requests[0].body.session).not.toHaveProperty("name"); expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
   });
+  it("会话名中的相对路径保留，绝对路径与 URL 替换为占位", async () => {
+    const ctx = context(); ctx.sessionManager.getSessionName = () => `NODE: 测试 Phowx/script 的 /private/${SENTINEL}/x 与 https://e.invalid/${SENTINEL}`;
+    const c = client(ctx); c.emit("agent_start"); c.emit("agent_end", end()); await advance();
+    expect(requests[0].body.session.name).toBe("NODE: 测试 Phowx/script 的 … 与 …");
+    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+  });
 });
 
 describe("交互请求观察", () => {
@@ -180,6 +186,27 @@ describe("交互请求观察", () => {
     c.ctx.hasUI = true; c.emit(open, { ...e, [idKey]: "visible" }); c.emit(open, { ...e, [idKey]: "visible" }); await advance(150);
     expect(requests[0].body.interaction.kind).toBe(kind); expect(requests).toHaveLength(1);
     expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+  });
+  it("待处理提醒按 OpenCode 问题卡携带题干、标题、选项描述与推荐；审批带工具名、计划带标题，不带答案与正文", async () => {
+    const c = client(); c.emit("agent_start");
+    c.emit("tool_call", { toolName: "ask", toolCallId: "q", input: { questions: [
+      { id: "a", header: "取得方式", question: "这次用哪种方式取得 Cookie？", recommended: 0,
+        options: [{ label: "手动复制", description: `读取剪贴板，不读 /private/${SENTINEL}` }, { label: "临时 MITM 捕获" }] },
+      { id: "b", question: "完成后清理？", options: [{ label: "是" }] },
+    ] } });
+    const sid = c.ctx.sessionManager.getSessionId();
+    c.emit("tool_approval_requested", { sessionId: sid, toolCallId: "t", toolName: "bash", reason: SENTINEL });
+    c.emit("plan_review_requested", { sessionId: sid, reviewId: "p", title: "迁移计划", planContent: SENTINEL, planFilePath: `/private/${SENTINEL}` });
+    await advance(150);
+    const byKind = Object.fromEntries(requests.map(row => [row.body.interaction.kind, row.body.interaction]));
+    expect(byKind.ask).toMatchObject({ questionCount: 2, questions: [
+      { text: "这次用哪种方式取得 Cookie？", header: "取得方式", options: [
+        { label: "手动复制", description: "读取剪贴板，不读 …", recommended: true }, { label: "临时 MITM 捕获" }] },
+      { text: "完成后清理？", options: [{ label: "是" }] },
+    ] });
+    expect(byKind.approval).toMatchObject({ title: "bash" });
+    expect(byKind.plan_review).toMatchObject({ title: "迁移计划" });
+    expect(JSON.stringify(requests.map(row => row.body))).not.toContain(SENTINEL);
   });
   it("eval 参数不是 ask 观察来源，只有实际间接工具事件才触发", async () => {
     const c = client(); c.emit("agent_start"); c.emit("tool_call", { toolName: "eval", toolCallId: "eval", input: { code: "tool.ask(PRIVATE_SENTINEL)" } }); await advance(1000); expect(requests).toEqual([]);
@@ -512,4 +539,13 @@ it.each([`/private/${SENTINEL}/model`, `C:\\private\\${SENTINEL}\\model`, `~/${S
   expect(rootPayload().cycle.model).toBeUndefined();
   expect(rootPayload().cycle.reasons).toContain("incomplete_metadata");
   expect(JSON.stringify(requests.map(row => row.body)) + JSON.stringify(root.logs)).not.toContain(SENTINEL);
+});
+
+it("子代理会话没有标题时，用 OMP 任务名作为观察段名称", async () => {
+  const root = client(); root.emit("agent_start");
+  const worker = child(root.ctx, "ReleaseManagementSmoke");
+  worker.ctx.sessionManager.getSessionName = () => undefined as unknown as string;
+  worker.emit("agent_start"); worker.emit("agent_end", end());
+  root.emit("agent_end", end()); await advance();
+  expect(rootPayload().subagentTimeline.items[0].name).toBe("ReleaseManagementSmoke");
 });

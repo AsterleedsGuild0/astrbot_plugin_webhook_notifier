@@ -28,13 +28,13 @@
 必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`、`subagentTimeline`、`userWaitTimeline`。各层未知字段拒绝，整个 JSON 至多 64 KiB。
 
 - `id` 是每条通知生成一次的随机 32 位小写十六进制标识；重试不得更换。
-- `session` 必须有 `ref`（32 位匿名引用）、`scope`（`root|subagent|unknown`），可选 `name`、`cwdName`、`agent`。名称不超过 96 个 Unicode 字符；缺失名称显示 `OMP Session <ref前12位>`。
+- `session` 必须有 `ref`（32 位匿名引用）、`scope`（`root|subagent|unknown`），可选 `name`、`cwdName`、`agent`。名称不超过 96 个 Unicode 字符；子代理会话没有标题时，客户端用 OMP 展示的任务名（`ctx.agent.id`，如 `ReleaseManagementSmoke`）作为名称；仍缺失时显示 `OMP Session <ref前12位>`。
 - `cycle` 必须有随机 `ref`、`partial`（布尔）、`reasons`（去重枚举列表），可选 `startedAt`、`endedAt`、`durationMs`、`model`、`thinking`、`metadataChanged`、`timeBasis`。新 Hook 的 `timeBasis=receipt_monotonic`，耗时来自公开事件接收的单调时钟，非负整数且至多 24 小时；ISO 时间仅作墙钟展示，墙钟偏差超过 10ms 标记 `clock_changed`。省略 timeBasis 的早期 V2 请求仍按 ISO 差值校验。缺开始不提供耗时；`endedAt` 只用于收束事件。`model` 至多 128 字符，实际 `thinking` 至多 32 字符；运行中变化则省略单一模型／档位，缺失则不补造对应字段。
 - `instance` 是显式配置的实例别名，至多 96 字符；`target_alias` 至多 128 字符。
-- `interaction` 仅用于待处理事件，必填匿名 `ref` 与 `kind=approval|plan_review|ask`。不发送问题、选项、计划、工具名或参数。对应区间是请求观察区间，不是精确人工等待。
+- `interaction` 仅用于待处理事件，必填匿名 `ref` 与 `kind=approval|plan_review|ask`。ask 可选 `questionCount`（1–99）与 `questions`（1–4 题），每题必填 `text`（至多 300 字符），可选 `header`（40）与 `options`（1–8 个，`label` 至多 80 字符且互不重复，可选 `description` 至多 200 字符，至多一个 `recommended: true`）。审批与计划审阅可选 `title`（至多 200 字符），分别是工具名和计划标题。卡片沿用 OpenCode 问题卡：摘要固定为“等待问题回答／等待工具审批／等待计划审阅”，题目、标题和编号选项（含描述与推荐标记）放在字段中。不发送答案、计划正文、审批原因或工具参数。对应区间是请求观察区间，不是精确人工等待。
 - `reasons` 允许 `missing_start`、`session_changed`、`shutdown`、`expired`、`capacity`、`unpaired_interaction`、`incomplete_metadata`、`clock_changed`。恢复不读取私有历史；缺失起点不得补造。
 
-原始会话／代理／请求 ID 只在有界进程内存中关联，匿名会话引用使用每次加载随机密钥的 HMAC；运行／交互引用使用随机数，不依赖正文。不发送 prompt、回答、问题选项、计划、完整路径、原始错误或事件／details 对象。名称清除控制字符并限长，路径／URL 形态的名称舍弃；cwd 只取 basename。可读名称仍可能含业务信息。
+原始会话／请求 ID 只在有界进程内存中关联，匿名会话引用使用每次加载随机密钥的 HMAC；运行／交互引用使用随机数，不依赖正文。子代理任务名是 OMP 界面展示的可读名称，按名称规则发送。不发送 prompt、回答、计划正文、完整路径、原始错误或事件／details 对象。名称与交互内容清除控制字符、压缩空白并限长；其中的 URL 与绝对／用户目录路径替换为 `…`，相对路径保留，只剩占位时整项省略；cwd 只取 basename。可读名称和题干可能含业务信息，隐私敏感的场景应使用私聊 Endpoint。
 
 模型名称可以是 `provider/model` 或 `provider/org/model`，但绝对路径、用户目录路径及 Windows 路径不会因加上 provider 前缀而变成可公开名称；客户端舍弃，V2 接收端拒绝。
 

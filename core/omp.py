@@ -148,8 +148,6 @@ def _safe_name(value: Any, limit: int = 96, *, model: bool = False) -> str:
     value = "".join(c for c in value if unicodedata.category(c) not in {"Cc", "Cf"}).strip()
     if re.search(r"https?://|(?:^|\s|/)(?:[A-Za-z]:[\\/]|[~\\/])", value):
         return ""
-    if not model and ("/" in value or "\\" in value):
-        return ""
     return value[:limit]
 
 
@@ -183,6 +181,43 @@ def _timestamp(value: Any) -> datetime:
 def _bounded_text(value: Any, limit: int = 96, *, model: bool = False) -> None:
     if not isinstance(value, str) or not value or _safe_name(value, limit, model=model) != value:
         raise ValueError("name")
+
+
+def _ask_fields(interaction: dict, kind: str) -> list[dict]:
+    """把 ask 问题转换成与 OpenCode 问题卡相同的字段：问题 N、问题 N 标题、问题 N 选项。"""
+    if "questions" not in interaction and "questionCount" not in interaction:
+        return []
+    questions, count = interaction.get("questions"), interaction.get("questionCount")
+    if (kind != "ask" or not isinstance(questions, list) or not 1 <= len(questions) <= 4
+            or type(count) is not int or not len(questions) <= count <= 99):
+        raise ValueError("interaction_questions")
+    fields: list[dict] = []
+    if count > 1:
+        fields.append({"label": "questionCount", "value": str(count), "short": True})
+    for index, question in enumerate(questions, start=1):
+        _object(question, {"text"}, {"header", "options"})
+        _bounded_text(question["text"], 300)
+        if "header" in question:
+            _bounded_text(question["header"], 40)
+            fields.append({"label": f"question[{index}].header", "value": question["header"], "short": True})
+        fields.append({"label": f"question[{index}]", "value": question["text"], "short": False})
+        if "options" not in question:
+            continue
+        options = question["options"]
+        if not isinstance(options, list) or not 1 <= len(options) <= 8:
+            raise ValueError("interaction_options")
+        for option in options:
+            _object(option, {"label"}, {"description", "recommended"})
+            _bounded_text(option["label"], 80)
+            if "description" in option:
+                _bounded_text(option["description"], 200)
+            if "recommended" in option and option["recommended"] is not True:
+                raise ValueError("interaction_options")
+        if (len({option["label"] for option in options}) != len(options)
+                or sum("recommended" in option for option in options) > 1):
+            raise ValueError("interaction_options")
+        fields.append({"label": f"question[{index}].options", "value": [dict(option) for option in options], "short": False})
+    return fields
 
 
 def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
@@ -261,14 +296,21 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
         fields.append({"label": "观察范围", "value": "不完整", "short": True})
     summary = ""
     if action:
-        interaction = _object(body["interaction"], {"ref", "kind"}, set())
+        interaction = _object(body["interaction"], {"ref", "kind"}, {"title", "questionCount", "questions"})
         _ref(interaction["ref"])
-        labels = {"approval": "审批请求（不证明 UI 已呈现）",
-                  "plan_review": "计划审阅已打开（区间可能包含处理时间）",
-                  "ask": "ask 调用待解决（不证明 UI 已呈现）"}
-        if interaction["kind"] not in labels:
+        # 摘要与 OpenCode 待处理卡一致，使用固定文案；具体内容放进字段。
+        labels = {"approval": "等待工具审批", "plan_review": "等待计划审阅", "ask": "等待问题回答"}
+        kind = interaction["kind"]
+        if kind not in labels:
             raise ValueError("interaction_kind")
-        summary = labels[interaction["kind"]]
+        summary = labels[kind]
+        if "title" in interaction:
+            if kind == "ask":
+                raise ValueError("interaction_title")
+            _bounded_text(interaction["title"], 200)
+            fields.append({"label": "审批工具" if kind == "approval" else "计划标题",
+                           "value": _visible(interaction["title"]) or interaction["title"], "short": False})
+        fields.extend(_ask_fields(interaction, kind))
     subagents = waits = None
     if "subagentTimeline" in body or "userWaitTimeline" in body:
         if action or session["scope"] != "root" or cycle.get("timeBasis") != "receipt_monotonic":
