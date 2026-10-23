@@ -1526,6 +1526,9 @@ def _timeline_identity_text(
     if model_text and variant_text.lower() != "default":
         model_text = f"{model_text}({variant_text})" if variant_text else model_text
     thinking_text = _safe_timeline_display_text(thinking)
+    if model_text and thinking_text and not variant_text:
+        # 与 OpenCode 的 model(variant) 一致：OMP 实际 thinking 放进模型括号。
+        model_text, thinking_text = f"{model_text}({thinking_text})", ""
     return " · ".join(value for value in (agent_text, model_text, f"thinking {thinking_text}" if thinking_text else "") if value)
 
 

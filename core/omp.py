@@ -248,7 +248,9 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
         ("sessionName", _visible(session.get("name")) or f"OMP Session {session['ref'][:12]}"),
         ("projectName", _visible(session.get("cwdName"))),
         ("agent", agent if agent != "main" else None),
-        ("model", cycle.get("model")), ("thinking", cycle.get("thinking")),
+        ("model", cycle.get("model")),
+        # 有模型时复用 OpenCode 的 modelVariant 展示为 model(thinking)；无模型时单独显示。
+        ("modelVariant" if cycle.get("model") else "thinking", cycle.get("thinking")),
         ("开始时间", cycle.get("startedAt")), ("耗时", cycle.get("durationMs")),
     ):
         if value is not None:

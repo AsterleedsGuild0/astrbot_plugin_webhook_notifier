@@ -46,7 +46,16 @@ def test_omp_shared_view_separates_kinds_and_unions_overlapping_observations():
         assert "交互／后台观察" in content
         assert "不等于纯人工等待" not in content  # 完整观察不重复免责声明
     assert "隔离测试机" in text and "隔离测试机" in html
-    assert "thinking high" in text and "thinking high" in attachment.html
+    # 与 OpenCode 一致：实际 thinking 放进模型括号，主卡与子代理条目均如此。
+    assert "模型：test/model(high)" in text and "thinking：" not in text
+    assert "fixture/model(high)" in attachment.html and "thinking high" not in attachment.html
+
+
+def test_thinking_without_model_is_shown_separately():
+    body = timeline_envelope()
+    body["cycle"].pop("model")
+    text = render_text_default(parse(body))
+    assert "thinking：high" in text and "模型：" not in text
 
 
 def test_simple_omp_flow_stays_on_main_card_without_attachment():
