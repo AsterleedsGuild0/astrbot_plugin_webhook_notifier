@@ -32,7 +32,7 @@ type Run = {
   agentKey?: string; parentKey?: string; depth: number; parent?: Run; root?: Run; children?: Run[];
   initialJobs: Set<string>; observedSegments: number; timelineReasons: Set<TimelineReason>;
   retrying: boolean; retryFailed: boolean; pendingEnd?: Status; stop?: Status; model?: string; thinking?: string;
-  metadataChanged: boolean; metadataMissing: boolean; closed: boolean;
+  metadataChanged: boolean; metadataMissing: boolean; closed: boolean; yielded?: boolean;
 };
 type Binding = { owner: symbol; key: string; touched: number; run?: Run; snapshot?: () => Snapshot };
 type Config = { url: string; token: string; timeout: number; instance?: string };
@@ -466,6 +466,7 @@ export default (pi: ExtensionAPI): void => {
         if (run.root && run.root !== run) run.root.observedSegments = Math.min(4096, run.root.observedSegments + 1);
       }
       run.stop = undefined;
+      run.yielded = undefined;
       run.pendingEnd = undefined;
       metadata(run, ctx);
     }
@@ -506,7 +507,10 @@ export default (pi: ExtensionAPI): void => {
       if (run.span) run.span.status = "continued";
       return;
     }
-    const observedStatus = run.stop ?? lastStatus(event.messages) ?? "unknown";
+    // eval agent() 子代理以 yield 提交后结束，最终 stopReason 为 toolUse；workpool worker 提交全部条目后 OMP 中止其后续回合（aborted）。
+    // 两者在成功 yield 之后都属于正常完成；yield 失败或未 yield 时保持原映射。
+    const last = lastStatus(event.messages);
+    const observedStatus = run.stop ?? (run.yielded && (last === "unknown" || last === "aborted") ? "completed" : last) ?? "unknown";
     const status = run.start === undefined && observedStatus === "completed" ? "unknown" : observedStatus;
     if (run.retrying) { run.pendingEnd = status; return; }
     finish(binding, status === "aborted" ? "aborted" : run.retryFailed ? "failed" : status);
@@ -524,7 +528,13 @@ export default (pi: ExtensionAPI): void => {
   });
   observe("plan_review_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.reviewId, "plan_review", event.choice === undefined ? "cancelled" : "resolved"); });
   observe("tool_call", (event, ctx) => { if (event.toolName === "ask") request(ctx, event.toolCallId, "ask", askDetail(event.input)); });
-  observe("tool_result", (event, ctx) => { if (event.toolName === "ask") resolve(ctx, event.toolCallId, "ask", event.isError ? "unknown" : "resolved"); });
+  observe("tool_result", (event, ctx) => {
+    if (event.toolName === "ask") resolve(ctx, event.toolCallId, "ask", event.isError ? "unknown" : "resolved");
+    else if (event.toolName === "yield" && !event.isError && ctx.agent?.kind === "sub") {
+      const binding = get(ctx);
+      if (binding?.run && !binding.run.closed) binding.run.yielded = true;
+    }
+  });
   for (const name of ["session_switch", "session_branch", "session_tree"] as const) observe(name, (_, ctx) => {
     if (active) finish(active, "unknown", "session_changed");
     active = undefined;

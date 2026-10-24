@@ -348,6 +348,19 @@ describe("共享 run 的多代理观察时间线", () => {
     expect(new Set(items.map(i => i.cycleRef)).size).toBe(2);
     expect(items.map(i => i.attempt)).toEqual([1, 1]);
   });
+  it("子代理成功 yield 后的 toolUse／aborted 结尾按完成汇总；yield 失败仍按原状态单独提醒", async () => {
+    const root = client(); root.emit("agent_start");
+    const evalChild = child(root.ctx, "E1", "E1"); evalChild.emit("agent_start");
+    evalChild.emit("tool_result", { toolName: "yield", toolCallId: "y1", isError: false }); evalChild.emit("agent_end", end("toolUse"));
+    const worker = child(root.ctx, "W1", "W1"); worker.emit("agent_start");
+    worker.emit("tool_result", { toolName: "yield", toolCallId: "y2", isError: false }); worker.emit("agent_end", end("aborted"));
+    const failed = child(root.ctx, "E2", "E2"); failed.emit("agent_start");
+    failed.emit("tool_result", { toolName: "yield", toolCallId: "y3", isError: true }); failed.emit("agent_end", end("toolUse"));
+    await advance();
+    expect(requests.map(r => [r.body.session.name, r.body.status])).toEqual([["E2", "unknown"]]);
+    root.emit("agent_end", end()); await advance();
+    expect(rootPayload().subagentTimeline.items.map(i => [i.name, i.status])).toEqual([["E1", "completed"], ["W1", "completed"], ["E2", "unknown"]]);
+  });
   it("后台等待与 agent 观察区间分离，续跑不扩大子代理覆盖", async () => {
     const root = client(); root.emit("agent_start");
     const sub = child(root.ctx, "Background"); sub.emit("agent_start");
