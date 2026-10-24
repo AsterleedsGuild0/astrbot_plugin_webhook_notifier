@@ -1,0 +1,19 @@
+/** V2 线协议类型：出站字段的唯一定义处。 */
+export type Status = "completed" | "failed" | "aborted" | "action_required" | "unknown";
+export type Kind = "approval" | "plan_review" | "ask";
+export type Reason = "missing_start" | "session_changed" | "shutdown" | "expired" | "capacity" | "unpaired_interaction" | "incomplete_metadata" | "clock_changed";
+export type Session = { ref: string; scope: "root" | "subagent" | "unknown"; name?: string; cwdName?: string; agent?: string };
+export type Cycle = { ref: string; partial: boolean; reasons: Reason[]; timeBasis: "receipt_monotonic"; startedAt?: string; endedAt?: string; durationMs?: number; model?: string; thinking?: string; metadataChanged?: boolean };
+export type AskOption = { label: string; description?: string; recommended?: true };
+export type AskQuestion = { text: string; header?: string; options?: AskOption[] };
+export type InteractionDetail = { title?: string; questionCount?: number; questions?: AskQuestion[] };
+export type Envelope = { event: "omp.run_finished" | "omp.action_required"; version: 2; id: string; emittedAt: string; session: Session; cycle: Cycle; status: Status; instance?: string; interaction?: { ref: string; kind: Kind } & InteractionDetail; subagentTimeline?: SubagentTimeline; userWaitTimeline?: WaitTimeline };
+export type IntervalKind = Kind | "background_wait";
+export type Resolution = "resolved" | "cancelled" | "unknown";
+export const TIMELINE_REASONS = ["missing_parent", "ambiguous_parent", "missing_start", "missing_end", "loading_gap", "invalid_parent_graph", "depth_limit", "truncated", "clamped", "clock_changed"] as const;
+export type TimelineReason = typeof TIMELINE_REASONS[number];
+export type TimelineItem = { ref: string; cycleRef: string; parentRef: string; depth: number; attempt: number; name?: string; agent?: string; model?: string; thinking?: string; metadataChanged?: boolean; status: Status | "running" | "continued"; timingQuality: "observed" | "partial" | "unknown"; startOffsetMs?: number; endOffsetMs?: number; durationMs?: number };
+export type WaitInterval = { ref: string; agentRef: string; kind: IntervalKind; result?: Resolution; intervalState: "complete" | "right_censored" | "left_censored" | "unknown"; startOffsetMs?: number; endOffsetMs?: number; durationMs?: number };
+export type TimelineBase = { version: 1; partial: boolean; partialReasons: TimelineReason[]; truncated: boolean };
+export type SubagentTimeline = TimelineBase & { timeBasis: "omp_agent_observation"; observedItemCount: number; displayedItemCount: number; items: TimelineItem[] };
+export type WaitTimeline = TimelineBase & { timeBasis: "omp_interaction_observation"; observedIntervalCount: number; displayedIntervalCount: number; intervals: WaitInterval[] };

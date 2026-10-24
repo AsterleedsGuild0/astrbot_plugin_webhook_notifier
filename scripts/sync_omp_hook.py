@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""macOS 单文件开发同步；不执行 Hook，不操作 Git。仅依赖 Python 标准库。"""
+"""macOS OMP 客户端包开发同步：把扁平 extension 包目录单向复制到 OMP 扩展目录。
+
+不执行客户端，不操作 Git；仅依赖 Python 标准库。目标是独立副本，源所在磁盘未挂载时 OMP 仍可正常加载。
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +17,7 @@ import plistlib
 import re
 import signal
 import stat
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +28,7 @@ import uuid
 LABEL = "io.github.asterleedsguild0.webhook-notifier.omp-hook-sync"
 INTERVAL = 2.0
 MAX_BYTES = 4 * 1024 * 1024
+MAX_FILES = 64
 
 
 class SyncError(Exception):
@@ -65,8 +70,79 @@ def read_file(path: Path) -> bytes | None:
         return data
 
 
-def digest(data: bytes | None) -> str | None:
-    return hashlib.sha256(data).hexdigest() if data is not None else None
+def read_package(path: Path, *, source: bool) -> dict[str, bytes] | None:
+    """读取扁平包目录快照；目录不存在返回 None。
+
+    源只取运行文件：跳过隐藏条目、子目录与 ``*.test.ts``，与插件 ZIP 的打包规则一致。
+    目标读取全部条目，任何额外文件或子目录都算独立修改。
+    """
+    safe_path(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return None
+    except NotADirectoryError:
+        raise SyncError("directory_required") from None
+    try:
+        names = sorted(os.listdir(fd))
+    finally:
+        os.close(fd)
+    files: dict[str, bytes] = {}
+    total = 0
+    for name in names:
+        child = path / name
+        if source and (name.startswith(".") or name.endswith(".test.ts") or (child.is_dir() and not child.is_symlink())):
+            continue
+        data = read_file(child)
+        if data is None:
+            raise SyncError("file_changing")
+        total += len(data)
+        files[name] = data
+        if len(files) > MAX_FILES or total > MAX_BYTES:
+            raise SyncError("package_too_large")
+    return files
+
+
+def package_digest(files: dict[str, bytes] | None) -> str | None:
+    if files is None:
+        return None
+    value = hashlib.sha256()
+    for name in sorted(files):
+        data = files[name]
+        value.update(f"{name}\0{len(data)}\0".encode())
+        value.update(data)
+    return value.hexdigest()
+
+
+def write_files(directory: Path, files: dict[str, bytes]) -> None:
+    for name, data in files.items():
+        fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def replace_package(path: Path, files: dict[str, bytes]) -> None:
+    """在目标同级的隐藏暂存目录写好完整包，再以两次 rename 换入；OMP 自动发现不扫描隐藏条目。"""
+    safe_path(path)
+    staging = Path(tempfile.mkdtemp(prefix=".omp-sync-", dir=path.parent))
+    retired = path.parent / f".omp-sync-old-{uuid.uuid4().hex}"
+    try:
+        write_files(staging, files)
+        safe_path(path)
+        if os.path.lexists(path):
+            os.rename(path, retired)
+        try:
+            os.rename(staging, path)
+        except OSError:
+            if os.path.lexists(retired):
+                os.rename(retired, path)
+            raise
+    finally:
+        for leftover in (staging, retired):
+            if os.path.lexists(leftover):
+                shutil.rmtree(leftover)
 
 
 def atomic_write(path: Path, data: bytes) -> None:
@@ -149,8 +225,8 @@ class Synchronizer:
                 return self.record(state, code)
 
     def _step(self, state: dict, *, overwrite: bool) -> str:
-        target = read_file(self.target)
-        target_hash = digest(target)
+        target = read_package(self.target, source=False)
+        target_hash = package_digest(target)
         if target_hash != state["deployed_hash"] and not state["conflict"]:
             state["conflict"] = True
             # 持久化锁存；即便下一次源/目标恰好相同也不静默清除。
@@ -158,14 +234,17 @@ class Synchronizer:
         if state["conflict"] and not overwrite:
             self.candidate = None
             return self.record(state, "target_conflict")
-        source = read_file(self.source)
+        source = read_package(self.source, source=True)
         if source is None:
             self.candidate = None
             return self.record(state, "source_unavailable")
         if not source:
             self.candidate = None
             return self.record(state, "source_empty")
-        source_hash = digest(source)
+        if "package.json" not in source:
+            self.candidate = None
+            return self.record(state, "source_manifest_missing")
+        source_hash = package_digest(source)
         if source_hash != self.candidate:
             self.candidate = source_hash
             return self.record(state, "settling")
@@ -175,15 +254,16 @@ class Synchronizer:
             backup_dir = self.root / "backups"
             safe_path(backup_dir)
             backup_dir.mkdir(mode=0o700, exist_ok=True)
-            backup = backup_dir / f"{time.time_ns()}-{uuid.uuid4().hex}.bak"
-            atomic_write(backup, target)
+            backup = backup_dir / f"{time.time_ns()}-{uuid.uuid4().hex}"
+            backup.mkdir(mode=0o700)
+            write_files(backup, target)
             state["last_backup"] = str(backup)
         # 尽量缩短检查与替换间隔；不是与外部编辑器之间的文件系统 CAS。
-        if read_file(self.target) != target or read_file(self.source) != source:
+        if read_package(self.target, source=False) != target or read_package(self.source, source=True) != source:
             self.candidate = None
             return self.record(state, "file_changing")
-        atomic_write(self.target, source)
-        if read_file(self.target) != source:
+        replace_package(self.target, source)
+        if read_package(self.target, source=False) != source:
             state["conflict"] = True
             save_json(self.root / "state.json", state)
             return self.record(state, "target_conflict")
@@ -240,12 +320,17 @@ class Manager:
         safe_path(target)
         if source == target or (source.exists() and target.exists() and os.path.samefile(source, target)):
             raise SyncError("source_equals_target")
-        if source.suffix != ".ts" or target.suffix != ".ts":
-            raise SyncError("typescript_path_required")
+        if source in target.parents or target in source.parents:
+            raise SyncError("source_target_overlap")
+        if target.name.startswith("."):
+            raise SyncError("hidden_target_refused")
         if self.root in source.parents or self.root in target.parents:
             raise SyncError("runtime_path_overlap")
-        if not read_file(source):
+        package = read_package(source, source=True)
+        if not package:
             raise SyncError("source_unavailable_or_empty")
+        if "package.json" not in package:
+            raise SyncError("source_manifest_missing")
         if not target.parent.is_dir():
             raise SyncError("target_parent_missing")
         if self.loaded():
@@ -253,13 +338,13 @@ class Manager:
         self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
         with lock(self.root / "daemon.lock"), lock(self.root / "sync.lock"):
             old_config = read_file(self.root / "config.json")
-            existing = read_file(target)
+            existing = read_package(target, source=False)
             if old_config is not None:
                 config = json.loads(old_config)
                 if config["source"] != str(source) or config["target"] != str(target):
                     raise SyncError("instance_binding_mismatch")
                 Synchronizer(self.root).state()
-            elif existing != read_file(source) and existing is not None:
+            elif existing is not None and existing != package:
                 raise SyncError("initial_target_conflict")
             if read_file(self.plist) is not None:
                 self.check_plist()
@@ -269,7 +354,7 @@ class Manager:
             if old_config is None:
                 save_json(self.root / "state.json", {
                     "source": str(source), "target": str(target),
-                    "deployed_hash": digest(existing), "conflict": False,
+                    "deployed_hash": package_digest(existing), "conflict": False,
                     "status": "installed", "status_at": now(),
                 })
             save_json(self.root / "config.json", {
@@ -315,10 +400,10 @@ class Manager:
             self.check_plist()
         result = {"installed": installed, "loaded": self.loaded(), "runtime": str(self.root), **state}
         try:
-            source = read_file(Path(state["source"]))
-            target = read_file(Path(state["target"]))
+            source = read_package(Path(state["source"]), source=True)
+            target = read_package(Path(state["target"]), source=False)
             result.update(source_available=source is not None, contents_equal=source is not None and source == target,
-                          target_changed=digest(target) != state["deployed_hash"])
+                          target_changed=package_digest(target) != state["deployed_hash"])
         except (OSError, SyncError):
             result["path_status"] = "unavailable_or_unsafe"
         return result
@@ -348,12 +433,12 @@ class Manager:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="OMP Hook 单向文件同步与 macOS LaunchAgent 管理")
+    parser = argparse.ArgumentParser(description="OMP 客户端包单向目录同步与 macOS LaunchAgent 管理")
     parser.add_argument("--instance", default="default", help="隔离实例名；默认 default")
     sub = parser.add_subparsers(dest="command", required=True)
     install = sub.add_parser("install", help="安装或更新；不自动启动，不覆盖不同的已有目标")
-    install.add_argument("--source", required=True)
-    install.add_argument("--target", required=True)
+    install.add_argument("--source", required=True, help="含 package.json 的客户端包目录")
+    install.add_argument("--target", required=True, help="OMP 扩展目录下的包目录，如 ~/.omp/agent/extensions/webhook-notifier")
     for command in ("start", "stop", "status", "uninstall", "watch"):
         sub.add_parser(command)
     sync = sub.add_parser("sync", help="立即同步；稳定观察间隔 2 秒")

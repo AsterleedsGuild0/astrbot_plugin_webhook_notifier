@@ -148,3 +148,53 @@
 - 计划评审“保存”“细化”已于 2026-10-24 实测（见上表），没有出现“一直不收束”：保存在确认路径后立即切到新会话，旧周期静默收束；细化在同一周期内继续，最终按第二次评审的结果收束。保存后不再发送收束通知，与“批准后交给执行会话”的静默交接一致，不作为缺陷。保存路径对话框中按 Esc 的分支未测。
 - 接收端图片只人工抽查了 ask 待处理卡、ask 完成卡、计划中止卡（修正前）、计划待处理卡、计划取消卡与 workpool 完成卡；其余仅核对文字、同条与图片尺寸。
 - 上述未覆盖项的补测由 #37 跟踪。
+
+## #32：OMP 客户端改为 extension 包
+
+### 变更组
+
+- `integrations/omp/` 改为带 `package.json#omp.extensions` 的包，入口 `index.ts`。原单文件按职责拆为 `index.ts`（事件订阅与收束判定）、`transport.ts`（配置／传输）、`state.ts`（运行与交互状态、父子关联）、`timeline.ts`（时间线采集）、`sanitize.ts`（清洗与匿名化）、`wire.ts`（V2 出站类型）。函数体逐字搬移，handler 的同步返回与调用顺序不变；V2 线协议、事件订阅、状态判定、隐私白名单和发送策略未改。
+- Bun 行为回归改名为 `index.test.ts`，只改了导入路径，断言未动。新增打包契约测试：从清单入口沿相对导入求闭包，要求闭包内文件全部进入插件 ZIP、且 ZIP 不含 `*.test.ts`。
+- `scripts/package_plugin.py` 打包整个客户端目录（排除测试与隐藏文件）；`scripts/smoke_omp_hook.py` 改为 `--package <目录>`，按清单解析入口。
+- `scripts/sync_omp_hook.py` 由单文件同步改为包目录同步：整包摘要、隐藏暂存目录写入后两次 rename 换入、冲突时整目录备份。源缺失不删目标、目标独立修改后锁存暂停等保护行为保留，回归改写为目录形态（30 项）。
+- 原生验收工具从 `tmp/` 整理进 `scripts/omp_native/`，客户端加载方式由 `--hook <文件>` 改为 `--no-extensions -e <包目录>`；另支持 `OMP_NATIVE_LOAD=installed`，使用隔离 HOME 中自动发现或安装的客户端。
+
+### 已执行验证
+
+| 层级 | 场景与预期 | 实际结果 | 证据入口 |
+| --- | --- | --- | --- |
+| Bun 行为回归 | 断言不改，覆盖全部既有行为 | OMP 68 项、OpenCode 279 项，共 347 项通过 | `bun test integrations/omp integrations/opencode` |
+| 类型检查 | 以 OMP 18.12.6 发布包的类型声明检查 6 个模块（strict、`noUnusedLocals`） | 客户端模块 0 错误 | `tmp/omp-types/`（本地，不入库） |
+| 出站一致性 | 同一回环 HTTP smoke 分别驱动 v2.1.0 单文件与新包入口，归一化随机引用与时间戳后逐字节比较请求体 | 17 个场景的请求体完全一致；结果分类、请求次数与重试同 ID 均一致 | `tmp/compare-32/`（本地） |
+| 回环 HTTP | 包入口与测试 ZIP 解压出的包目录 | 两者 17 场景均通过 | `scripts/smoke_omp_hook.py --package …` |
+| Python 全仓 | 打包契约、同步器目录形态回归 | 1383 项通过，Ruff 通过 | `uv run --frozen pytest -q` |
+| 原生 OMP（显式包） | `--no-extensions -e integrations/omp`，S1 正常结束、ask 回答 | S1 1 条 completed（55.8s）；ask 1 条 `action_required`＋1 条 completed，`ask:resolved:complete`；均 delivered | 【已完成】原生验收 S1；【待处理】／【已完成】原生验收 S3-ask-resolved |
+| 新旧入口并存 | 隔离 HOME 同时放 v2.1.0 的 `hooks/post/webhook-notifier.ts` 与同步出的 `extensions/webhook-notifier/` | 同一次运行发出 2 条 completed，接收端收到 2 条【已完成】原生验收 S6-old-and-new | 证实迁移文档中“重复发送”的风险 |
+| 迁移后单入口 | 删除旧 Hook，只保留包目录 | 1 条 completed，接收端 1 条 S6-package-only | 同上 |
+| 外置盘未挂载 | 用真实 `Synchronizer` 从模拟外置卷同步到隔离 HOME 后，重命名卷目录 | 同步状态 `source_unavailable`，目标保留；OMP 照常加载并发出 1 条 completed（S6-source-unmounted） | `tmp/omp-native/sync_accept.py`（本地） |
+| 目标被独立修改 | 修改部署副本后恢复源卷 | `target_conflict` 锁存，部署副本保留本地修改，未被覆盖 | 同上 |
+
+接收端读回：`probe-32.json`，7 条消息与上表一一对应，每条一张 PNG。
+
+### 未覆盖与限制
+
+- 本机真实入口仍是 v2.1.0 单文件 Hook，同步器保持暂停；切换到包目录与恢复同步在发版后进行。
+- 外置盘未挂载以重命名目录模拟，未做物理拔盘；登录重启后 LaunchAgent 的恢复未测。
+- 符号链接方案未采用：OMP 18.12.6 的扩展目录发现会跳过悬空链接（`discovery/helpers.ts`），盘未挂载时客户端会静默失效，属源码依据，未做原生实测。
+
+## 原生验收工具
+
+`scripts/omp_native/` 提供隔离环境下的原生 OMP 验收，日志、隔离 HOME 与工作目录在被 Git 忽略的 `tmp/omp-native/`。
+
+```bash
+export OMP_NATIVE_VERIFY_FILE=<测试 Endpoint 的 KEY=VALUE 文件>   # WEBHOOK_NOTIFIER_URL／WEBHOOK_NOTIFIER_TOKEN
+uv run --frozen python scripts/omp_native/scenarios.py setup                 # 生成隔离 HOME
+uv run --frozen python scripts/omp_native/scenarios.py proxies               # 前台运行本机代理
+uv run --frozen python scripts/omp_native/scenarios.py S1 S3-ask-resolved    # RPC 场景；“场景:别名”可改会话名
+uv run --frozen python scripts/omp_native/scenarios.py plan S3-plan save     # 计划评审：resolve|cancel|save|refine
+```
+
+- 子进程环境从空白构造，不继承调用方 shell 的生产 `OMP_SESSION_WEBHOOK_*`；Webhook 请求发往本机代理，再原样转发到测试 Endpoint，日志记录请求体与响应，不记录 Token。
+- 模型 provider 只把真实 `models.yml` 中一个 provider 的结构写入隔离 HOME，`apiKey` 写成环境变量名，值启动时从登录 shell 只读注入，不落盘。`OMP_NATIVE_PROVIDER`／`OMP_NATIVE_MODEL` 可改 provider 与模型。
+- `OMP_NATIVE_LOAD=package`（默认）只显式加载仓库客户端包；`installed` 不加 `--no-extensions`，使用隔离 HOME 中的扩展目录或已安装插件。
+- `event-recorder.ts` 只记录公开事件类型与结构字段，不记录正文、参数或输出；每个场景在 `logs/runs.jsonl` 记切片索引。

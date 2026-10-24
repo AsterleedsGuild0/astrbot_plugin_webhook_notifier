@@ -15,7 +15,7 @@
 
 ```mermaid
 flowchart LR
-    OMP[oh-my-pi 会话] --> Hook[webhook-notifier.ts OMP Hook]
+    OMP[oh-my-pi 会话] --> Hook[OMP 客户端包<br/>integrations/omp]
     Hook --> Proxy[HTTPS 反向代理]
     Proxy --> HTTP[插件 aiohttp<br/>127.0.0.1:18080]
     HTTP --> Auth[Bearer 鉴权<br/>OMP 标准化]
@@ -27,8 +27,8 @@ flowchart LR
 
 职责边界如下：
 
-- oh-my-pi（OMP）提供公开 ExtensionAPI 事件与 Hook 加载机制；`session_stop` 不等于最终成功。
-- 本仓库 [`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts) 负责把事件转换为 HTTP POST；它不是 OMP 原生 Webhook。
+- oh-my-pi（OMP）提供公开 ExtensionAPI 事件与扩展加载机制；`session_stop` 不等于最终成功。
+- 本仓库 [`integrations/omp/`](../integrations/omp/) 客户端包负责把事件转换为 HTTP POST；它不是 OMP 原生 Webhook。
 - HTTPS 反向代理负责公网入口、TLS 和访问日志，不负责插件 Token 鉴权。
 - Webhook Notifier 负责 Endpoint 查找、Bearer 鉴权、OMP V1/V2 标准化、渲染和 AstrBot 投递。
 - AstrBot adapter 负责把通知送往 Endpoint 已绑定的私聊或普通 QQ 群；外部 payload 不能指定任意目标。
@@ -60,10 +60,10 @@ Caddy 与 AstrBot 不同机时，插件不能继续只监听 loopback；应绑�
 - 公网部署已有真实 DNS 域名，域名解析指向反向代理入口。
 - 公网入口允许 TCP `80`、`443`；插件端口 `18080` 不直接暴露公网。
 - 已安装 Caddy 或其他反向代理；Caddy 只是参考实现，不是必需依赖。
-- 已有可加载 extension/Hook 的 OMP 环境。
-- 已取得本仓库 `integrations/omp/webhook-notifier.ts`，并确认旧 `onebot.ts` 入口的迁移安排，避免重复加载。
+- 已有可加载 extension 的 OMP 环境。
+- 已取得本仓库或 Release ZIP 中完整的 `integrations/omp/` 目录，并确认旧单文件 `webhook-notifier.ts`／`onebot.ts` 入口的迁移安排，避免重复加载。
 
-该维护入口尚未发布，已发布的 v2.0.0 ZIP 不含此文件。生产部署应记录实际使用的插件仓库 commit 或后续发布版本；HTTP POST 由客户端实现，不是 OMP 原生 Webhook。
+生产部署应记录实际使用的插件发布版本；HTTP POST 由客户端实现，不是 OMP 原生 Webhook。
 
 ---
 
@@ -215,23 +215,23 @@ JSON
 
 若 `html_image` 渲染失败且 `fallback_to_text=true`，插件会尝试回退为文本；响应中的 `requested_render_mode`、`render_mode` 和 `fallback_reason` 可用于判断是否发生降级。
 
-### 3. 再部署真实 OMP Hook
+### 3. 再部署真实 OMP 客户端
 
-只有 curl 已经成功或得到预期的 `skipped` 后，才继续配置 OMP Hook。这样可以把后续问题限定在 Hook 加载、环境变量、网络和 timeout 范围内。
+只有 curl 已经成功或得到预期的 `skipped` 后，才继续配置 OMP 客户端。这样可以把后续问题限定在客户端加载、环境变量、网络和 timeout 范围内。
 
 ---
 
-## 配置 OMP Hook
+## 配置 OMP 客户端
 
-完整命令、显式注册、日志位置和排障步骤见[OMP 客户端 Hook 集成指南](client-integration.md)。本阶段只按以下顺序执行：
+完整命令、显式注册、日志位置和排障步骤见[OMP 客户端集成指南](client-integration.md)。本阶段只按以下顺序执行：
 
-1. 从本仓库取得 `integrations/omp/webhook-notifier.ts`；已有 `onebot.ts` 时，先备份到 OMP 自动发现目录之外再切换，不能保留两个生效入口。
-2. 二选一放入用户级 `~/.omp/agent/hooks/post/` 或项目级 `.omp/hooks/post/` 自动发现目录，不要同时部署多份。OMP 自带 TypeScript 运行能力，无需安装依赖或手动编译。
+1. 取得完整的 `integrations/omp/` 客户端包；已有单文件 `webhook-notifier.ts` 或 `onebot.ts` 时，先按客户端指南的迁移步骤删除，不能保留两个生效入口。
+2. 将包目录复制为用户级 `~/.omp/agent/extensions/webhook-notifier/` 或项目级 `.omp/extensions/webhook-notifier/`，二选一，不要同时部署多份。OMP 自带 TypeScript 运行能力，无需安装依赖或手动编译。
 3. 在启动 OMP 的进程环境中设置完整 Endpoint URL、创建 Endpoint 时单独返回的 Token 和可选 timeout；不要假设 OMP 自动加载 `.env`。
-4. 重启 OMP，并执行 `omp -p '/extensions'` 确认扩展路径中包含 `webhook-notifier.ts`。若未加载，按客户端指南检查日志、升级 OMP 或使用显式注册、`--hook` 诊断。
-5. 完成一次真实主代理响应以触发 `session_stop`，再按 OMP、反向代理、AstrBot 和 Bot 的顺序检查。任务或子代理会话不会触发该事件。
+4. 重启 OMP（`/reload-plugins` 不重载扩展模块）。若随后没有通知，按客户端指南检查日志或用 `omp --no-extensions -e <包目录>` 诊断。
+5. 完成一次超过最短完成时长的主代理任务，客户端在最终 `agent_end` 收束时发送；再按 OMP、反向代理、AstrBot 和 Bot 的顺序检查。
 
-该 Hook 可能外发 prompt、`cwd`、session file、会话与轮次标识、模型和统计信息。启用前必须评估数据最小化、跨网络传输、接收目标权限以及 OMP、Caddy 和 AstrBot 各层日志留存。
+客户端只发送有界的会话／代理名称、cwd basename、匿名引用、结构化状态、时间、模型与 thinking；不发送 prompt、回答、完整路径或原始 ID（见[公共契约](public-contract.md)）。名称本身仍可能包含业务信息，启用前评估接收目标权限以及 OMP、Caddy 和 AstrBot 各层日志留存。
 
 ---
 
@@ -283,9 +283,9 @@ JSON
 ## 相关文档
 
 - [项目 README](../README.md)
-- [OMP 客户端社区 Hook 集成指南](client-integration.md)
+- [OMP 客户端集成指南](client-integration.md)
 - [安全与运维指南](security-and-operations.md)
 - [平台投递策略](platform-delivery-policy.md)
 - [命令参考](command-reference.md)
 - [platform_id 离线 Rebind Runbook](platform-id-rebind-runbook.md)
-- [仓库维护的 OMP Hook](../integrations/omp/webhook-notifier.ts)
+- [仓库维护的 OMP 客户端包](../integrations/omp/)

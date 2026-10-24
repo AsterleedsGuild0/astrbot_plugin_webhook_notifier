@@ -1,5 +1,19 @@
 # 更新日志
 
+## 未发布
+
+### 升级须知
+
+- **OMP 客户端改为 extension 包，手动复制过单文件 Hook 的用户需要迁移。** 客户端由 `integrations/omp/` 整个目录组成（`package.json`、入口 `index.ts` 与同目录模块），不再是单个 `webhook-notifier.ts`。迁移时先退出 OMP，删除 `~/.omp/agent/hooks/post/webhook-notifier.ts`（及项目级副本、旧 `onebot.ts`），再把整个目录复制为 `~/.omp/agent/extensions/webhook-notifier/`，然后重启 OMP。新旧入口同时存在会使每次运行发送两条通知。环境变量不变。步骤见[接入指南](docs/client-integration.md#从单文件-hook-迁移)。
+
+### 变更
+
+- #32 OMP 客户端拆为多模块 extension 包：`index.ts` 负责事件订阅与收束判定，配置／传输、运行与交互状态、时间线、清洗与 V2 类型各成模块；行为与出站内容不变（同一 smoke 下新旧请求体逐字节一致）。插件 ZIP 改为包含整个客户端包，不含测试。
+- `scripts/smoke_omp_hook.py` 改用 `--package <目录>`，按 `package.json#omp.extensions` 解析入口。
+- `scripts/sync_omp_hook.py` 改为同步整个客户端包目录到 OMP 扩展目录：整包摘要判稳、隐藏暂存目录写好后换入，冲突时整目录备份；源缺失或外置盘未挂载时保留部署副本，目标被独立修改后锁存暂停。
+- 原生 OMP 验收工具整理进 `scripts/omp_native/`：隔离 HOME、本机代理、RPC／TUI 场景驱动与事件记录器；测试 Endpoint 从外部文件读取，不继承调用方 shell 的生产变量。
+- 补测计划评审“保存”“细化”：保存后 OMP 切到新会话，旧周期静默收束；细化在同一周期继续并按最终评审结果收束。不存在一直不收束的问题。
+
 ## v2.1.0 - 2026-10-24
 
 本版本发布 OMP V2 通知（#28～#31）：OMP Hook 改为发送独立的 `omp.run_finished`／`omp.action_required`，带观察时间线，与 OpenCode 共用卡片。原生 OMP 18.12.6 的验收结果见 [OMP V2 验收记录](docs/omp-v2-acceptance.md#原生-omp-验收)。

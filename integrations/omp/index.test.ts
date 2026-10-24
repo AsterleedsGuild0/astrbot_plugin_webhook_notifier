@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import register, { type Envelope } from "./webhook-notifier.ts";
+import register, { type Envelope } from "./index.ts";
 
 type Event = Record<string, unknown>;
 type Handler = (event: Event, context: ExtensionContext) => unknown;

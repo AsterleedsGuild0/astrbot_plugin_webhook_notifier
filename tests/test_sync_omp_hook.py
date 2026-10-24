@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -14,15 +15,37 @@ assert spec and spec.loader
 sync = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sync)
 
+MANIFEST = b'{"omp": {"extensions": ["./index.ts"]}}\n'
+
+
+def put(directory: Path, data: bytes) -> None:
+    (directory / "index.ts").write_bytes(data)
+
+
+def entry(directory: Path) -> bytes | None:
+    path = directory / "index.ts"
+    return path.read_bytes() if path.exists() else None
+
+
+def snapshot(directory: Path) -> dict[str, bytes] | None:
+    if not directory.exists():
+        return None
+    return {path.name: path.read_bytes() for path in sorted(directory.iterdir())}
+
 
 @pytest.fixture
 def deployment(tmp_path):
     root = tmp_path.resolve() / "state"
     root.mkdir()
-    source = root.parent / "source" / "hook.ts"
-    source.parent.mkdir()
-    source.write_bytes(b"export const version = 1;\n")
-    target = root.parent / "target" / "hook.ts"
+    # 源包位于模拟外置卷下；重命名 volume 即模拟卸载。
+    source = root.parent / "volume" / "omp"
+    source.mkdir(parents=True)
+    (source / "package.json").write_bytes(MANIFEST)
+    put(source, b"export const version = 1;\n")
+    (source / "index.test.ts").write_bytes(b"test only\n")
+    (source / ".DS_Store").write_bytes(b"finder\n")
+    (source / "node_modules").mkdir()
+    target = root.parent / "extensions" / "webhook-notifier"
     target.parent.mkdir()
     sync.save_json(root / "config.json", {"source": str(source), "target": str(target)})
     sync.save_json(root / "state.json", {
@@ -38,84 +61,107 @@ def deploy(deployment):
     assert engine.step() == "settling"
     assert not target.exists()
     assert engine.step() == "synced"
-    assert target.read_bytes() == source.read_bytes()
+    assert entry(target) == entry(source)
     return engine
 
 
-def test_stable_copy_is_atomic_private_and_noop_when_unchanged(deployment):
+def test_stable_copy_ships_runtime_files_only_privately_and_noop_when_unchanged(deployment):
     engine = deploy(deployment)
     _, source, target = deployment
-    assert target.stat().st_mode & 0o777 == 0o600
-    assert source.stat().st_ino != target.stat().st_ino
+    assert sorted(path.name for path in target.iterdir()) == ["index.ts", "package.json"]
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in target.iterdir())
+    assert (source / "index.ts").stat().st_ino != (target / "index.ts").stat().st_ino
     before = target.stat()
+    mtime = (target / "index.ts").stat().st_mtime_ns
     assert engine.step() == "in_sync"
     assert target.stat().st_ino == before.st_ino
-    assert target.stat().st_mtime_ns == before.st_mtime_ns
+    assert (target / "index.ts").stat().st_mtime_ns == mtime
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_new_module_and_removed_module_replace_whole_package(deployment):
+    engine = deploy(deployment)
+    _, source, target = deployment
+    (source / "extra.ts").write_bytes(b"export {};\n")
+    assert engine.step() == "settling"
+    assert engine.step() == "synced"
+    assert (target / "extra.ts").read_bytes() == b"export {};\n"
+    (source / "extra.ts").unlink()
+    assert engine.step() == "settling"
+    assert engine.step() == "synced"
+    assert sorted(path.name for path in target.iterdir()) == ["index.ts", "package.json"]
     assert list(target.parent.iterdir()) == [target]
 
 
 def test_atomic_source_save_and_rapid_changes_wait_for_stability(deployment):
     engine = deploy(deployment)
     _, source, target = deployment
-    initial = target.read_bytes()
-    temporary = source.with_suffix(".save")
+    initial = entry(target)
+    temporary = source / ".index.ts.save"
     temporary.write_bytes(b"intermediate")
-    temporary.replace(source)
+    temporary.replace(source / "index.ts")
     assert engine.step() == "settling"
-    source.write_bytes(b"final")
+    put(source, b"final")
     assert engine.step() == "settling"
-    assert target.read_bytes() == initial
+    assert entry(target) == initial
     assert engine.step() == "synced"
-    assert target.read_bytes() == b"final"
+    assert entry(target) == b"final"
 
 
-def test_missing_source_directory_recovers_without_deleting_target(deployment):
+def test_unmounted_source_volume_recovers_without_deleting_target(deployment):
     engine = deploy(deployment)
     _, source, target = deployment
-    initial = target.read_bytes()
-    unavailable = source.parent.with_name("detached")
-    source.parent.rename(unavailable)
+    initial = snapshot(target)
+    volume = source.parent
+    detached = volume.with_name("detached")
+    volume.rename(detached)
     assert engine.step() == "source_unavailable"
-    assert target.read_bytes() == initial
-    (unavailable / source.name).write_bytes(b"after remount")
-    unavailable.rename(source.parent)
+    assert snapshot(target) == initial
+    put(detached / "omp", b"after remount")
+    detached.rename(volume)
     assert engine.step() == "settling"
     assert engine.step() == "synced"
-    assert target.read_bytes() == b"after remount"
+    assert entry(target) == b"after remount"
 
 
-@pytest.mark.parametrize("change", ["edit", "delete", "replace"])
+@pytest.mark.parametrize("change", ["edit", "add", "delete", "replace"])
 def test_target_conflict_survives_restart_and_requires_explicit_resolution(deployment, change):
     engine = deploy(deployment)
     root, source, target = deployment
     if change == "delete":
-        target.unlink()
+        shutil.rmtree(target)
     elif change == "replace":
-        other = target.with_suffix(".new")
-        other.write_bytes(b"manual replacement")
-        other.replace(target)
+        other = target.with_name("manual")
+        other.mkdir()
+        (other / "index.ts").write_bytes(b"manual replacement")
+        target.rename(target.with_name("old"))
+        other.rename(target)
+        shutil.rmtree(target.with_name("old"))
+    elif change == "add":
+        (target / "onebot.ts").write_bytes(b"second entry")
     else:
-        target.write_bytes(b"manual edit")
-    previous = target.read_bytes() if target.exists() else None
-    source.write_bytes(b"new source")
+        put(target, b"manual edit")
+    previous = snapshot(target)
+    put(source, b"new source")
     assert engine.step() == "target_conflict"
     restarted = sync.Synchronizer(root)
     assert restarted.step() == "target_conflict"
-    assert (target.read_bytes() if target.exists() else None) == previous
+    assert snapshot(target) == previous
     assert restarted.step(overwrite=True) == "settling"
     assert restarted.step(overwrite=True) == "synced"
-    assert target.read_bytes() == b"new source"
-    backups = list((root / "backups").glob("*.bak")) if (root / "backups").exists() else []
-    assert [p.read_bytes() for p in backups] == ([] if previous is None else [previous])
+    assert entry(target) == b"new source"
+    assert sorted(path.name for path in target.iterdir()) == ["index.ts", "package.json"]
+    backups = sorted((root / "backups").iterdir()) if (root / "backups").exists() else []
+    assert [snapshot(path) for path in backups] == ([] if previous is None else [previous])
     assert not restarted.state()["conflict"]
 
 
 def test_conflict_does_not_clear_when_contents_happen_to_match(deployment):
     engine = deploy(deployment)
     _, source, target = deployment
-    target.write_bytes(b"manual")
+    put(target, b"manual")
     assert engine.step() == "target_conflict"
-    source.write_bytes(b"manual")
+    put(source, b"manual")
     assert engine.step() == "target_conflict"
     assert engine.step(overwrite=True) == "settling"
     assert engine.step(overwrite=True) == "synced"
@@ -124,47 +170,44 @@ def test_conflict_does_not_clear_when_contents_happen_to_match(deployment):
 def test_conflict_resolution_never_backs_up_or_overwrites_unstable_source(deployment):
     engine = deploy(deployment)
     root, source, target = deployment
-    target.write_bytes(b"manual")
-    source.write_bytes(b"first pending source")
+    put(target, b"manual")
+    put(source, b"first pending source")
     assert engine.step(overwrite=True) == "settling"
-    source.write_bytes(b"changing")
+    put(source, b"changing")
     assert engine.step(overwrite=True) == "settling"
-    assert target.read_bytes() == b"manual"
+    assert entry(target) == b"manual"
     assert not (root / "backups").exists()
 
 
-@pytest.mark.parametrize("side", ["source", "target", "source_parent", "target_parent"])
+@pytest.mark.parametrize("side", ["source", "target", "source_file", "target_parent"])
 def test_symlinks_never_followed(deployment, side):
     engine = deploy(deployment)
     _, source, target = deployment
-    chosen = source if side.startswith("source") else target
-    if side.endswith("parent"):
-        moved = chosen.parent.with_name(chosen.parent.name + "-real")
-        chosen.parent.rename(moved)
-        chosen.parent.symlink_to(moved, target_is_directory=True)
-    else:
-        moved = chosen.with_suffix(".real")
-        chosen.rename(moved)
-        chosen.symlink_to(moved)
-    original = moved.read_bytes() if moved.is_file() else (moved / chosen.name).read_bytes()
+    chosen = {"source": source, "target": target, "source_file": source / "index.ts", "target_parent": target.parent}[side]
+    moved = chosen.with_name(chosen.name + "-real")
+    chosen.rename(moved)
+    chosen.symlink_to(moved, target_is_directory=moved.is_dir())
+    before = {path: path.read_bytes() for path in moved.rglob("*") if path.is_file()} if moved.is_dir() else moved.read_bytes()
     assert engine.step() == "symlink_refused"
-    assert (moved.read_bytes() if moved.is_file() else (moved / chosen.name).read_bytes()) == original
+    after = {path: path.read_bytes() for path in moved.rglob("*") if path.is_file()} if moved.is_dir() else moved.read_bytes()
+    assert after == before
 
 
-def test_empty_source_preserves_previous_copy(deployment):
+def test_empty_or_manifestless_source_preserves_previous_copy(deployment):
     engine = deploy(deployment)
     _, source, target = deployment
-    initial = target.read_bytes()
-    source.write_bytes(b"")
+    initial = snapshot(target)
+    (source / "package.json").unlink()
+    assert engine.step() == "source_manifest_missing"
+    (source / "index.ts").unlink()
     assert engine.step() == "source_empty"
-    assert target.read_bytes() == initial
+    assert snapshot(target) == initial
 
 
 def test_missing_target_parent_is_a_conflict_not_automatically_recreated(deployment):
     engine = deploy(deployment)
     _, _, target = deployment
-    target.unlink()
-    target.parent.rmdir()
+    shutil.rmtree(target.parent)
     assert engine.step() == "target_conflict"
     assert not target.parent.exists()
 
@@ -172,7 +215,7 @@ def test_missing_target_parent_is_a_conflict_not_automatically_recreated(deploym
 def test_restart_after_target_write_before_state_save_fails_closed(deployment, monkeypatch):
     engine = deploy(deployment)
     root, source, target = deployment
-    source.write_bytes(b"new source")
+    put(source, b"new source")
     assert engine.step() == "settling"
     original_save = sync.save_json
 
@@ -185,36 +228,36 @@ def test_restart_after_target_write_before_state_save_fails_closed(deployment, m
     with pytest.raises(RuntimeError, match="simulated crash"):
         engine.step()
     monkeypatch.setattr(sync, "save_json", original_save)
-    assert target.read_bytes() == b"new source"
+    assert entry(target) == b"new source"
     assert sync.Synchronizer(root).step() == "target_conflict"
 
 
 def test_target_modified_during_preparation_is_not_overwritten(deployment, monkeypatch):
     engine = deploy(deployment)
     _, source, target = deployment
-    source.write_bytes(b"new source")
+    put(source, b"new source")
     assert engine.step() == "settling"
-    original_read = sync.read_file
+    original_read = sync.read_package
     calls = 0
 
-    def edit_before_recheck(path):
+    def edit_before_recheck(path, *, source):
         nonlocal calls
         if path == target:
             calls += 1
             if calls == 2:
-                target.write_bytes(b"concurrent edit")
-        return original_read(path)
+                put(target, b"concurrent edit")
+        return original_read(path, source=source)
 
-    monkeypatch.setattr(sync, "read_file", edit_before_recheck)
+    monkeypatch.setattr(sync, "read_package", edit_before_recheck)
     assert engine.step() == "file_changing"
-    assert target.read_bytes() == b"concurrent edit"
+    assert entry(target) == b"concurrent edit"
     assert engine.step() == "target_conflict"
 
 
 def test_state_binding_change_fails_closed(deployment):
     root, _, target = deployment
     config = sync.load_json(root / "config.json")
-    config["target"] = str(target.with_name("other.ts"))
+    config["target"] = str(target.with_name("other"))
     sync.save_json(root / "config.json", config)
     with pytest.raises(sync.SyncError, match="state_binding_mismatch"):
         sync.Synchronizer(root).step()
@@ -241,12 +284,12 @@ with open(sys.argv[1], 'a') as stream:
 def test_invalid_state_does_not_replace_target(deployment):
     engine = deploy(deployment)
     root, source, target = deployment
-    initial = target.read_bytes()
+    initial = snapshot(target)
     (root / "state.json").write_text("broken json")
-    source.write_bytes(b"changed")
+    put(source, b"changed")
     with pytest.raises(json.JSONDecodeError):
         engine.step()
-    assert target.read_bytes() == initial
+    assert snapshot(target) == initial
 
 
 @pytest.fixture
@@ -260,23 +303,25 @@ def manager(deployment, monkeypatch):
 
 def test_install_refuses_existing_different_target(manager, deployment):
     _, source, target = deployment
-    target.write_bytes(b"local installation")
+    target.mkdir()
+    put(target, b"local installation")
     with pytest.raises(sync.SyncError, match="initial_target_conflict"):
         manager.install(source, target)
-    assert target.read_bytes() == b"local installation"
+    assert snapshot(target) == {"index.ts": b"local installation"}
     assert not manager.plist.exists()
 
 
 def test_install_adopts_identical_copy_without_changing_it(manager, deployment):
     _, source, target = deployment
-    target.write_bytes(source.read_bytes())
+    target.mkdir()
+    for name in ("package.json", "index.ts"):
+        (target / name).write_bytes((source / name).read_bytes())
     before = target.stat()
     manager.install(source, target)
     engine = sync.Synchronizer(manager.root)
     assert engine.step() == "settling"
     assert engine.step() == "in_sync"
     assert target.stat().st_ino == before.st_ino
-    assert target.stat().st_mtime_ns == before.st_mtime_ns
 
 
 def test_reinstall_preserves_conflict_and_original_binding(manager, deployment):
@@ -285,28 +330,30 @@ def test_reinstall_preserves_conflict_and_original_binding(manager, deployment):
     engine = sync.Synchronizer(manager.root)
     engine.step()
     assert engine.step() == "synced"
-    target.write_bytes(b"local change")
+    put(target, b"local change")
     assert engine.step() == "target_conflict"
     manager.install(source, target)
     assert sync.Synchronizer(manager.root).step() == "target_conflict"
-    other = target.with_name("other.ts")
+    other = target.with_name("other")
     with pytest.raises(sync.SyncError, match="instance_binding_mismatch"):
         manager.install(source, other)
-    assert target.read_bytes() == b"local change"
+    assert entry(target) == b"local change"
     assert not other.exists()
 
 
-def test_install_rejects_source_target_alias(manager, deployment):
+@pytest.mark.parametrize("relation", ["same", "inside_source", "hidden"])
+def test_install_rejects_unsafe_targets(manager, deployment, relation):
     _, source, target = deployment
-    target.hardlink_to(source)
-    with pytest.raises(sync.SyncError, match="source_equals_target"):
-        manager.install(source, target)
+    chosen = {"same": source, "inside_source": source / "deployed", "hidden": target.with_name(".webhook-notifier")}[relation]
+    with pytest.raises(sync.SyncError):
+        manager.install(source, chosen)
     assert not manager.plist.exists()
+    assert not (source / "deployed").exists()
 
 
 def test_missing_source_refuses_install_without_launchagent(manager, deployment):
     _, source, target = deployment
-    source.unlink()
+    shutil.rmtree(source)
     with pytest.raises(sync.SyncError, match="source_unavailable_or_empty"):
         manager.install(source, target)
     assert not manager.plist.exists()
@@ -329,7 +376,7 @@ def test_status_reports_conflict_without_failing_query(manager, deployment, monk
     engine = sync.Synchronizer(manager.root)
     engine.step()
     engine.step()
-    target.write_bytes(b"manual")
+    put(target, b"manual")
     engine.step()
     monkeypatch.setattr(sync.sys, "platform", "darwin")
     assert sync.main(["--instance", "test", "status"]) == 0

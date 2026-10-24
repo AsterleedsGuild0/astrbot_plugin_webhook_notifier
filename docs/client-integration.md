@@ -1,15 +1,15 @@
-# OMP 客户端 Hook 集成指南
+# OMP 客户端集成指南
 
 ## 文档信息
 
-- 服务端协议：新增 `omp.run_finished` / `omp.action_required` version 2，保留 V1 接收
-- 客户端维护入口：[`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts)
-- 当前 API 研究及本机版本：OMP `18.12.6`，2026-10-23
-- 发布状态：V2 本地开发版，尚未部署；已发布的 v2.0.0 ZIP 不含此客户端
+- 服务端协议：`omp.run_finished` / `omp.action_required` version 2，保留 V1 接收
+- 客户端维护源：[`integrations/omp/`](../integrations/omp/)，带 `package.json#omp.extensions` 的 extension 包，入口 `index.ts`
+- 当前 API 研究及本机版本：OMP `18.12.6`，2026-10-24
+- 发布状态：v2.1.0 起随插件 Release ZIP 分发；v2.2.0 起由单文件 Hook 改为整个客户端包
 
 本文说明如何将 OMP 运行收束和交互观察发送到 Webhook Notifier。维护源只发送 V2，不自动降级。历史 V1 基线来自 [`ParticleG/omp-config`](https://github.com/ParticleG/omp-config/blob/main/agent/hooks/post/onebot.ts)；V1 接收兼容和状态纠错见[公共契约](public-contract.md#v1-接收兼容与纠错)。
 
-macOS 开发环境可以通过[本地 Hook 自动同步](#本地-hook-自动同步)部署普通文件副本。创建仓库源文件不等于接管本机已加载的 Hook；切换文件名和启动同步需单独执行。
+macOS 开发环境可以通过[本地开发同步](#本地开发同步)部署包目录副本。仓库中的源码存在不等于本机已经加载；切换入口和启动同步需单独执行。
 
 首次从 AstrBot 服务端、HTTPS 反向代理一路部署到真实 OMP 会话时，请先阅读[端到端部署教程](end-to-end-setup.md)。本文负责客户端安装、环境变量、HTTP 契约与数据边界；插件服务端配置、Endpoint 创建和 Caddy 参考部署以端到端教程为准。
 
@@ -25,45 +25,69 @@ V2 使用公开代理身份设置 `root|subagent|unknown`；服务端只过滤�
 
 ## 前提与获取方式
 
-- 已部署可加载 extension/Hook 的 OMP 环境。
+- 已部署可加载 extension 的 OMP 环境。
 - 已显式创建 OMP Endpoint，例如 `<唤醒词>whn token new private my-omp --provider omp`，并分别取得 Base URL、Endpoint Path 和 Bearer Token。群 Endpoint 同样追加 `--provider omp`，按[命令参考](command-reference.md)完成验证。自 `v2.0.0` 起省略此 flag 默认 `markdown`，不能发送本指南的 OMP payload；错误 flag 不回退默认值。旧记录缺失 `provider` 也按 Markdown 读取，显式历史 Provider 保留、不自动覆盖、不按 payload 猜协议；依赖缺失字段的旧 OMP 调用应创建新的显式 OMP Endpoint 并更新 URL/Token。发布边界见[公共契约](public-contract.md)。
-- 从本仓库取得 `integrations/omp/webhook-notifier.ts`，或从包含该文件的后续发布 ZIP 中提取；无需克隆外部社区配置仓库。
-- 确认现有 Hook 入口，切换时避免旧 `onebot.ts` 与新客户端重复加载。
+- 从本仓库或 Release ZIP 取得整个 `integrations/omp/` 目录。客户端由 `package.json`、入口 `index.ts` 和同目录模块组成，只复制 `index.ts` 无法加载；`*.test.ts` 是开发测试，不需要部署。
+- 确认现有入口。曾手动复制单文件 `webhook-notifier.ts` 或 `onebot.ts` 的环境，按下方[从单文件 Hook 迁移](#从单文件-hook-迁移)删除旧入口。
 
-OMP 自带 Bun/TypeScript 运行能力，部署该 Hook 不需要执行 `npm install`、`bun install` 或手动编译。本文不声明未经验证的最低 OMP 版本。
+OMP 自带 Bun/TypeScript 运行能力，客户端包没有运行依赖，不需要执行 `npm install`、`bun install` 或手动编译。本文不声明未经验证的最低 OMP 版本。
 
 ---
 
-## 在 OMP 中安装 webhook-notifier.ts
+## 安装客户端包
 
-### 确认维护源与旧入口
+### 包结构
 
-本仓库的 `integrations/omp/webhook-notifier.ts` 是开发维护源，OMP 加载目录中的文件是部署副本。部署时记录插件仓库 commit 或发布版本。
+| 文件 | 职责 |
+| --- | --- |
+| `package.json` | `omp.extensions` 声明唯一入口 `./index.ts`；`version` 与插件版本一致 |
+| `index.ts` | 订阅公开事件，判定运行收束与待处理交互，组装 V2 Envelope |
+| `transport.ts` | 读取环境变量配置；有界队列、并发、重试和 HTTP／业务结果分类 |
+| `state.ts` | 运行、交互与会话绑定状态，最终状态映射，子代理父子关联 |
+| `timeline.ts` | 根运行收束时的子代理观察段与用户等待区间 |
+| `sanitize.ts` | 名称与交互内容的清洗、截断和匿名化 |
+| `wire.ts` | V2 出站字段类型 |
 
-已有 `onebot.ts` 时，先将它备份到 OMP 自动发现目录之外，再安装新文件；不要把备份保留为 `post` 目录中的另一个 `.ts`。本轮入库不自动移除或覆盖既有入口。
+模块之间只用相对路径导入，不依赖仓库其他位置；整个目录复制到任何位置都能独立加载。
 
-### 选择自动发现目录
+### 复制到扩展目录
 
-推荐使用 OMP 自动发现，无需额外 settings 注册。二选一安装：
+推荐使用 OMP 自动发现：OMP 会加载扩展目录下一级子目录中 `package.json#omp.extensions` 声明的入口。二选一安装：
 
-- 用户级：`~/.omp/agent/hooks/post/*.ts`，对该用户启动的 OMP 生效。
-- 项目级：`.omp/hooks/post/*.ts`，对当前项目生效；这里是项目根目录下的点目录 `.omp`，不是 `./omp`。
+- 用户级：`~/.omp/agent/extensions/webhook-notifier/`，对该用户启动的 OMP 生效。
+- 项目级：`<项目根>/.omp/extensions/webhook-notifier/`，只在以该目录为 cwd 启动的 OMP 中生效。
 
-在插件仓库根目录执行用户级安装：
+在插件仓库根目录（或解压后的插件根目录）执行用户级安装：
 
 ```bash
-mkdir -p ~/.omp/agent/hooks/post
-install -m 600 integrations/omp/webhook-notifier.ts ~/.omp/agent/hooks/post/webhook-notifier.ts
+dest="$HOME/.omp/agent/extensions/webhook-notifier"
+rm -rf "$dest" && mkdir -p "$dest"
+for file in integrations/omp/*; do
+  case "$file" in *.test.ts) ;; *) install -m 600 "$file" "$dest/" ;; esac
+done
 ```
 
-项目级替代方案，在需要启用 Hook 的项目根目录执行：
+先删除再复制，避免升级后残留已经移除的模块。目录名可以自定，建议保留 `webhook-notifier`：需要临时停用时，可在 `disabledExtensions` 中写 `extension-module:webhook-notifier`。
 
-```bash
-mkdir -p .omp/hooks/post
-install -m 600 /path/to/astrbot_plugin_webhook_notifier/integrations/omp/webhook-notifier.ts .omp/hooks/post/webhook-notifier.ts
-```
+不要用符号链接或 `omp plugin link` 指向外置盘上的仓库。OMP 18.12.6 发现扩展目录时会跳过悬空链接（`discovery/helpers.ts` 的 `discoverExtensionModulePaths`），盘未挂载时客户端会静默失效；复制的目录不引用源路径，不受影响。开发期需要随源码更新时使用[本地开发同步](#本地开发同步)。
 
-OMP 只发现 `post` 目录中的直接子文件，不递归扫描其子目录。文件名不要求固定，但模块必须默认导出工厂函数；本仓库使用 `webhook-notifier.ts`，因为它发送插件 Webhook，并不直接调用 OneBot。不要同时在用户级、项目级或显式配置中放置同一 Hook 的多份副本，否则可能重复推送。
+### 从单文件 Hook 迁移
+
+v2.1.0 及更早版本以单文件 `webhook-notifier.ts` 放在 `hooks/post/` 中。新旧入口同时存在时，两份客户端都会加载，每次运行发送两条通知。迁移步骤：
+
+1. 退出正在运行的 OMP 会话。
+2. 删除旧入口：`~/.omp/agent/hooks/post/webhook-notifier.ts`、项目级 `.omp/hooks/post/webhook-notifier.ts`，以及更早的 `onebot.ts`；如需保留，移到自动发现目录之外。若在 `settings.json` 或 `config.yml` 的 `extensions` 中显式写过旧文件路径，一并删除。
+3. 按上一节安装客户端包（或使用 marketplace 安装，二者只选一种）。
+4. 自检只剩一个入口：
+
+   ```bash
+   ls ~/.omp/agent/hooks/post/ ~/.omp/agent/extensions/
+   ```
+
+   `hooks/post/` 中不应再有 `webhook-notifier.ts` 或 `onebot.ts`，`extensions/` 中只有 `webhook-notifier/` 一个客户端目录。
+5. 重启 OMP。`/reload-plugins` 不会重新加载扩展模块，必须新开 OMP 进程。执行一次超过最短完成时长的任务，确认只收到一条通知。
+
+环境变量沿用原有设置，无需修改。
 
 ### 配置启动进程环境变量
 
@@ -77,50 +101,42 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='30000'
 
 可以把变量配置在 shell 启动配置、受控包装启动脚本或服务管理器的环境配置中。环境变量必须实际传入启动 OMP 的进程；设置后需要重启 OMP。当前没有上游确认的 OMP 自动加载 `.env` 约定，不要仅创建 `.env` 后假设变量已经生效。
 
-Hook 在 URL 未配置时会静默不发送。虽然客户端本身可以在 Token 为空时发出无鉴权请求，但本插件 Endpoint 强制要求 Bearer Token，因此必须使用创建 Endpoint 时单独返回的 Token，并与 URL 分开保存。
+URL 或 Token 未配置时，客户端只记录 `configuration_missing` 分类并静默不发送。本插件 Endpoint 强制要求 Bearer Token，必须使用创建 Endpoint 时单独返回的 Token，并与 URL 分开保存。
 
-### 重启并验证自动发现
+### 重启并验证加载
 
-重启 OMP 后执行：
+重启 OMP 后执行一次超过最短完成时长（默认 15 秒）的任务，确认目标聊天收到通知。没有收到时检查 `~/.omp/logs/` 中 `OMP webhook` 的固定分类日志（例如 `configuration_missing`、`permanent_error`），并确认扩展目录中有 `package.json` 与 `index.ts`、文件可读。
 
-```bash
-omp -p '/extensions'
-```
+### 显式加载与一次性诊断
 
-检查输出的已加载扩展路径是否包含所安装的 `webhook-notifier.ts`。加载失败时检查 `~/.omp/logs/` 中的 OMP 日志，并确认文件位于直接子目录、权限可读、模块具有默认工厂导出。
-
-不同 OMP 版本若没有自动加载，可先升级 OMP，再使用显式注册或 `--hook` 进行诊断。
-
-### 必要时显式注册或一次性诊断
-
-可以在用户级 `~/.omp/agent/settings.json` 或项目级 `.omp/settings.json` 的 `extensions` 数组中显式注册本地文件。以下只是结构片段，必须合并到已有 `extensions` 数组，不要覆盖用户现有 settings 或其他扩展：
+可以在用户级 `~/.omp/agent/config.yml`（YAML 中的 `extensions:` 列表）或项目级 `.omp/settings.json` 的 `extensions` 数组中显式注册包目录。以下是 `settings.json` 的结构片段，必须合并到已有 `extensions` 数组，不要覆盖其他扩展；同时不要再在扩展目录中放一份副本：
 
 ```json
 {
   "extensions": [
-    "/absolute/path/to/webhook-notifier.ts"
+    "/absolute/path/to/webhook-notifier"
   ]
 }
 ```
 
-也可以一次性启动并加载 Hook，用于区分自动发现与脚本本身的问题：
+也可以一次性指定包目录启动，用于区分自动发现与客户端本身的问题：
 
 ```bash
-omp --hook /path/to/webhook-notifier.ts
+omp -e /path/to/integrations/omp
 ```
 
-显式注册和 `--hook` 是兼容或诊断手段；正常部署优先使用用户级或项目级自动发现目录。
+`-e` 会与自动发现的副本同时加载；诊断时加 `--no-extensions` 只保留显式路径，避免重复发送。
 
 ### 触发并分层验证
 
 1. 先在独立配置与回环测试目标执行下方本地 smoke；不得仅因默认同步器暂停就启动带真实环境变量的 OMP。
-2. 获得相应授权后，用隔离 HOME、独立扩展入口与测试凭据执行原生场景。当前 Hook 在最终 `agent_end` 收束时发送；`willContinue=true` 的重试、维护和后台等待不提前完成。
+2. 获得相应授权后，用隔离 HOME、独立扩展入口与测试凭据执行原生场景（工具见 `scripts/omp_native/`，用法见[验收记录](omp-v2-acceptance.md#原生验收工具)）。客户端在最终 `agent_end` 收束时发送；`willContinue=true` 的重试、维护和后台等待不提前完成。
 3. 只有 URL、Token 同时有效才发送；缺失／非法时记录固定配置分类。客户端日志 `OMP webhook` 只含分类、HTTP 状态、尝试次数和匿名事件引用。
 4. 同时检查 HTTP 和受限业务结果；`delivered` 表示服务端报告送达，`replayed` 不能作为实际消息证明。线上还需核对测试目标消息。
 
 ### 更新策略
 
-先升级支持 V2 的服务端，再单独授权切换客户端。保留单一生效入口；不恢复旧 `onebot.ts` 为第二入口。默认同步器在开发期间保持停止／禁用，不覆盖保留的真实部署副本。旧端拒绝独立 V2 事件，不自动回退。测试包、切换门禁及同入口客户端回滚步骤见[发布流程](release.md#omp-v2-测试包与切换门禁未发布)。
+先升级服务端，再更新客户端；协议新增字段时旧服务端会拒绝，不自动回退。升级客户端时整目录替换（先删除旧目录再复制），然后重启 OMP。保留单一生效入口，不恢复旧 `onebot.ts` 或单文件 `webhook-notifier.ts` 为第二入口。测试包、切换门禁及客户端回滚步骤见[发布流程](release.md)。
 
 ---
 
@@ -129,9 +145,9 @@ omp --hook /path/to/webhook-notifier.ts
 1. 在已认证的 AstrBot Plugin Page 获取 Base URL。
 2. 在与 Bot 的聊天中创建或查看 Endpoint，取得 Endpoint Path；Token 仅在创建、轮换或确认成功时独立交付。
 3. 在受控环境中组合 Base URL 与 Endpoint Path，避免在聊天、Issue、截图或 shell history 中公开完整 URL。
-4. 将完整 URL 配置到 Hook 的 URL 环境变量，将 Token 配置到独立 Token 环境变量。
+4. 将完整 URL 配置到客户端的 URL 环境变量，将 Token 配置到独立 Token 环境变量。
 5. 如需调整请求超时，设置毫秒值；未设置时默认 30 秒。服务端同步渲染图片并投递，单图约 10 秒、主卡加时间线附图约 20 秒；超时过短会在已送达后触发重试，只得到幂等回放。
-6. 按本文安装并加载 Hook，再触发验证。
+6. 按本文安装客户端包并重启 OMP，再触发验证。
 
 安全占位示例：
 
@@ -188,7 +204,7 @@ uv run ruff check .
 uv run python scripts/smoke_omp_hook.py
 ```
 
-smoke 在已有 `tmp/` 下创建临时 HOME、脚本与 Registry，退出清除。驱动维护源 Hook，经真实回环 HTTP、真实 Endpoint 鉴权、Adapter、策略、文本及 Sender，到内存消息接收器；不是线上 AstrBot。`--hook <测试ZIP提取入口>` 可验证打包副本，不默认使用真实部署文件。
+smoke 在已有 `tmp/` 下创建临时 HOME、脚本与 Registry，退出清除。它按 `package.json#omp.extensions` 解析客户端包入口，经真实回环 HTTP、真实 Endpoint 鉴权、Adapter、策略、文本及 Sender，到内存消息接收器；不是线上 AstrBot。`--package <测试ZIP提取的integrations/omp>` 可验证打包副本，不默认使用真实部署文件。
 
 本地行为回归、HTTP、原生 OMP 和线上投递必须分别留证，详见[验收记录](omp-v2-acceptance.md)。历史 2026-10-22 的 293 项 Bun／1226 项 Python 和旧 ZIP smoke 仅属于 V1 维护基线，不证明 V2。
 
@@ -233,30 +249,30 @@ Token 必须放在独立环境变量中。轮换后旧 Token 立即失效；不�
 
 ---
 
-## 本地 Hook 自动同步
+## 本地开发同步
 
-`scripts/sync_omp_hook.py` 是 macOS 开发工具，不属于 AstrBot 运行插件，不进入插件 ZIP。它用 Python 标准库把一份 `.ts` 源文件单向同步为普通文件部署副本，不执行 Hook、不修改 Git index、不提交或推送、不重启 OMP。
+`scripts/sync_omp_hook.py` 是 macOS 开发工具，不属于 AstrBot 运行插件，不进入插件 ZIP。它用 Python 标准库把客户端包目录单向复制到 OMP 扩展目录，不执行客户端、不修改 Git index、不提交或推送、不重启 OMP。复制的副本不引用源路径，仓库所在外置盘未挂载时 OMP 仍按最后一次同步的版本加载。
 
 ### 前提与首次安装
 
 - 使用主硬盘上的 Python 3.10 或更新版本，不通过外置仓库的 `.venv` 启动安装命令；解释器的真实路径位于 `/Volumes/` 时安装会拒绝。
-- 源文件必须存在、非空且不超过 4 MiB，目标父目录必须存在；源、目标及其路径组件不能是符号链接，两端不能是同一个文件。
-- 首次安装时，目标应不存在或与源内容相同。已有不同内容返回 `initial_target_conflict`，不覆盖；先人工核对并将旧文件备份到自动发现目录之外。
-- 维护源为 `integrations/omp/webhook-notifier.ts`；源文件存在不等于已经部署或启用同步，首次接管需完成下面的安装、同步和启动步骤。
-- 从旧 `onebot.ts` 切换到新文件名时，应另行备份并移走旧加载入口，避免两份 Hook 同时自动加载。同步器不会替调用方处理旧入口。
+- 源目录必须存在且含 `package.json`；同步的是源目录第一层的普通文件，跳过隐藏文件、子目录和 `*.test.ts`，与插件 ZIP 的打包规则一致。最多 64 个文件、合计 4 MiB。
+- 目标是扩展目录下的包目录（如 `~/.omp/agent/extensions/webhook-notifier`），父目录必须存在，目录名不能以 `.` 开头；源、目标及其路径组件不能是符号链接，两端不能相同或互相包含。
+- 首次安装时，目标应不存在或与源的同步文件集完全相同。已有不同内容返回 `initial_target_conflict`，不覆盖；先人工核对并移到自动发现目录之外。
+- 同步器不处理旧入口。从单文件 Hook 切换时，先按[从单文件 Hook 迁移](#从单文件-hook-迁移)移走 `hooks/post/` 中的旧文件。
 
 在插件仓库根目录执行：
 
 ```bash
 python3 scripts/sync_omp_hook.py install \
-  --source "$PWD/integrations/omp/webhook-notifier.ts" \
-  --target "$HOME/.omp/agent/hooks/post/webhook-notifier.ts"
+  --source "$PWD/integrations/omp" \
+  --target "$HOME/.omp/agent/extensions/webhook-notifier"
 python3 scripts/sync_omp_hook.py sync
 python3 scripts/sync_omp_hook.py start
 python3 scripts/sync_omp_hook.py status
 ```
 
-`install` 只安装，不启动或立即复制 Hook。首次 `sync` 确认部署结果后再 `start`；后台启动也会自行完成首次稳定观察与同步。
+`install` 只安装，不启动或立即复制。首次 `sync` 确认部署结果后再 `start`；后台启动也会自行完成首次稳定观察与同步。
 
 ### 管理与数据归属
 
@@ -274,7 +290,7 @@ python3 "$SYNC" uninstall
 
 | 动作 | 行为 |
 | --- | --- |
-| `install` | 安装／更新主硬盘运行副本和 LaunchAgent；更新前先 `stop`，同一实例不能改绑源或目标 |
+| `install` | 安装／更新主硬盘运行副本和 LaunchAgent；更新前先 `stop`，同一实例不能改绑源或目标。旧的单文件绑定需先 `uninstall` 并移走实例目录中的 `config.json`／`state.json` 后再安装 |
 | `start` | 启用并加载用户级 LaunchAgent；登录会话中运行，意外退出由 launchd 重启 |
 | `stop` | 禁用并卸载任务，保留部署文件；再次 `start` 才恢复后台同步 |
 | `status` | 输出是否安装、是否已加载、最后同步时间／摘要、冲突标记和当前两端内容是否一致；成功查询退出 0，即使同步处于冲突状态 |
@@ -282,7 +298,7 @@ python3 "$SYNC" uninstall
 | `sync --overwrite-target` | 显式处理冲突；现存目标先备份，再以稳定源覆盖，目标已删除时不伪造备份 |
 | `uninstall` | 停止任务，删除 plist 和运行脚本；保留目标、配置、状态和备份，不清理用户文件 |
 
-运行目录为 `~/Library/Application Support/WebhookNotifier/omp-hook-sync/<实例>/`，包含 `config.json`、`state.json`、运行脚本和锁文件；冲突备份位于其中的 `backups/`，使用 `.bak` 后缀。正文不进入状态文件，状态只记录路径、摘要、时间和固定状态码；备份本身包含目标原文，应按本机私密资料保管，工具不自动清理备份。
+运行目录为 `~/Library/Application Support/WebhookNotifier/omp-hook-sync/<实例>/`，包含 `config.json`、`state.json`、运行脚本和锁文件；冲突备份位于其中的 `backups/<时间戳>-<随机串>/`，是冲突时目标目录的完整副本。正文不进入状态文件，状态只记录路径、摘要、时间和固定状态码；备份本身包含目标原文，应按本机私密资料保管，工具不自动清理备份。
 
 默认 LaunchAgent 为 `~/Library/LaunchAgents/io.github.asterleedsguild0.webhook-notifier.omp-hook-sync.plist`。`--instance <小写字母数字连字符名称>` 放在子命令之前，可创建隔离验收实例；非默认实例在 LaunchAgent label 后追加实例名。不要让多个实例管理同一目标。
 
@@ -290,14 +306,14 @@ python3 "$SYNC" uninstall
 
 ### 同步与故障语义
 
-- 每 2 秒读取一次小文件；相邻两次内容一致才复制，因此通常在稳定保存后约 2–4 秒同步。连续保存、原子保存或分支切换都会重新核对内容，不依赖旧 inode。
-- 写入目标目录的 `.tmp` 文件后原子替换，不留下可被 OMP 自动加载的临时 `.ts` 文件；部署文件权限为 `0600`，内容不变时不重写目标。
-- 源缺失、外置盘断开或源变为空文件时，保留最后部署副本；恢复有效源后自动继续。该稳定观察不是 TypeScript 编译或功能验证，保存的开发版本仍可能不可用。
-- 目标内容与上次成功部署摘要不同或目标被删除时，锁存 `target_conflict`，即使进程重启或后来内容偶然一致也不会自动恢复。检查后显式使用 `sync --overwrite-target`；源不可用时不会强行覆盖。
-- 源／目标为符号链接、非普通文件、超限或发生 I/O 错误时，不继续写目标，状态显示固定错误码；状态损坏时不猜测基线。
+- 每 2 秒读取一次包目录；相邻两次整包摘要一致才复制，因此通常在稳定保存后约 2–4 秒同步。连续保存、原子保存或分支切换都会重新核对内容，不依赖旧 inode。
+- 先在目标同级的隐藏暂存目录写好完整包，再以两次 rename 换入并删除旧目录；OMP 自动发现跳过隐藏条目，不会加载暂存目录。部署文件权限为 `0600`，内容不变时不重写目标。新增或删除模块时整包替换，不残留旧模块。
+- 源缺失、外置盘断开、源目录为空或缺少 `package.json` 时，保留最后部署副本；恢复有效源后自动继续。该稳定观察不是 TypeScript 编译或功能验证，保存的开发版本仍可能不可用。
+- 目标目录内容与上次成功部署摘要不同（修改、增删文件）或目标被删除时，锁存 `target_conflict`，即使进程重启或后来内容偶然一致也不会自动恢复。检查后显式使用 `sync --overwrite-target`；源不可用时不会强行覆盖。
+- 源／目标为符号链接、含非普通文件、超限或发生 I/O 错误时，不继续写目标，状态显示固定错误码；状态损坏时不猜测基线。
 - 单实例锁阻止重复后台进程；同步操作锁协调后台检查和手动同步。工具在替换前再次检查两端，但不与外部编辑器共享锁，不能保证消除检查与替换间极短的竞争窗口。不要同时编辑部署副本和开发源。
 - 替换目标后、写状态前若进程崩溃，下次会保守识别为目标冲突，需要人工核对恢复，不静默重新建立基线。
-- `loaded=true` 表示 launchd 已加载任务，不是 OMP 已加载新 Hook 的证明；后台故障时还应检查该 label 的 `launchctl print`。文件同步不保证当前 OMP Session 热更新，应新开 OMP 进程验收。
+- `loaded=true` 表示 launchd 已加载任务，不是 OMP 已加载新客户端的证明；后台故障时还应检查该 label 的 `launchctl print`。文件同步不保证当前 OMP Session 热更新，应新开 OMP 进程验收。
 
 ### 验收范围
 
@@ -314,7 +330,6 @@ python3 "$SYNC" uninstall
 - [端到端部署教程](end-to-end-setup.md)
 - [项目 README](../README.md)
 - [安全与运维指南](security-and-operations.md)
-- [仓库维护的 OMP Hook](../integrations/omp/webhook-notifier.ts)
-- [OMP Hooks 文档](https://omp.sh/docs/hooks)
+- [仓库维护的 OMP 客户端包](../integrations/omp/)
 - [OMP 官方 Extension Loading 文档](https://github.com/can1357/oh-my-pi/blob/main/docs/extension-loading.md)
 - [OMP 官方 Hooks 文档](https://github.com/can1357/oh-my-pi/blob/main/docs/hooks.md)

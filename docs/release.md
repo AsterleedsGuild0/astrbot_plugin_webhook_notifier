@@ -16,7 +16,7 @@ uv run --frozen python scripts/package_plugin.py --dev-version --test-label omp-
 
 - 产物沿用 `dist/`，为单一 `astrbot_plugin_webhook_notifier/` 根目录；不改工作区正式版本号。
 - 检查 ZIP 内 `metadata.yaml`、`main.py` 与 `pyproject.toml` 的规范版本等价；OMP／OpenCode 客户端、core、静态资源、模板、接入与公共契约齐全。测试、缓存、临时 HOME、凭据和同步器不进入安装包。
-- 将 ZIP 解压到仓库既有 `tmp/` 下，再执行 `uv run --frozen python scripts/smoke_omp_hook.py --hook <解压后的integrations/omp/webhook-notifier.ts>`。这证明打包入口经真实回环 HTTP 可用，不证明 AstrBot WebUI 安装、原生 OMP 事件或线上目标消息。
+- 将 ZIP 解压到仓库既有 `tmp/` 下，再执行 `uv run --frozen python scripts/smoke_omp_hook.py --package <解压后的integrations/omp>`。这证明打包入口经真实回环 HTTP 可用，不证明 AstrBot WebUI 安装、原生 OMP 事件或线上目标消息。
 - 当前构建版本、ZIP／运行文件哈希和提取 smoke 回执单独保存在 `tmp/omp-upgrade/31-package.json` 与 `31-package-http.json`；分层证据见 [OMP V2 验收记录](omp-v2-acceptance.md)。这些本地验收产物不随插件 ZIP 分发。
 
 ### 脚本部署到线上 AstrBot

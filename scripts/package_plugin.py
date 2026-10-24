@@ -34,13 +34,17 @@ PACKAGE_ROOT_FILES = [
     "LICENSE",
     "logo.png",
     "scripts/rebind_platform_id.py",
-    "integrations/omp/webhook-notifier.ts",
     "integrations/opencode/webhook-notifier.ts",
     "integrations/opencode/opencode.jsonc",
 ]
 
 PACKAGE_DIRS = [
     "core",
+]
+
+# OMP 客户端是带 package.json#omp.extensions 的 extension 包：整目录进入安装包，测试除外。
+CLIENT_PACKAGE_DIRS = [
+    "integrations/omp",
 ]
 
 PACKAGE_STATIC_DIRS = [
@@ -65,6 +69,15 @@ def iter_package_files() -> list[str]:
             path.relative_to(ROOT).as_posix()
             for path in sorted(package_dir.rglob("*.py"))
             if path.is_file()
+        )
+    for relative_dir in CLIENT_PACKAGE_DIRS:
+        client_dir = ROOT / relative_dir
+        if not (client_dir / "package.json").is_file():
+            raise FileNotFoundError(f"Missing client package: {relative_dir}")
+        files.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in sorted(client_dir.iterdir())
+            if path.is_file() and not path.name.startswith(".") and not path.name.endswith(".test.ts")
         )
     for relative_dir in PACKAGE_DOC_DIRS:
         doc_dir = ROOT / relative_dir

@@ -16,7 +16,7 @@
 
 ## 功能亮点
 
-- OMP 维护源只发送 V2 运行收束／待处理通知，区分正常、失败、中止和未知；匿名白名单、有界重试，保留 V1 接收。入口 `integrations/omp/webhook-notifier.ts`，迁移与证据见[接入指南](docs/client-integration.md)。
+- OMP 客户端只发送 V2 运行收束／待处理通知，区分正常、失败、中止和未知；匿名白名单、有界重试，服务端保留 V1 接收。客户端是 extension 包 `integrations/omp/`，安装、迁移与证据见[接入指南](docs/client-integration.md)。
 - `v1.2.0` 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
 - 支持通用 `markdown.message`：复用 Endpoint Bearer、目标别名白名单、幂等、文本/HTML 图片与自动降级链路，不新增公开路由。
 - root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。顶部提供覆盖统计（总任务时长、子任务覆盖时长与覆盖率），不完整数据标为“已观测”。
@@ -124,9 +124,9 @@ JSON
 
 ### OMP 快速接入
 
-先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用默认创建的 Markdown Endpoint 发送 OMP payload。将本仓库 [`integrations/omp/webhook-notifier.ts`](integrations/omp/webhook-notifier.ts) 部署到 OMP Hook 目录，配置 `OMP_SESSION_WEBHOOK_URL` 和 `OMP_SESSION_WEBHOOK_TOKEN`。用户级／项目级安装、旧入口迁移和 macOS 开发自动同步见[客户端接入文档](docs/client-integration.md)；服务端部署见[专题教程](docs/end-to-end-setup.md)。
+先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用默认创建的 Markdown Endpoint 发送 OMP payload。把本仓库或 Release ZIP 中完整的 [`integrations/omp/`](integrations/omp/) 客户端包复制为 `~/.omp/agent/extensions/webhook-notifier/`（`*.test.ts` 可省略），在启动 OMP 的环境中配置 `OMP_SESSION_WEBHOOK_URL` 和 `OMP_SESSION_WEBHOOK_TOKEN`，然后重启 OMP。项目级安装、从单文件 Hook 迁移和 macOS 开发同步见[客户端接入文档](docs/client-integration.md)；服务端部署见[专题教程](docs/end-to-end-setup.md)。
 
-该客户端基于既有本地 `onebot.ts` 建立维护基线，保持 V1 协议和 `ONEBOT_*` 环境变量回退；不再要求部署时获取外部社区脚本。**此维护入口尚未发布，已发布的 v2.0.0 ZIP 不含该文件。** OMP 原生只提供扩展加载和生命周期事件，HTTP POST 仍由 Hook 实现。
+OMP 原生只提供扩展加载和生命周期事件，HTTP POST 由客户端实现；`ONEBOT_*` 环境变量作为历史回退仍可使用。
 
 ### OpenCode 快速接入
 

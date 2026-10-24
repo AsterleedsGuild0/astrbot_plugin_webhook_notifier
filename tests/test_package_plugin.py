@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import importlib.util
 import re
 import tomllib
@@ -175,6 +176,27 @@ def test_opencode_runtime_and_config_are_in_package_file_list() -> None:
     assert "integrations/opencode/webhook-notifier.ts" in package_files
     assert "integrations/opencode/opencode.jsonc" in package_files
     assert "integrations/opencode/webhook-notifier.test.ts" not in package_files
+
+
+def test_omp_client_package_ships_entry_import_closure_without_tests() -> None:
+    package_plugin = load_package_module()
+    package_files = set(package_plugin.iter_package_files())
+    client = ROOT / "integrations/omp"
+    manifest = json.loads((client / "package.json").read_text(encoding="utf-8"))
+    pending = [(client / entry).resolve() for entry in manifest["omp"]["extensions"]]
+    reached: set[Path] = set()
+    while pending:
+        module = pending.pop()
+        if module in reached:
+            continue
+        reached.add(module)
+        source = module.read_text(encoding="utf-8")
+        pending.extend((module.parent / spec).resolve() for spec in re.findall(r'from "(\.\.?/[^"]+)"', source))
+
+    assert "integrations/omp/package.json" in package_files
+    assert {path.relative_to(ROOT).as_posix() for path in reached} <= package_files
+    assert all(path.parent == client for path in reached)
+    assert not any(path.startswith("integrations/omp/") and path.endswith(".test.ts") for path in package_files)
 
 
 def test_metadata_declares_exact_verified_platforms() -> None:

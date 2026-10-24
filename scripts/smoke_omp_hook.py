@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""维护源 Hook → 真实回环 HTTP → Server/Adapter/文本，Bot 边界为内存接收器。
+"""OMP 客户端包入口 → 真实回环 HTTP → Server/Adapter/文本，Bot 边界为内存接收器。
 
 不启动原生 OMP，不读取用户配置或真实凭据。所有临时文件归仓库 tmp，退出清除。
---hook 可指向测试 ZIP 提取的入口；不访问真实部署副本。
+--package 可指向测试 ZIP 提取的 integrations/omp；入口按 package.json#omp.extensions 解析，不访问真实部署副本。
 """
 from __future__ import annotations
 
@@ -120,6 +120,15 @@ class Sink(Context):
         if self.mode == "partial_failure":
             raise RuntimeError(SENTINEL)
         return await super().send_message(umo, chain)
+
+
+def package_entry(package: Path) -> Path:
+    """与 OMP 加载包目录一致：取 package.json#omp.extensions 声明的唯一入口。"""
+    manifest = json.loads((package / "package.json").read_text(encoding="utf-8"))
+    entries = manifest["omp"]["extensions"]
+    if len(entries) != 1:
+        raise RuntimeError("single_extension_entry_required")
+    return (package / entries[0]).resolve(strict=True)
 
 
 async def smoke(hook: Path) -> list[dict]:
@@ -250,9 +259,9 @@ async def smoke(hook: Path) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hook", type=Path, default=ROOT / "integrations/omp/webhook-notifier.ts")
+    parser.add_argument("--package", type=Path, default=ROOT / "integrations/omp", help="OMP 客户端包目录")
     args = parser.parse_args()
-    result = asyncio.run(smoke(args.hook.resolve()))
+    result = asyncio.run(smoke(package_entry(args.package.resolve())))
     print(json.dumps({"layer": "local_real_http", "native_omp": False, "online_astrbot": False, "scenarios": result}, ensure_ascii=False, indent=2))
 
 

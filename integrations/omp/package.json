@@ -1,0 +1,16 @@
+{
+  "name": "omp-webhook-notifier",
+  "version": "2.1.0",
+  "description": "把 OMP 运行收束与待处理交互以 V2 Webhook 发送到 AstrBot Webhook Notifier",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier.git",
+    "directory": "integrations/omp"
+  },
+  "omp": {
+    "extensions": ["./index.ts"]
+  }
+}

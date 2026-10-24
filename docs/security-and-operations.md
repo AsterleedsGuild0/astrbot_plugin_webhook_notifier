@@ -95,9 +95,9 @@ enable_private_notifications: false
 
 ---
 
-## OMP 客户端 Hook 与数据外发
+## OMP 客户端与数据外发
 
-OMP 原生提供公开事件与扩展加载机制；HTTP POST 与 V2 协议由本仓库 [`integrations/omp/webhook-notifier.ts`](../integrations/omp/webhook-notifier.ts) 实现，不是 OMP 内建 Webhook。先部署 V2 服务端再切换客户端，步骤见[接入指南](client-integration.md)。
+OMP 原生提供公开事件与扩展加载机制；HTTP POST 与 V2 协议由本仓库 [`integrations/omp/`](../integrations/omp/) 客户端包实现，不是 OMP 内建 Webhook。先部署服务端再更新客户端，步骤见[接入指南](client-integration.md)。
 
 客户端主要环境变量：
 
@@ -111,7 +111,7 @@ OMP 原生提供公开事件与扩展加载机制；HTTP POST 与 V2 协议由�
 
 客户端同时分类 HTTP 与受限业务响应，最多 3 次有界尝试且 ID 不变；策略跳过、部分失败与重放不绕过幂等重发。日志不含 URL、凭据、响应正文或异常原文；OMP Sender 不再保留 traceback。超时或重放不证明实际送达。
 
-维护源和部署副本分离，开发期间保持默认同步器停止并禁用。同步暂停并没有停用已加载 Hook；原生测试必须隔离配置、入口、环境与目标。生产切换、恢复同步、凭据使用均需独立授权。历史 V1 payload 仍接收，纠错与隐私变化见公共契约。
+维护源和部署副本分离，开发期间保持默认同步器停止并禁用。同步暂停并没有停用已加载的客户端；原生测试必须隔离配置、入口、环境与目标（工具见 `scripts/omp_native/`）。生产切换、恢复同步、凭据使用均需独立授权。历史 V1 payload 仍接收，纠错与隐私变化见公共契约。
 
 ---
 
@@ -402,7 +402,7 @@ Endpoint 名称、Provider 和目标别名属于运维定位字段，会原样�
 
 - [端到端部署教程](end-to-end-setup.md)
 - [命令参考](command-reference.md)
-- [OMP 客户端 Hook 集成指南](client-integration.md)
+- [OMP 客户端集成指南](client-integration.md)
 - [OpenCode 集成指南](opencode-integration.md)
 - [平台投递策略](platform-delivery-policy.md)
 - [platform_id 离线 Rebind Runbook](platform-id-rebind-runbook.md)
