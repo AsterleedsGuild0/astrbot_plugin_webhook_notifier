@@ -2513,10 +2513,11 @@ class TestDisplayLocalization:
 
         assert "会话名称：Session One" in text
         assert text.count(expected) == 2
-        assert [field["value"] for field in html_data["fields"][1:]] == [
-            expected,
-            expected,
-        ]
+        assert [
+            field["value"]
+            for field in html_data["fields"]
+            if field["label"] in {"会话开始时间", "当前任务结束时间"}
+        ] == [expected, expected]
         assert html_data["event_time"] == expected
         assert html_data["generated_at"].endswith("CST (UTC+08:00)")
         assert "会话名称" in html
@@ -2596,9 +2597,9 @@ class TestDisplayLocalization:
         assert "会话已持续" not in labels
 
     @pytest.mark.parametrize(
-        "provider", ["omp", "unknown", "OpenCode", "OpenCode-compatible"]
+        "provider", ["markdown", "unknown", "OpenCode", "OpenCode-compatible"]
     )
-    def test_non_opencode_provider_does_not_derive_session_elapsed(self, provider):
+    def test_provider_without_session_semantics_does_not_derive_session_elapsed(self, provider):
         event = _make_event(
             fields=[{"label": "startedAt", "value": "2026-07-24T00:00:00Z"}]
         )

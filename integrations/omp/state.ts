@@ -1,5 +1,6 @@
-/** 运行、交互与会话绑定状态：工厂间共享的有界 Map、最终状态映射和父子关联。 */
-import type { InteractionDetail, IntervalKind, Reason, Resolution, Session, Status, TimelineReason } from "./wire.ts";
+/** 运行、交互与会话绑定状态：工厂间共享的有界 Map 和父子关联。 */
+import type { InteractionDetail, IntervalKind, Reason, Resolution, Session, Signals, Status, TimelineReason } from "./wire.ts";
+import type { Assistant, Goal, Todo, Usage } from "./signals.ts";
 import { anonymous } from "./sanitize.ts";
 
 export type Interaction = { ref: string; kind: IntervalKind; open: boolean; started?: number; ended?: number; result?: Resolution; timer?: NodeJS.Timeout; detail?: InteractionDetail };
@@ -15,23 +16,21 @@ export type Run = {
   metadataChanged: boolean; metadataMissing: boolean; closed: boolean; yielded?: boolean;
   /** 交互式根运行以 aborted 收束时暂缓发送：OMP 计划模式提交计划时先 agent_end(aborted) 再打开评审。 */
   abortTimer?: NodeJS.Timeout; abortAt?: { now: number; mono: number }; planHandoff?: boolean;
+  /** 最终 assistant 的结构化结束信息（每次 agent_end 覆盖），用于错误分类。 */
+  last?: Assistant;
+  usageStart?: Usage; usageEnd?: Usage; context?: Signals["context"];
+  compactions: number; compactionFailures: number; compactionPending: boolean;
+  fallback?: NonNullable<Signals["fallback"]>; todo?: Todo;
 };
-export type Binding = { owner: symbol; key: string; touched: number; run?: Run; snapshot?: () => Snapshot };
+/** goal 绑定在会话上：创建或更新可能发生在两次运行之间。 */
+export type Binding = { owner: symbol; key: string; touched: number; run?: Run; snapshot?: () => Snapshot; goal?: Goal };
 
 export const TTL = 86_400_000;
 export const MAX_SESSIONS = 128;
 export const MAX_INTERACTIONS = 128;
 export const bindings = new Map<string, Binding>();
-
-export function assistantStatus(message: unknown): Status | undefined {
-  if (!message || typeof message !== "object") return;
-  const value = message as { role?: string; stopReason?: string };
-  if (value.role !== "assistant") return;
-  return value.stopReason === "stop" ? "completed" : value.stopReason === "error" ? "failed" : value.stopReason === "aborted" ? "aborted" : "unknown";
-}
-export function lastStatus(messages: unknown[]): Status | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) { const status = assistantStatus(messages[i]); if (status) return status; }
-}
+/** 凭据告警的进程内去重：同一 provider 只告警一次。 */
+export const alertedProviders = new Set<string>();
 
 export function snapshotJobs(binding: Binding, initial = false): SnapshotJob[] {
   try {

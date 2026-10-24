@@ -51,6 +51,12 @@ function client(id, parent, depth, name) {
     sessionManager: { getSessionId: () => id, getSessionName: () => name, getCwd: () => "/private/PRIVATE_OMP_SMOKE_SENTINEL/project" },
     getAsyncJobSnapshot: () => ({ running: jobs, recent: [] }),
   };
+  if (!parent && scenario === "signals") {
+    let reads = 0;
+    ctx.sessionManager.getHeader = () => ({ type: "session", id: "PRIVATE_OMP_SMOKE_SENTINEL", timestamp: "2026-10-01T00:00:00.000Z", cwd: "/private/PRIVATE_OMP_SMOKE_SENTINEL" });
+    ctx.sessionManager.getUsageStatistics = () => (reads++ ? { input: 3000, output: 500, cacheRead: 30000, cacheWrite: 0, totalTokens: 33500, cost: 1 } : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 });
+    ctx.getContextUsage = () => ({ tokens: 9000, contextWindow: 1000000, percent: 0.9 });
+  }
   if (parent) parent.jobs.push({ id, agentId: id, ownerId: parent.ctx.agent.id });
   register({
     on: (name, fn) => handlers.set(name, fn), getThinkingLevel: () => "high",
@@ -58,7 +64,7 @@ function client(id, parent, depth, name) {
       diagnostics.push(data);
       if (!["transient_error", "transport_unknown"].includes(data.category) || data.attempt === 3) {
         first.resolve();
-        if (!scenario.startsWith("action_") || diagnostics.length >= 2) done.resolve();
+        if (!(scenario.startsWith("action_") || scenario === "credential") || diagnostics.length >= 2) done.resolve();
       }
     } },
   });
@@ -100,10 +106,25 @@ if (scenario.startsWith("action_")) {
   if (kind === "plan_review") root.emit("plan_review_resolved", { sessionId, reviewId: "PRIVATE_OMP_SMOKE_SENTINEL" });
   if (kind === "ask") root.emit("tool_result", { toolName: "ask", toolCallId: "PRIVATE_OMP_SMOKE_SENTINEL", content: "PRIVATE_OMP_SMOKE_SENTINEL" });
 }
+if (scenario === "credential") {
+  root.emit("credential_disabled", { provider: "fixture-provider", disabledCause: "PRIVATE_OMP_SMOKE_SENTINEL", credentialId: 7, email: "PRIVATE_OMP_SMOKE_SENTINEL@e.invalid", accountId: "PRIVATE_OMP_SMOKE_SENTINEL", orgName: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  await first.promise;
+}
+if (scenario === "signals") {
+  // 结构化错误分类、压缩链、模型降级、todo 与 goal；所有原文位置都放敏感哨兵。
+  root.emit("goal_updated", { goal: { id: "PRIVATE_OMP_SMOKE_SENTINEL", objective: "发布客户端 /private/PRIVATE_OMP_SMOKE_SENTINEL", status: "active", tokensUsed: 4000, tokenBudget: 100000, timeUsedSeconds: 30, createdAt: Date.now(), updatedAt: Date.now() } });
+  root.emit("auto_compaction_end", { action: "snapcompact", aborted: false, willRetry: false, errorMessage: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  root.emit("auto_compaction_end", { action: "handoff", aborted: false, willRetry: false, result: { summary: "PRIVATE_OMP_SMOKE_SENTINEL" } });
+  root.emit("retry_fallback_applied", { from: "fixture/model", to: "fixture/backup", role: "default", reason: "PRIVATE_OMP_SMOKE_SENTINEL" });
+  root.emit("todo_reminder", { attempt: 1, maxAttempts: 3, todos: [{ content: "整理 docs/a.md", status: "pending", details: "PRIVATE_OMP_SMOKE_SENTINEL", notes: ["PRIVATE_OMP_SMOKE_SENTINEL"] }] });
+  root.emit("auto_retry_start", { errorMessage: "PRIVATE_OMP_SMOKE_SENTINEL" });
+}
 elapsed = scenario === "policy" ? 1000 : 20000;
-const stopReason = scenario === "failed" ? "error" : scenario === "aborted" ? "aborted" : "stop";
-root.emit("session_stop", { session_id: "PRIVATE_OMP_SMOKE_SENTINEL", last_assistant_message: { role: "assistant", stopReason, content: "PRIVATE_OMP_SMOKE_SENTINEL" } });
-root.emit("agent_end", ending(stopReason));
+const stopReason = scenario === "failed" || scenario === "signals" ? "error" : scenario === "aborted" ? "aborted" : "stop";
+const finalMessage = { role: "assistant", stopReason, content: "PRIVATE_OMP_SMOKE_SENTINEL", ...(scenario === "signals" ? { errorStatus: 503, errorMessage: "PRIVATE_OMP_SMOKE_SENTINEL" } : {}) };
+root.emit("session_stop", { session_id: "PRIVATE_OMP_SMOKE_SENTINEL", last_assistant_message: finalMessage });
+root.emit("agent_end", { messages: [finalMessage] });
+if (scenario === "signals") root.emit("auto_retry_end", { success: false, attempt: 3, finalError: "PRIVATE_OMP_SMOKE_SENTINEL" });
 const timeout = setTimeout(() => done.reject(new Error("smoke_deadline")), 8000);
 await done.promise;
 clearTimeout(timeout);
@@ -195,7 +216,7 @@ async def smoke(hook: Path) -> list[dict]:
                     "policy": ["policy_skipped"], "partial_failure": ["partial_failure"],
                     "partial_delivery": ["partial_delivery"], "unknown": ["unknown"],
                     "replay": ["transient_error", "replayed"], "timeout": ["transport_unknown", "replayed"],
-                    "timeline": ["delivered"],
+                    "timeline": ["delivered"], "signals": ["delivered"], "credential": ["delivered", "delivered"],
                     "action_approval": ["delivered", "delivered"], "action_plan_review": ["delivered", "delivered"], "action_ask": ["delivered", "delivered"],
                 }
                 try:
@@ -222,14 +243,22 @@ async def smoke(hook: Path) -> list[dict]:
                         actual = [entry["category"] for entry in diagnostics]
                         assert actual == expected, (case, actual)
                         sent = bodies[before_bodies:]
-                        expected_events = 2 if case.startswith("action_") else 1
+                        expected_events = 2 if case.startswith("action_") or case == "credential" else 1
                         assert len({item["id"] for item in sent}) == expected_events
                         assert all(item["version"] == 2 for item in sent)
                         if case.startswith("action_"):
                             assert [item["event"] for item in sent] == ["omp.action_required", "omp.run_finished"]
                             assert len(sink._sent_messages) - before_messages == 2
+                        elif case == "credential":
+                            assert [item["event"] for item in sent] == ["omp.credential_disabled", "omp.run_finished"]
+                            assert set(sent[0]) == {"event", "version", "id", "emittedAt", "provider"}
+                            assert len(sink._sent_messages) - before_messages == 2
                         else:
                             assert all(item["event"] == "omp.run_finished" for item in sent)
+                        if case == "signals":
+                            assert sent[0]["error"] == {"category": "server", "retried": True}
+                            assert sent[0]["session"]["createdAt"] == "2026-10-01T00:00:00.000Z"
+                            assert set(sent[0]["signals"]) == {"context", "compaction", "fallback", "usage", "goal", "todo"}
                         if case == "timeline":
                             event = providers.get("omp").parse(headers={}, payload=sent[0], received_at=sent[0]["emittedAt"])
                             items = event.subagent_timeline["items"]
@@ -239,12 +268,15 @@ async def smoke(hook: Path) -> list[dict]:
                             assert _timeline_coverage_union_ms(intervals, event.task_duration_ms) == 14000
                             assert {item["kind"] for item in event.user_wait_timeline["intervals"]} == {"ask", "background_wait"}
                         assert SENTINEL not in json.dumps(sent) + stdout.decode() + stderr.decode()
-                        if case in {"completed", "failed", "aborted", "replay", "timeout", "timeline"}:
+                        if case in {"completed", "failed", "aborted", "replay", "timeout", "timeline", "signals"}:
                             assert len(sink._sent_messages) - before_messages == 1
                             rendered = sink._sent_messages[-1][1].chain[0].text
                             assert SENTINEL not in rendered
-                            if case in {"failed", "aborted"}:
+                            if case in {"failed", "aborted", "signals"}:
                                 assert "已完成" not in rendered
+                            if case == "signals":
+                                for label in ("错误类型", "会话已持续", "上下文占用", "自动压缩", "模型降级", "本次运行用量", "目标状态", "未完成待办"):
+                                    assert label in rendered, label
                         if case in {"policy", "partial_failure"}:
                             assert len(sink._sent_messages) == before_messages
                         records.append({"case": case, "classification": actual, "requests": counts[case], "stable_id": True})

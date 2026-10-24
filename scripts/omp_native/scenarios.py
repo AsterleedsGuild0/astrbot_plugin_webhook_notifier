@@ -45,11 +45,18 @@ def report(name: str, since: str, rc: int, result: Any, w0: int, e0: int, args: 
     print("\n".join(webhook_summary(rows("webhook.jsonl")[w0:w1])))
 
 
-async def run(name: str, args: list[str], steps, expect: int, env: dict[str, str] | None = None, settle: float = 90) -> None:
+async def run(name: str, args: list[str], steps, expect: int, env: dict[str, str] | None = None, settle: float = 90,
+              cwd: str | None = None, config: str | None = None) -> None:
+    """``cwd`` 让多个场景共用工作目录（恢复会话）；``config`` 是本场景的 config.yml 覆盖层内容。"""
+    if config:
+        overlay = harness.BASE / "configs" / f"{name}.yml"
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(config)
+        args = [*args, "--config", str(overlay)]
     await asyncio.sleep(25)  # 上一场景的在途通知（服务端同步渲染约 10～20 秒）先落盘，避免切片串位
     w0, e0 = len(rows("webhook.jsonl")), len(rows("events.jsonl"))
     since = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    omp = harness.Omp(name, args, WORK / name.lower(), env)
+    omp = harness.Omp(name, args, WORK / (cwd or name.lower()), env)
     await omp.start()
     await omp.call({"type": "set_session_name", "name": f"{MARKER} {name}"})
     result = await steps(omp)
@@ -201,6 +208,100 @@ async def s5_workpool(o):
                                 "pool.push(\"Run the bash command `sleep 8 && echo W1` once and report its output.\", \"Run the bash command `sleep 4 && echo W2` once and report its output.\");\n"
                                 "pool.close();\n"
                                 "Then call the wait tool until both pool results are delivered. Finally reply with exactly: workpool done", timeout=600))
+
+
+# ---- #34／#35：错误分类、会话创建时间、上下文与资源信号 ----
+
+@scenario("S8-resume-a", YOLO, 1, cwd="s8-resume")
+async def s8_resume_a(o):
+    return strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: first"))
+
+
+@scenario("S8-resume-b", [*YOLO, "--continue"], 1, cwd="s8-resume")
+async def s8_resume_b(o):
+    """在同一工作目录以 --continue 恢复上一会话，核对会话创建时间不随恢复改变。"""
+    await asyncio.sleep(30)
+    return strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: second"))
+
+
+@scenario("S8-429", YOLO, 1)
+async def s8_rate_limited(o):
+    fault(429, 1, "injected rate limit")
+    try:
+        return strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: done", timeout=300))
+    finally:
+        fault(None)
+
+
+@scenario("S8-401", YOLO, 1)
+async def s8_unauthorized(o):
+    fault(401, -1, "injected unauthorized")
+    try:
+        return strip(await o.prompt("Reply with exactly: ok", timeout=300))
+    finally:
+        fault(None)
+
+
+FALLBACK = "retry:\n  fallbackChains:\n    default:\n      - cpa/glm-5.3-flash\n"
+
+
+@scenario("S8-fallback", YOLO, 1, config=FALLBACK)
+async def s8_fallback(o):
+    fault(400, 1, "injected hard failure")
+    try:
+        return strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: done", timeout=300))
+    finally:
+        fault(None)
+
+
+COMPACTION = "compaction:\n  thresholdTokens: 16000\n  keepRecentTokens: 2000\n  asyncEnabled: false\n"
+
+
+@scenario("S8-compaction", YOLO, 1, config=COMPACTION, settle=180)
+async def s8_compaction(o):
+    return strip(await o.prompt("Run the bash command `seq 1 6000` and look at the output. Then run `seq 6001 12000` and look at it. "
+                                "Then run `sleep 16`. Finally reply with exactly: compacted", timeout=900))
+
+
+@scenario("S8-todo", YOLO, 1, settle=180)
+async def s8_todo(o):
+    return strip(await o.prompt("Use the todo tool to create a plan with three items: 'alpha', 'beta', 'gamma'. Do not work on any of them "
+                                "and do not mark any as done. Run the bash command `sleep 16`, then end your turn by replying exactly: stopping. "
+                                "If you are reminded about unfinished todos, reply exactly: still stopping, without changing the todos.", timeout=600))
+
+
+@scenario("S8-goal", YOLO, 1, settle=180)
+async def s8_goal(o):
+    created = strip(await o.call({"type": "goal", "op": "create", "objective": "Run the bash command `sleep 16` once and report done",
+                                  "token_budget": 200000}))
+    result = strip(await o.prompt("Work on the active goal: run the bash command `sleep 16` exactly once, then mark the goal complete "
+                                  "with the goal tool and reply with exactly: goal done", timeout=600))
+    return {"goal": created.get("success"), "prompt": result}
+
+
+@scenario("S9-subagent-failed", YOLO, 2, settle=180)
+async def s9_subagent_failed(o):
+    """task 子代理的首个模型请求被注入 400：子代理单独发失败通知（带所属主会话），主会话随后正常收束。"""
+    mark = len(o.frames)
+    rid = await o.send({"type": "prompt", "message": "Use the task tool exactly once with a single task (agent type: default task): run the bash command `echo child` and report the output. "
+                                                     "If the task fails, do not retry it; run the bash command `sleep 16` and then reply with exactly: parent done"})
+    events = len(rows("events.jsonl"))
+    deadline = time.time() + 300
+    # 子代理 agent_start 出现后再注入：此时下一次模型请求属于子代理，主会话在等待 task 结果。
+    while time.time() < deadline and not any(e["type"] == "agent_start" and (e.get("agent") or {}).get("kind") == "sub" for e in rows("events.jsonl", events)):
+        await asyncio.sleep(0.05)
+    fault(400, 1, "injected subagent failure")
+    try:
+        return strip(await o.wait(lambda f: f.get("type") == "prompt_result" and f.get("id") == rid, 600, since=mark))
+    finally:
+        fault(None)
+
+
+@scenario("S9-nested", YOLO, 1, settle=180)
+async def s9_nested(o):
+    return strip(await o.prompt("Use the task tool exactly once with a single task (agent type: default task). In that task's instructions, tell the subagent to "
+                                "itself use the task tool exactly once with a single task that runs the bash command `sleep 8 && echo nested` and reports the output, "
+                                "then report that output. Wait for the result, then reply with exactly: nested done", timeout=900))
 
 
 PLAN_PROMPT = ("Plan how to create a file named hello.txt containing the single word hi in the current directory. "

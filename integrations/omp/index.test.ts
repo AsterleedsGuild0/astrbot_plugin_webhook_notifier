@@ -4,7 +4,7 @@ import register, { type Envelope } from "./index.ts";
 
 type Event = Record<string, unknown>;
 type Handler = (event: Event, context: ExtensionContext) => unknown;
-const envKeys = ["OMP_SESSION_WEBHOOK_URL", "ONEBOT_WEBHOOK_URL", "OMP_SESSION_WEBHOOK_TOKEN", "ONEBOT_WEBHOOK_TOKEN", "OMP_SESSION_WEBHOOK_TIMEOUT_MS", "ONEBOT_WEBHOOK_TIMEOUT_MS", "OMP_SESSION_WEBHOOK_INSTANCE"];
+const envKeys = ["OMP_SESSION_WEBHOOK_URL", "ONEBOT_WEBHOOK_URL", "OMP_SESSION_WEBHOOK_TOKEN", "ONEBOT_WEBHOOK_TOKEN", "OMP_SESSION_WEBHOOK_TIMEOUT_MS", "ONEBOT_WEBHOOK_TIMEOUT_MS", "OMP_SESSION_WEBHOOK_INSTANCE", "OMP_SESSION_WEBHOOK_ACTION_CONTENT"];
 const saved = new Map<string, string | undefined>();
 const SENTINEL = "PRIVATE_SENTINEL";
 let now: number;
@@ -595,4 +595,178 @@ it("子代理会话没有标题时，用 OMP 任务名作为观察段名称", as
   worker.emit("agent_start"); worker.emit("agent_end", end());
   root.emit("agent_end", end()); await advance();
   expect(rootPayload().subagentTimeline.items[0].name).toBe("ReleaseManagementSmoke");
+});
+
+describe("错误类型、所属主会话与会话创建时间", () => {
+  function failure(errorStatus?: number, stopReason = "error") {
+    return { messages: [{ role: "assistant", stopReason, content: SENTINEL, errorMessage: `${SENTINEL} 401 rate limit 5xx`, ...(errorStatus === undefined ? {} : { errorStatus }) }] };
+  }
+  it.each([[401, "auth"], [403, "auth"], [429, "rate_limit"], [503, "server"], [400, "request"]])("最终 assistant errorStatus %d → %s，不读取错误原文", async (code, category) => {
+    const c = client(); c.emit("agent_start"); c.emit("agent_end", failure(code)); await advance();
+    expect(requests[0].body.status).toBe("failed");
+    expect(requests[0].body.error).toEqual({ category });
+    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+  });
+  it("没有结构化依据时不附错误类型：错误原文里的状态码不被解析", async () => {
+    const c = client(); c.emit("agent_start"); c.emit("agent_end", failure()); await advance();
+    expect(requests[0].body.status).toBe("failed"); expect(requests[0].body).not.toHaveProperty("error");
+  });
+  it("重试耗尽：有状态码时标注重试后仍失败，没有时归为重试耗尽", async () => {
+    const c = client(); c.emit("agent_start"); c.emit("auto_retry_start"); c.emit("agent_end", failure(503)); await advance();
+    c.emit("auto_retry_end", { success: false, finalError: SENTINEL }); await advance();
+    expect(requests[0].body.error).toEqual({ category: "server", retried: true });
+    c.emit("agent_start"); c.emit("auto_retry_start"); c.emit("agent_end", failure()); c.emit("auto_retry_end", { success: false }); await advance();
+    expect(requests[1].body.error).toEqual({ category: "retry_exhausted" });
+  });
+  it("长度截断按 stopReason 分类；完成与中止不带错误类型", async () => {
+    const c = client(); c.emit("agent_start"); c.emit("agent_end", failure(undefined, "length")); await advance();
+    expect(requests[0].body.status).toBe("unknown"); expect(requests[0].body.error).toEqual({ category: "truncated" });
+    c.emit("agent_start"); c.emit("agent_end", failure(500, "aborted")); await advance(150);
+    expect(requests[1].body.status).toBe("aborted"); expect(requests[1].body).not.toHaveProperty("error");
+  });
+  it("子代理异常带已证明关联的主会话名称；无法关联时省略", async () => {
+    const rootCtx = context(); rootCtx.sessionManager.getSessionName = () => "发布主会话";
+    const root = client(rootCtx); root.emit("agent_start");
+    const linked = child(root.ctx, "linked-child"); linked.emit("agent_start"); linked.emit("agent_end", failure(503)); await advance();
+    const orphanCtx = context(); orphanCtx.hasUI = false;
+    orphanCtx.agent = { kind: "sub", id: "orphan-child", name: "task", parentId: "missing-parent", depth: 1 } as ExtensionContext["agent"];
+    const orphan = client(orphanCtx); orphan.emit("agent_start"); orphan.emit("agent_end", failure(503)); await advance();
+    const bySession = requests.map(r => r.body.session);
+    expect(bySession[0]).toMatchObject({ scope: "subagent", rootName: "发布主会话" });
+    expect(bySession[1].scope).toBe("subagent"); expect(bySession[1]).not.toHaveProperty("rootName");
+    root.emit("agent_end", end()); await advance();
+    expect(requests.at(-1)!.body.session).not.toHaveProperty("rootName");
+  });
+  it("会话创建时间取会话头 timestamp，恢复旧会话保持原值；缺失时省略", async () => {
+    const ctx = context(); ctx.sessionManager.getHeader = (() => ({ type: "session", id: SENTINEL, timestamp: "2026-10-20T08:00:00.000Z", cwd: `/private/${SENTINEL}` })) as never;
+    const c = client(ctx); c.emit("agent_start"); c.emit("agent_end", end()); await advance();
+    expect(requests[0].body.session.createdAt).toBe("2026-10-20T08:00:00.000Z");
+    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+    const plain = client(); plain.emit("agent_start"); plain.emit("agent_end", end()); await advance();
+    expect(requests[1].body.session).not.toHaveProperty("createdAt");
+  });
+});
+
+describe("运行健康与资源信号", () => {
+  function instrumented(stats: Record<string, number>[], usage?: { tokens: number; contextWindow: number; percent: number }) {
+    const ctx = context();
+    let index = 0;
+    ctx.sessionManager.getUsageStatistics = (() => ({ cacheWrite: 0, orchestrationInput: 0, premiumRequests: 0, cost: 9, subagentCost: 0, ...stats[Math.min(index++, stats.length - 1)] })) as never;
+    (ctx as unknown as { getContextUsage: () => unknown }).getContextUsage = () => usage;
+    return client(ctx);
+  }
+  const totals = (input: number, output: number, cacheRead: number) => ({ input, output, cacheRead, totalTokens: input + output + cacheRead });
+  it("本次用量为两次累计快照之差：恢复旧会话从非零基数开始，运行中压缩不重置累计值", async () => {
+    const c = instrumented([totals(493, 61, 15488), totals(2618 + 493, 478 + 61, 31872 + 15488)], { tokens: 8890, contextWindow: 1_000_000, percent: 0.889 });
+    c.emit("agent_start");
+    c.emit("auto_compaction_end", { action: "handoff", aborted: false, willRetry: false, result: { summary: SENTINEL } });
+    c.emit("agent_end", end()); await advance();
+    expect(requests[0].body.signals).toEqual({
+      context: { tokens: 8890, window: 1_000_000 }, compaction: { count: 1 },
+      usage: { input: 2618, output: 478, cacheRead: 31872, cacheWrite: 0, total: 34968 },
+    });
+    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+  });
+  it("取不到数据时省略，不发精确 0；用量回退时整体省略", async () => {
+    const c = instrumented([totals(10, 1, 0), totals(10, 1, 0)]); c.emit("agent_start"); c.emit("agent_end", end()); await advance();
+    expect(requests[0].body).not.toHaveProperty("signals");
+    const back = instrumented([totals(10, 5, 0), totals(9, 6, 0)]); back.emit("agent_start"); back.emit("agent_end", end()); await advance();
+    expect(requests[1].body).not.toHaveProperty("signals");
+  });
+  it("压缩链中前一种方法失败、后一种成功只计一次成功；整条链失败或中止计一次失败，原文不发送", async () => {
+    const c = client(); c.emit("agent_start");
+    c.emit("auto_compaction_end", { action: "snapcompact", aborted: false, willRetry: false, errorMessage: SENTINEL });
+    c.emit("before_provider_request", { payload: SENTINEL });
+    c.emit("auto_compaction_end", { action: "handoff", aborted: false, willRetry: false, result: {} });
+    c.emit("turn_start");
+    c.emit("auto_compaction_end", { action: "snapcompact", aborted: false, willRetry: false, errorMessage: SENTINEL });
+    c.emit("turn_start");
+    c.emit("auto_compaction_end", { action: "handoff", aborted: true, willRetry: false });
+    c.emit("auto_compaction_end", { action: "handoff", aborted: false, willRetry: false, skipped: true });
+    c.emit("agent_end", end()); await advance();
+    expect(requests[0].body.signals).toEqual({ compaction: { count: 1, failed: 2 } });
+    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+  });
+  it("模型降级记录源与备用模型及是否成功；reason 不发送；路径形态模型名舍弃", async () => {
+    const c = client(); c.emit("agent_start");
+    c.emit("retry_fallback_applied", { from: "cpa/deepseek-flash:low", to: "cpa/glm-5.3-flash", role: "default", reason: SENTINEL });
+    c.emit("retry_fallback_succeeded", { model: "cpa/glm-5.3-flash", role: "default" });
+    c.emit("agent_end", end()); await advance();
+    expect(requests[0].body.signals).toEqual({ fallback: { from: "cpa/deepseek-flash:low", to: "cpa/glm-5.3-flash", succeeded: true } });
+    c.emit("agent_start"); c.emit("retry_fallback_applied", { from: "cpa/x", to: `local//private/${SENTINEL}/model`, role: "default" }); c.emit("agent_end", end()); await advance();
+    expect(requests[1].body).not.toHaveProperty("signals");
+    expect(JSON.stringify(requests.map(r => r.body))).not.toContain(SENTINEL);
+  });
+  it("todo 提醒：只发未完成条目文字，清洗路径与 URL、限 8 条，详情与备注不读取", async () => {
+    const c = client(); c.emit("agent_start");
+    const todos = [
+      { content: `修复 core/omp.py 与 /private/${SENTINEL}/x`, status: "in_progress", details: SENTINEL, notes: [SENTINEL], blocker: SENTINEL },
+      { content: "已完成项", status: "completed" },
+      ...Array.from({ length: 9 }, (_, i) => ({ content: `任务 ${i} https://e.invalid/${SENTINEL}`, status: "pending" })),
+    ];
+    c.emit("todo_reminder", { todos, attempt: 2, maxAttempts: 3 });
+    c.emit("agent_end", end()); await advance();
+    const todo = requests[0].body.signals?.todo;
+    expect(todo).toMatchObject({ reminders: 2, maxReminders: 3, pendingCount: 10 });
+    expect(todo?.pending).toHaveLength(8);
+    expect(todo?.pending[0]).toBe("修复 core/omp.py 与 …");
+    expect(todo?.pending[1]).toBe("任务 0 …");
+    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+  });
+  it("Goal：进行中或本次运行更新过才附带；目标清洗后发送，预算与用时保留", async () => {
+    const c = client();
+    c.emit("goal_updated", { goal: { id: SENTINEL, objective: `发布 v2.2.0，见 /private/${SENTINEL}`, status: "active", tokensUsed: 0, tokenBudget: 200000, timeUsedSeconds: 0, createdAt: now, updatedAt: now } });
+    c.emit("agent_start"); await advance(1000);
+    c.emit("goal_updated", { goal: { id: SENTINEL, objective: `发布 v2.2.0，见 /private/${SENTINEL}`, status: "budget-limited", tokensUsed: 210000, tokenBudget: 200000, timeUsedSeconds: 61, createdAt: now, updatedAt: now } });
+    c.emit("agent_end", end()); await advance();
+    expect(requests[0].body.signals?.goal).toEqual({ objective: "发布 v2.2.0，见 …", status: "budget-limited", tokensUsed: 210000, tokenBudget: 200000, timeUsedSeconds: 61 });
+    c.emit("goal_updated", { goal: { id: SENTINEL, objective: "旧目标", status: "complete", tokensUsed: 1, timeUsedSeconds: 1, createdAt: 0, updatedAt: now } });
+    await advance(1000); c.emit("agent_start"); await advance(1000); c.emit("agent_end", end()); await advance();
+    expect(requests[1].body).not.toHaveProperty("signals");
+    c.emit("agent_start"); await advance(1000);
+    c.emit("goal_updated", { goal: { id: SENTINEL, objective: "本轮完成的目标", status: "complete", tokensUsed: 550, timeUsedSeconds: 17, createdAt: now, updatedAt: now } });
+    c.emit("agent_end", end()); await advance();
+    expect(requests[2].body.signals?.goal).toEqual({ objective: "本轮完成的目标", status: "complete", tokensUsed: 550, timeUsedSeconds: 17 });
+    expect(JSON.stringify(requests.map(r => r.body))).not.toContain(SENTINEL);
+  });
+  it("待处理提醒不带信号与错误类型", async () => {
+    const c = instrumented([totals(1, 1, 0), totals(5, 5, 0)], { tokens: 10, contextWindow: 100, percent: 10 });
+    c.emit("agent_start"); c.emit("tool_call", { toolName: "ask", toolCallId: "q", input: { questions: [{ question: "继续？" }] } }); await advance(150);
+    expect(requests[0].body.event).toBe("omp.action_required");
+    expect(requests[0].body).not.toHaveProperty("signals"); expect(requests[0].body).not.toHaveProperty("error");
+  });
+});
+
+describe("凭据停用告警", () => {
+  it("独立事件只含 provider；原因、邮箱、账号、组织与凭据 ID 不进入出站或日志；同一 provider 去重", async () => {
+    const c = client(); const other = client();
+    const event = { provider: "anthropic-alert-test", disabledCause: SENTINEL, credentialId: 42, email: `${SENTINEL}@e.invalid`, accountId: SENTINEL, orgId: SENTINEL, orgName: SENTINEL };
+    c.emit("credential_disabled", event); other.emit("credential_disabled", event); c.emit("credential_disabled", event);
+    c.emit("credential_disabled", { ...event, provider: "openai-alert-test" });
+    await advance();
+    expect(requests.map(r => r.body.event)).toEqual(["omp.credential_disabled", "omp.credential_disabled"]);
+    expect(requests.map(r => (r.body as unknown as { provider: string }).provider)).toEqual(["anthropic-alert-test", "openai-alert-test"]);
+    expect(Object.keys(requests[0].body).sort()).toEqual(["emittedAt", "event", "id", "provider", "version"]);
+    expect(requests[0].init.headers).toMatchObject({ "X-OMP-Event": "omp.credential_disabled" });
+    expect(JSON.stringify([requests.map(r => r.body), c.logs, other.logs])).not.toContain(SENTINEL);
+  });
+});
+
+describe("待处理内容模式", () => {
+  const ask = { questions: [{ question: "继续发布？", header: "发布", options: [{ label: "是" }, { label: "否" }] }] };
+  it.each([[undefined, true], ["summary", true], ["STRICT", false], ["full", false]])("OMP_SESSION_WEBHOOK_ACTION_CONTENT=%s → 附带内容 %s", async (mode, detailed) => {
+    if (mode !== undefined) process.env.OMP_SESSION_WEBHOOK_ACTION_CONTENT = mode;
+    const c = client(); c.emit("agent_start");
+    c.emit("tool_call", { toolName: "ask", toolCallId: "a", input: ask });
+    c.emit("plan_review_requested", { sessionId: c.ctx.sessionManager.getSessionId(), reviewId: "p", title: "发布计划" });
+    await advance(150);
+    const interactions = requests.map(r => r.body.interaction!);
+    expect(interactions.map(i => i.kind)).toEqual(["ask", "plan_review"]);
+    if (detailed) {
+      expect(interactions[0].questions?.[0].text).toBe("继续发布？"); expect(interactions[1].title).toBe("发布计划");
+    } else {
+      for (const item of interactions) expect(Object.keys(item).sort()).toEqual(["kind", "ref"]);
+    }
+    expect(categories(c.logs).includes("action_content_invalid")).toBe(mode === "full");
+  });
 });

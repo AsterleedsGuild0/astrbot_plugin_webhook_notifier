@@ -550,10 +550,13 @@ def prepare_display_fields(
     return result
 
 
-def _derive_opencode_session_elapsed(data: dict[str, Any]) -> str | None:
-    """仅按 OpenCode 的 startedAt 会话语义派生当前会话已持续时长。"""
+def _derive_session_elapsed(data: dict[str, Any]) -> str | None:
+    """按 startedAt 的会话创建时间语义派生会话已持续时长（创建至今，不是活跃运行时长）。
 
-    if data.get("provider") != "opencode":
+    OpenCode 与 OMP 的 ``startedAt`` 字段都表示会话创建时间；其他 provider 不派生。
+    """
+
+    if data.get("provider") not in {"opencode", "omp"}:
         return None
     emitted_at = _parse_aware_timestamp(data.get("emitted_at"))
     if emitted_at is None:
@@ -786,11 +789,15 @@ def build_display_event_data(
         display_context=context,
         model_variant=result.get("model_variant"),
     )
+    session_elapsed = _derive_session_elapsed(result)
     if result.get("provider") == "opencode":
-        session_elapsed = _derive_opencode_session_elapsed(result)
         if session_elapsed is not None:
             display_fields.append({"label": "会话已持续", "value": session_elapsed})
         display_fields = _order_opencode_display_fields(display_fields)
+    elif session_elapsed is not None:
+        # OMP 字段按标准化顺序展示，“会话已持续”紧跟会话开始时间。
+        index = next((i for i, field in enumerate(display_fields) if field.get("label") == "会话开始时间"), len(display_fields) - 1)
+        display_fields.insert(index + 1, {"label": "会话已持续", "value": session_elapsed})
     if (
         result.get("provider") in _ACTION_CARD_PROVIDERS
         and str(result.get("status", "")).strip().lower() == "action_required"

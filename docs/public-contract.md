@@ -21,18 +21,28 @@
 
 ## OMP V2：运行收束与交互观察（未发布）
 
-新 Hook 只发送 `omp.run_finished` 或 `omp.action_required`，`version` 必须是整数 `2`；`X-OMP-Event` 如提供，必须与 body 完全相同。旧服务端不识别这两个事件，不得自动降级为 `omp.session_stop`。仍使用显式 `provider=omp` Endpoint、Bearer 和既有目标别名白名单。
+新客户端只发送 `omp.run_finished`、`omp.action_required` 和凭据告警 `omp.credential_disabled`，`version` 必须是整数 `2`；`X-OMP-Event` 如提供，必须与 body 完全相同。旧服务端不识别这两个事件，不得自动降级为 `omp.session_stop`。仍使用显式 `provider=omp` Endpoint、Bearer 和既有目标别名白名单。
 
 ### 信封与隐私
 
-必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`、`subagentTimeline`、`userWaitTimeline`。各层未知字段拒绝，整个 JSON 至多 64 KiB。
+必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`、`subagentTimeline`、`userWaitTimeline`、`error`、`signals`。各层未知字段拒绝，整个 JSON 至多 64 KiB。`error`、`signals`、`session.rootName`、`session.createdAt` 与凭据告警事件自 v2.2.0 起提供，全部可选：不带这些字段的旧 V2 客户端照常被接收；v2.1.0 及更早的服务端会拒绝带有这些字段的请求，必须先升级服务端。
 
 - `id` 是每条通知生成一次的随机 32 位小写十六进制标识；重试不得更换。
-- `session` 必须有 `ref`（32 位匿名引用）、`scope`（`root|subagent|unknown`），可选 `name`、`cwdName`、`agent`。名称不超过 96 个 Unicode 字符；子代理会话没有标题时，客户端用 OMP 展示的任务名（`ctx.agent.id`，如 `ReleaseManagementSmoke`）作为名称；仍缺失时显示 `OMP Session <ref前12位>`。
+- `session` 必须有 `ref`（32 位匿名引用）、`scope`（`root|subagent|unknown`），可选 `name`、`cwdName`、`agent`、`rootName`、`createdAt`。名称不超过 96 个 Unicode 字符；子代理会话没有标题时，客户端用 OMP 展示的任务名（`ctx.agent.id`，如 `ReleaseManagementSmoke`）作为名称；仍缺失时显示 `OMP Session <ref前12位>`。`rootName` 是子代理所属主会话的名称，只在 `scope=subagent` 且父子关联已由公开身份与快照证明时发送，无法关联时省略，卡片显示“所属主会话”。`createdAt` 是会话创建时间（OMP 会话头的 `timestamp`，恢复旧会话时保留原值），不晚于 `emittedAt` 与 `cycle.startedAt`；卡片显示“会话开始时间”，并由服务端派生“会话已持续”（创建至今的时间，不是活跃运行时长），缺失时两者都省略。
 - `cycle` 必须有随机 `ref`、`partial`（布尔）、`reasons`（去重枚举列表），可选 `startedAt`、`endedAt`、`durationMs`、`model`、`thinking`、`metadataChanged`、`timeBasis`。新 Hook 的 `timeBasis=receipt_monotonic`，耗时来自公开事件接收的单调时钟，非负整数且至多 24 小时；ISO 时间仅作墙钟展示，墙钟偏差超过 10ms 标记 `clock_changed`。省略 timeBasis 的早期 V2 请求仍按 ISO 差值校验。缺开始不提供耗时；`endedAt` 只用于收束事件。`model` 至多 128 字符，实际 `thinking` 至多 32 字符；运行中变化则省略单一模型／档位，缺失则不补造对应字段。
 - `instance` 是显式配置的实例别名，至多 96 字符；`target_alias` 至多 128 字符。
-- `interaction` 仅用于待处理事件，必填匿名 `ref` 与 `kind=approval|plan_review|ask`。ask 可选 `questionCount`（1–99）与 `questions`（1–4 题），每题必填 `text`（至多 300 字符），可选 `header`（40）与 `options`（1–8 个，`label` 至多 80 字符且互不重复，可选 `description` 至多 200 字符，至多一个 `recommended: true`）。审批与计划审阅可选 `title`（至多 200 字符），分别是工具名和计划标题。摘要固定为“等待问题回答／等待工具审批／等待计划审阅”；纯文本沿用 OpenCode 问题卡字段，默认图片卡与 OpenCode 待处理卡共用同一布局：状态条显示摘要与已运行时长，会话名作标题，题目、标题与编号选项（含描述与推荐标记）分块展示。不发送答案、计划正文、审批原因或工具参数。对应区间是请求观察区间，不是精确人工等待。
+- `interaction` 仅用于待处理事件，必填匿名 `ref` 与 `kind=approval|plan_review|ask`。ask 可选 `questionCount`（1–99）与 `questions`（1–4 题），每题必填 `text`（至多 300 字符），可选 `header`（40）与 `options`（1–8 个，`label` 至多 80 字符且互不重复，可选 `description` 至多 200 字符，至多一个 `recommended: true`）。审批与计划审阅可选 `title`（至多 200 字符），分别是工具名和计划标题。摘要固定为“等待问题回答／等待工具审批／等待计划审阅”；纯文本沿用 OpenCode 问题卡字段，默认图片卡与 OpenCode 待处理卡共用同一布局：状态条显示摘要与已运行时长，会话名作标题，题目、标题与编号选项（含描述与推荐标记）分块展示。不发送答案、计划正文、审批原因或工具参数。对应区间是请求观察区间，不是精确人工等待。客户端 `OMP_SESSION_WEBHOOK_ACTION_CONTENT=strict` 时 `interaction` 只含 `ref` 与 `kind`，卡片只显示等待类型；默认 `summary` 发送上述内容。
 - `reasons` 允许 `missing_start`、`session_changed`、`shutdown`、`expired`、`capacity`、`unpaired_interaction`、`incomplete_metadata`、`clock_changed`。恢复不读取私有历史；缺失起点不得补造。
+- `error` 只用于 `status=failed|unknown` 的 `omp.run_finished`，必填 `category`，可选 `retried: true`。分类只来自结构化字段：最终 assistant 的 `errorStatus`（401/403 → `auth`，429 → `rate_limit`，5xx → `server`，其他 4xx → `request`）、`stopReason=length`（`truncated`）、`auto_retry_end.success=false` 且无状态码（`retry_exhausted`）；有状态码且自动重试失败时加 `retried`。没有结构化依据时不发送，卡片不显示错误类型。不发送、不解析错误原文。OMP 18.12.6 的 `after_provider_response` 实测只在请求成功时触发，不作为错误来源。
+- `signals` 只用于 `omp.run_finished`，至少含一项，取不到的项省略，不发精确的 0：
+  - `context`：`tokens` 与 `window`（整数，`tokens ≤ window`），收束时 `ctx.getContextUsage()` 的当前窗口占用，不是累计用量；
+  - `compaction`：`count`（0–999）与可选 `failed`（1–999）。一次压缩可能依次尝试多种方法，链条中有一种成功即计一次成功，整条链失败或被中止计一次失败；两者不能同时为 0；
+  - `fallback`：`from`、`to`（按模型名规则校验）与 `succeeded`（之后是否收到 `retry_fallback_succeeded`）；`reason` 不发送；
+  - `usage`：`input`、`output`、`cacheRead`、`cacheWrite`、`total`，为本次运行开始与收束时会话累计用量之差（恢复旧会话从非零基数起算，压缩不重置累计值）；`total` 为 0 或任一项回退时省略；不发送费用；
+  - `goal`：`objective`（至多 200 字符）、`status`（`active|paused|budget-limited|complete|dropped`）、`tokensUsed`、`timeUsedSeconds`，可选 `tokenBudget`；仅在 Goal 处于进行中／暂停／预算耗尽或本次运行中更新过时发送；
+  - `todo`：最后一次 `todo_reminder` 的 `reminders`／`maxReminders`（1–99）、未完成条数 `pendingCount` 与至多 8 条未完成条目文字 `pending`（每条至多 120 字符）。提醒达到上限后 OMP 静默放行结束，卡片只写“结束时可能仍未完成”。
+  Goal 目标与 todo 条目是用户为自己的任务编写的内容，按名称规则清洗（URL 与绝对／用户目录路径替换为 `…`，相对路径保留）；todo 的详情、备注与阻塞原因不读取。
+- `omp.credential_disabled` 是独立告警事件：必填 `event`、`version=2`、`id`、`emittedAt`、`provider`（至多 64 字符），可选 `instance`、`target_alias`，没有 `session`／`cycle`／`status`。卡片按待处理展示“OMP 凭据已停用”。OMP 事件中的原因原文、邮箱、账号 ID、组织与凭据行 ID 不读取、不发送；客户端在同一进程内对同一 provider 只告警一次。旧服务端以 `unsupported_version` 拒绝该事件。
 
 原始会话／请求 ID 只在有界进程内存中关联，匿名会话引用使用每次加载随机密钥的 HMAC；运行／交互引用使用随机数，不依赖正文。子代理任务名是 OMP 界面展示的可读名称，按名称规则发送。不发送 prompt、回答、计划正文、完整路径、原始错误或事件／details 对象。名称与交互内容清除控制字符、压缩空白并限长；其中的 URL 与绝对／用户目录路径替换为 `…`，相对路径保留，只剩占位时整项省略；cwd 只取 basename。可读名称和题干可能含业务信息，隐私敏感的场景应使用私聊 Endpoint。
 

@@ -4,6 +4,7 @@
 
 ### 升级须知
 
+- **先升级服务端，再升级客户端。** v2.2.0 客户端会发送错误类型、资源信号等新增可选字段和凭据告警事件，v2.1.0 及更早的服务端会以 HTTP 400 拒绝这些请求（客户端视为永久错误、不重试，通知丢失）。新服务端继续接收旧客户端。
 - **OMP 客户端改为 extension 包，手动复制过单文件 Hook 的用户需要迁移。** 客户端由 `integrations/omp/` 整个目录组成（`package.json`、入口 `index.ts` 与同目录模块），不再是单个 `webhook-notifier.ts`。迁移时先退出 OMP，删除 `~/.omp/agent/hooks/post/webhook-notifier.ts`（及项目级副本、旧 `onebot.ts`），再通过 OMP marketplace 安装（`/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier`、`/marketplace install omp-webhook-notifier@astrbot-webhook-notifier`），或把整个目录复制为 `~/.omp/agent/extensions/webhook-notifier/`，二者只选一种，然后重启 OMP。新旧入口同时存在会使每次运行发送两条通知。环境变量不变。步骤见[接入指南](docs/client-integration.md#从单文件-hook-迁移)。
 
 ### 变更
@@ -13,6 +14,8 @@
 - `scripts/sync_omp_hook.py` 改为同步整个客户端包目录到 OMP 扩展目录：整包摘要判稳、隐藏暂存目录写好后换入，冲突时整目录备份；源缺失或外置盘未挂载时保留部署副本，目标被独立修改后锁存暂停。
 - 原生 OMP 验收工具整理进 `scripts/omp_native/`：隔离 HOME、本机代理、RPC／TUI 场景驱动与事件记录器；测试 Endpoint 从外部文件读取，不继承调用方 shell 的生产变量。
 - #33 本仓库提供 OMP marketplace（`.omp-plugin/marketplace.json`）：`/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier` 后 `/marketplace install omp-webhook-notifier@astrbot-webhook-notifier` 安装客户端，`/marketplace update` 加 `/marketplace upgrade` 升级，安装或升级后需重启 OMP。版本取自 `integrations/omp/package.json`，发布门禁要求与插件版本一致。
+- #34 OMP 通知补充错误类型、所属主会话与会话时长：失败卡按最终 assistant 的 HTTP 状态码（`errorStatus`）、`stopReason=length` 与自动重试结果显示“错误类型”，没有结构化依据时不显示，不读取错误原文；子代理异常／待处理卡在父子关联可证明时显示“所属主会话”；卡片显示“会话开始时间”与“会话已持续”（会话创建至今，恢复旧会话按原创建时间计算）。均为 V2 可选字段。新增客户端配置 `OMP_SESSION_WEBHOOK_ACTION_CONTENT`：默认 `summary`，待处理提醒内容与 v2.1.0 相同；设为 `strict` 时只发送交互类别。
+- #35 OMP 收束卡补充运行健康与资源信号：上下文占用（当前窗口，非累计）、自动压缩次数与失败提示、模型降级（源 → 备用及是否成功）、本次运行用量（会话累计快照之差，不显示费用）、Goal 目标与状态（预算耗尽醒目提示）、todo 提醒次数与未完成条目。新增独立的凭据停用告警事件 `omp.credential_disabled`，只含 provider，同一进程内同一 provider 只告警一次。
 - 补测计划评审“保存”“细化”：保存后 OMP 切到新会话，旧周期静默收束；细化在同一周期继续并按最终评审结果收束。不存在一直不收束的问题。
 
 ## v2.1.0 - 2026-10-24

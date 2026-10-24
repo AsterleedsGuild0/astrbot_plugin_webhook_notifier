@@ -22,7 +22,8 @@ const webhook = Bun.serve({
       const headers = new Headers(req.headers);
       headers.delete("host");
       headers.delete("content-length");
-      const res = await fetch(webhookTarget, { method: "POST", headers, body, redirect: "manual" });
+      // 有界等待：上游卡住时也要落一条记录，而不是无声挂起。
+      const res = await fetch(webhookTarget, { method: "POST", headers, body, redirect: "manual", signal: AbortSignal.timeout(300_000) });
       status = res.status; text = await res.text();
     } catch (e) { error = String(e); }
     let request: unknown = body, response: unknown = text;

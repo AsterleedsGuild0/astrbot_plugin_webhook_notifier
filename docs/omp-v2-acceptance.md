@@ -144,7 +144,7 @@
 ### 未覆盖
 
 - 群目标、OpenCode／Markdown 的线上回归、插件市场安装未在本轮执行。
-- 审批“为本会话批准”、eval 间接 ask、嵌套多层子代理、上下文压缩与会话分支未在原生环境触发。
+- 审批“为本会话批准”、eval 间接 ask 与会话分支未在原生环境触发。嵌套多层子代理（深度 2）与运行中上下文压缩已在 #34／#35 验收中补测，见下文 S13-nested、S13-compaction，结论符合契约。
 - 计划评审“保存”“细化”已于 2026-10-24 实测（见上表），没有出现“一直不收束”：保存在确认路径后立即切到新会话，旧周期静默收束；细化在同一周期内继续，最终按第二次评审的结果收束。保存后不再发送收束通知，与“批准后交给执行会话”的静默交接一致，不作为缺陷。保存路径对话框中按 Esc 的分支未测。
 - 接收端图片只人工抽查了 ask 待处理卡、ask 完成卡、计划中止卡（修正前）、计划待处理卡、计划取消卡与 workpool 完成卡；其余仅核对文字、同条与图片尺寸。
 - 上述未覆盖项的补测由 #37 跟踪。
@@ -208,6 +208,67 @@ local 来源每次直接读目录，`upgrade` 前无需 `update`；GitHub 来源
 
 - 从 GitHub 添加本仓库、按文档安装并在旧单文件 Hook 并存时迁移，需要目录文件推送到默认分支后才能执行，记录在发版后的补充验收中。
 - 升级以本地副本改版本号模拟，未从两个真实发布版本之间升级。
+
+## #34／#35：错误类型、会话信息与运行健康信号
+
+### 公开事件字段确认（OMP 18.12.6，隔离原生实测）
+
+事件记录器只记结构字段，结论如下；协议设计以实测为准，Issue 中的候选来源按此调整。
+
+| 信号 | 实测可用来源 | 结论 |
+| --- | --- | --- |
+| HTTP 状态码 | `after_provider_response` 只在请求成功（200）时触发；注入 400／401／429 时不触发 | 不作错误来源。改用最终 assistant 消息的结构化 `errorStatus`（`agent_end.messages`，RPC 结果中同样体现为 `httpStatus`） |
+| 重试耗尽 | `auto_retry_end.success=false`（注入 503 十次） | 可用；`finalError` 原文不读 |
+| 长度截断 | 最终 assistant `stopReason=length` | 字段存在，未能原生触发，只有合成回归 |
+| 工具链失败 | 无结构化字段（工具错误不使运行失败） | 不分类，保持不显示 |
+| 会话创建时间 | `sessionManager.getHeader().timestamp`；`--continue` 恢复后不变 | 可用 |
+| 所属主会话 | 既有父子关联（公开 `agent.parentId` + owner 快照） | 关联成立时取根运行名称 |
+| 上下文占用 | `ctx.getContextUsage()` 返回 `{tokens, contextWindow, percent}` | 可用 |
+| 自动压缩 | `auto_compaction_start/end`；一次压缩会依次尝试多种方法，前一种失败（`errorMessage`）后一种成功（`result`），后一种方法本身会触发 `before_provider_request` | 按“链”计数：有一种成功计一次成功 |
+| 模型降级 | `retry_fallback_applied {from, to, role, reason}`、`retry_fallback_succeeded {role}`；`succeeded` 实测没有 `model` 字段 | 源／备用模型取自 applied，是否成功取 succeeded 是否出现 |
+| Token 用量 | `getUsageStatistics()` 为会话累计；恢复会话从非零起算，压缩后不回退 | 两次快照差值 |
+| Goal | `goal_updated {goal, state}`，`goal.updatedAt` 为毫秒时间戳 | 可用 |
+| todo 提醒 | `todo_reminder {todos[{content,status}], attempt, maxAttempts}` | 可用 |
+| 凭据停用 | 类型定义中有 `credential_disabled`，需 OAuth `invalid_grant` 才会触发 | 隔离环境无法触发（不复制、不新建凭据），只有合成回归与 HTTP smoke |
+
+### 变更组
+
+- 客户端新增 `signals.ts`（结构化读取与清洗），`index.ts` 订阅压缩、降级、todo、Goal、凭据停用事件并在收束时读取上下文与用量；新增 `OMP_SESSION_WEBHOOK_ACTION_CONTENT`（默认 `summary`，与 v2.1.0 相同；`strict` 只发交互类别）。
+- 线协议新增可选 `session.rootName`、`session.createdAt`、`error`、`signals` 与独立事件 `omp.credential_disabled`；服务端严格校验并展示“错误类型、所属主会话、会话开始时间／会话已持续、上下文占用、自动压缩、模型降级、本次运行用量、目标／目标状态、待办提醒／未完成待办”，OMP 的“会话已持续”由服务端派生。
+- 原生实测发现并修正两处客户端缺陷（同批提交前修正）：压缩链中后续方法的模型请求被当成链结束，导致成功的压缩多计失败；Goal 的毫秒 `updatedAt` 超过计数上限被丢弃，已完成的 Goal 不显示。均有回归。
+
+### 已执行验证
+
+| 层级 | 结果 | 证据入口 |
+| --- | --- | --- |
+| Bun | OMP 90 项（新增错误分类、主会话关联、会话头、用量差值含恢复与压缩、压缩链、降级、todo、Goal、凭据告警去重与隐私、内容模式）、OpenCode 279 项通过 | `bun test integrations/omp integrations/opencode` |
+| 默认出站 | 默认 `summary` 下 v2.1.0 回环 smoke 的 17 个场景请求体与 v2.1.0 单文件逐字节一致 | `tmp/compare-32/` |
+| Python | 全仓通过；新增 `tests/test_omp_signals.py`（50 项：旧 V2 不变、各字段展示、未知字段／超限／非法枚举／作用域拒绝且不回显输入、凭据告警拒绝身份字段） | `uv run --frozen pytest -q` |
+| 回环 HTTP | 19 场景通过，新增 `signals`（所有原文位置放哨兵，出站、日志、文本均无哨兵，文本含全部新标签）与 `credential`（只含 5 个字段） | `scripts/smoke_omp_hook.py` |
+| 旧服务端 | v2.1.0 Adapter 解析：凭据告警 `unsupported_version`，带 `signals` 的 V2 `invalid_payload`，旧 V2 正常 | `git archive 7dc0062` 一次性脚本 |
+| 线上部署 | 测试包 `v2.1.0-test.20261025.0106.omp-signals2` 部署，`--verify` 与基准图一致（固定冒烟不含新字段，画面不变） | `deploy_dev.py` 输出 |
+
+### 原生 OMP 与接收端（T2I 恢复后重跑，2026-10-25 01:33–01:43 CST）
+
+隔离 HOME、显式加载仓库客户端包，测试 Endpoint（非生产）。接收端读回 `probe-35.json`／`probe-35b.json`，均为 `html_image` 主卡，已人工查看。
+
+| 场景 | OMP 实际事件／注入 | 出站新增字段 | 接收端 |
+| --- | --- | --- | --- |
+| S13-failed-400 | 注入 400，最终 assistant `errorStatus=400` | `error={category: request}`、`context` | 【失败】卡显示“错误类型 请求被拒绝（HTTP 4xx）”、会话开始时间与会话已持续 |
+| S10-retry-exhausted | 注入 503 直至 `auto_retry_end.success=false` | `error={category: server, retried: true}` | 【失败】卡（T2I 拥塞前读回，1056×981） |
+| S10-resume-a／b | `--continue` 恢复同一会话 | 两次 `createdAt` 均为 `2026-10-24T14:41:21.021Z` | 两张【已完成】卡 |
+| S13-fallback | 配置 `retry.fallbackChains`，注入 400 一次 | `fallback={cpa/deepseek-flash:low → cpa/glm-5.3-flash, succeeded}`、`usage` | “模型降级 … 备用模型完成请求” |
+| S13-compaction | `compaction.thresholdTokens=16000`，运行中两次压缩链（snapcompact 失败 → handoff 成功） | `compaction={count: 2}`（修正前为 `failed: 2`） | 【已完成】卡显示自动压缩 2 次 |
+| S13-todo | 1 次 `todo_reminder`（3 条未完成） | `todo={1/3, pendingCount 3, [alpha, beta, gamma]}` | 显示待办提醒与未完成待办 |
+| S13-goal | RPC `goal create` 后完成 | `goal={…, status: complete, 612 / 200k, 17s}`（修正前缺失） | 显示目标与“已完成 · 已用 612 / 200k · 用时 17 秒” |
+| S13-subagent-failed | 子代理首个请求注入 400 | 子代理通知 `rootName=原生验收 S13-subagent-failed`、`error=request` | 【失败】EchoChild 卡显示“所属主会话”；根运行另发【已完成】卡，时间线中该子代理为失败 |
+| S13-nested | task 内再嵌套 task（深度 2） | — | 时间线两层：深度 2 段的父为深度 1 段，层级缩进正确 |
+
+### 未覆盖与限制
+
+- 凭据停用告警未原生触发；输出长度截断（`stopReason=length`）未原生触发，均只有合成回归与回环 HTTP。
+- 2026-10-24 23:00 前后线上 T2I 因定时群分析拥塞，部分原生通知渲染耗时 2～4 分钟或回退文本；客户端按同一 ID 重试，服务端返回幂等回放，每个场景只投递一次。该时段的读回不作为卡片画面证据，画面以 T2I 恢复后的重跑为准。
+- 新字段卡片画面不在固定基准图中；接收端截图见上表，需人工确认。
 
 ## 原生验收工具
 

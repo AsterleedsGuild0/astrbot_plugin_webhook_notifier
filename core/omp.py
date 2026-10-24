@@ -9,6 +9,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
+from .display import format_duration_ms
 from .models import NormalizedEvent
 from .notification_policy import SessionScope
 from .providers import ProviderAdapter, ProviderError
@@ -16,7 +17,19 @@ from .providers import ProviderAdapter, ProviderError
 OMP_SOURCE_NAME = "oh-my-pi"
 _OMP_ADAPTER_ERROR_MSG = "OMP payload 处理失败"
 _ANON_KEY = secrets.token_bytes(32)
-_V2_EVENTS = {"omp.run_finished", "omp.action_required"}
+_CREDENTIAL_EVENT = "omp.credential_disabled"
+_V2_EVENTS = {"omp.run_finished", "omp.action_required", _CREDENTIAL_EVENT}
+# 错误类型只来自客户端的结构化依据（HTTP 状态码分类、stopReason、自动重试结果），不含错误原文。
+_ERROR_CATEGORIES = {
+    "auth": "鉴权失败（HTTP 401/403）", "rate_limit": "请求限流（HTTP 429）",
+    "server": "服务端错误（HTTP 5xx）", "request": "请求被拒绝（HTTP 4xx）",
+    "truncated": "输出达到长度上限", "retry_exhausted": "自动重试耗尽",
+}
+_GOAL_STATUSES = {
+    "active": "进行中", "paused": "已暂停", "budget-limited": "⚠ 预算已耗尽",
+    "complete": "已完成", "dropped": "已放弃",
+}
+_MAX_COUNT = 10**12
 _RESULTS = {"completed", "failed", "aborted", "action_required", "unknown"}
 _REASONS = {
     "missing_start", "session_changed", "shutdown", "expired", "capacity",
@@ -31,6 +44,115 @@ _TIMELINE_REASONS = (
     "loading_gap", "invalid_parent_graph", "depth_limit", "truncated",
     "clamped", "clock_changed",
 )
+
+
+def _int(value: Any, low: int, high: int) -> int:
+    if type(value) is not int or not low <= value <= high:
+        raise ValueError("integer")
+    return value
+
+
+def _compact(value: int) -> str:
+    """Token 数的紧凑写法：8034 → 8.0k，1000000 → 1M。"""
+    for size, unit in ((10**9, "B"), (10**6, "M"), (10**3, "k")):
+        if value >= size:
+            return f"{value / size:.1f}".rstrip("0").rstrip(".") + unit
+    return str(value)
+
+
+def _error_fields(error: Any, status: str, action: bool) -> list[dict]:
+    error = _object(error, {"category"}, {"retried"})
+    if action or status not in ("failed", "unknown") or error["category"] not in _ERROR_CATEGORIES:
+        raise ValueError("error")
+    if "retried" in error and (error["retried"] is not True or error["category"] == "retry_exhausted"):
+        raise ValueError("error")
+    value = _ERROR_CATEGORIES[error["category"]] + ("，自动重试后仍失败" if error.get("retried") else "")
+    return [{"label": "error.category", "value": value, "short": True}]
+
+
+def _signal_fields(signals: Any) -> list[dict]:
+    """运行健康与资源信号：全部可选，严格校验后转为展示字段；标签避免含 token 等会被卡片隐藏的词。"""
+    signals = _object(signals, set(), {"context", "compaction", "fallback", "usage", "goal", "todo"})
+    if not signals:
+        raise ValueError("signals")
+    fields: list[dict] = []
+    if "context" in signals:
+        context = _object(signals["context"], {"tokens", "window"}, set())
+        window = _int(context["window"], 1, _MAX_COUNT)
+        tokens = _int(context["tokens"], 0, window)
+        percent = tokens * 100 / window
+        fields.append({"label": "上下文占用", "value": f"{percent:.1f}%（{_compact(tokens)} / {_compact(window)}，当前窗口，非累计用量）", "short": True})
+    if "compaction" in signals:
+        compaction = _object(signals["compaction"], {"count"}, {"failed"})
+        done = _int(compaction["count"], 0, 999)
+        failed = _int(compaction["failed"], 1, 999) if "failed" in compaction else 0
+        if not done and not failed:
+            raise ValueError("compaction")
+        value = f"{done} 次" + (f"，另有 {failed} 次失败或中止" if failed and done else "") if done else f"{failed} 次失败或中止"
+        fields.append({"label": "自动压缩", "value": value, "short": True})
+    if "fallback" in signals:
+        fallback = _object(signals["fallback"], {"from", "to", "succeeded"}, set())
+        _bounded_text(fallback["from"], 128, model=True)
+        _bounded_text(fallback["to"], 128, model=True)
+        if type(fallback["succeeded"]) is not bool:
+            raise ValueError("fallback")
+        outcome = "备用模型完成请求" if fallback["succeeded"] else "未确认备用模型成功"
+        fields.append({"label": "模型降级", "value": f"{fallback['from']} → {fallback['to']}，{outcome}", "short": False})
+    if "usage" in signals:
+        usage = _object(signals["usage"], {"input", "output", "cacheRead", "cacheWrite", "total"}, set())
+        values = {key: _int(usage[key], 0, _MAX_COUNT) for key in usage}
+        if not values["total"]:
+            raise ValueError("usage")
+        parts = [f"输入 {_compact(values['input'])}", f"输出 {_compact(values['output'])}"]
+        parts += [f"{label} {_compact(values[key])}" for key, label in (("cacheRead", "缓存读"), ("cacheWrite", "缓存写")) if values[key]]
+        fields.append({"label": "本次运行用量", "value": f"共 {_compact(values['total'])} tokens（{' · '.join(parts)}）", "short": False})
+    if "goal" in signals:
+        goal = _object(signals["goal"], {"objective", "status", "tokensUsed", "timeUsedSeconds"}, {"tokenBudget"})
+        _bounded_text(goal["objective"], 200)
+        if goal["status"] not in _GOAL_STATUSES:
+            raise ValueError("goal")
+        used = _int(goal["tokensUsed"], 0, _MAX_COUNT)
+        budget = f" / {_compact(_int(goal['tokenBudget'], 1, _MAX_COUNT))}" if "tokenBudget" in goal else ""
+        elapsed = format_duration_ms(_int(goal["timeUsedSeconds"], 0, 10**9) * 1000)
+        fields.append({"label": "目标", "value": _visible(goal["objective"]) or goal["objective"], "short": False})
+        fields.append({"label": "目标状态", "value": f"{_GOAL_STATUSES[goal['status']]} · 已用 {_compact(used)}{budget} · 用时 {elapsed}", "short": False})
+    if "todo" in signals:
+        todo = _object(signals["todo"], {"reminders", "maxReminders", "pendingCount", "pending"}, set())
+        maximum = _int(todo["maxReminders"], 1, 99)
+        reminders = _int(todo["reminders"], 1, maximum)
+        count = _int(todo["pendingCount"], 0, 999)
+        pending = todo["pending"]
+        if not isinstance(pending, list) or len(pending) > min(8, count):
+            raise ValueError("todo")
+        for item in pending:
+            _bounded_text(item, 120)
+        fields.append({"label": "待办提醒", "value": f"第 {reminders}/{maximum} 次提醒时仍有 {count} 项未完成；结束时可能仍未完成", "short": False})
+        if pending:
+            more = f"；等共 {count} 项" if count > len(pending) else ""
+            fields.append({"label": "未完成待办", "value": "；".join(_visible(item) or item for item in pending) + more, "short": False})
+    return fields
+
+
+def _normalize_credential_alert(body: dict[str, Any]) -> NormalizedEvent:
+    """凭据停用告警：只有 provider 与固定类别；原因、账号与凭据身份不在协议中。"""
+    _object(body, {"event", "version", "id", "emittedAt", "provider"}, {"instance", "target_alias"})
+    if type(body["version"]) is not int or body["version"] != 2:
+        raise ValueError("version")
+    _ref(body["id"])
+    _timestamp(body["emittedAt"])
+    _bounded_text(body["provider"], 64)
+    for key, limit in (("instance", 96), ("target_alias", 128)):
+        if key in body:
+            _bounded_text(body[key], limit)
+    fields = [{"label": "模型提供方", "value": _visible(body["provider"]) or body["provider"], "short": True}]
+    if _visible(body.get("instance")):
+        fields.insert(0, {"label": "实例", "value": _visible(body["instance"]), "short": True})
+    fields.append({"label": "处理建议", "value": "该 provider 的凭据已被 OMP 自动停用，请重新登录或更换凭据", "short": False})
+    return NormalizedEvent(
+        provider="omp", event=_CREDENTIAL_EVENT, version=2, id=body["id"], emitted_at=body["emittedAt"],
+        title="OMP 凭据已停用", status="action_required", session_scope=SessionScope.UNKNOWN,
+        summary="凭据已被自动停用", source={"name": OMP_SOURCE_NAME, "url": None}, fields=fields,
+    )
 
 
 def _timeline(value: Any, cycle: dict, *, waits: bool = False) -> dict:
@@ -222,7 +344,7 @@ def _ask_fields(interaction: dict, kind: str) -> list[dict]:
 
 def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
     _object(body, {"event", "version", "id", "emittedAt", "session", "cycle", "status"},
-            {"instance", "interaction", "target_alias", "subagentTimeline", "userWaitTimeline"})
+            {"instance", "interaction", "target_alias", "subagentTimeline", "userWaitTimeline", "error", "signals"})
     if type(body["version"]) is not int or body["version"] != 2:
         raise ValueError("version")
     if len(json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 65536:
@@ -235,13 +357,19 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
     action = body["event"] == "omp.action_required"
     if action != (status == "action_required") or action != ("interaction" in body):
         raise ValueError("event_status")
-    session = _object(body["session"], {"ref", "scope"}, {"name", "cwdName", "agent"})
+    session = _object(body["session"], {"ref", "scope"}, {"name", "cwdName", "agent", "rootName", "createdAt"})
     _ref(session["ref"])
     if session["scope"] not in ("root", "subagent", "unknown"):
         raise ValueError("scope")
-    for key in ("name", "cwdName", "agent"):
+    for key in ("name", "cwdName", "agent", "rootName"):
         if key in session:
             _bounded_text(session[key])
+    # 所属主会话只用于子代理通知。
+    if "rootName" in session and session["scope"] != "subagent":
+        raise ValueError("root_name")
+    created = _timestamp(session["createdAt"]) if "createdAt" in session else None
+    if created is not None and (created - emitted).total_seconds() > 1:
+        raise ValueError("created_at")
     for key, limit in (("instance", 96), ("target_alias", 128)):
         if key in body:
             _bounded_text(body[key], limit)
@@ -276,22 +404,33 @@ def _normalize_v2(body: dict[str, Any]) -> NormalizedEvent:
         raise ValueError("metadata")
     if cycle.get("metadataChanged") and ("model" in cycle or "thinking" in cycle):
         raise ValueError("mixed_metadata")
+    if created is not None and start is not None and (created - start).total_seconds() > 1:
+        raise ValueError("created_at")
     fields = []
     agent = _visible(session.get("agent"))
     for label, value in (
         ("实例", _visible(body.get("instance"))),
         ("sessionName", _visible(session.get("name")) or f"OMP Session {session['ref'][:12]}"),
+        ("sessionRootName", _visible(session.get("rootName"))),
         ("projectName", _visible(session.get("cwdName"))),
         ("agent", agent if agent != "main" else None),
         ("model", cycle.get("model")),
         # 有模型时复用 OpenCode 的 modelVariant 展示为 model(thinking)；无模型时单独显示。
         ("modelVariant" if cycle.get("model") else "thinking", cycle.get("thinking")),
         ("开始时间", cycle.get("startedAt")), ("耗时", cycle.get("durationMs")),
+        # 会话创建时间；“会话已持续”在展示层按事件时间派生。
+        ("startedAt", session.get("createdAt")),
     ):
         if value is not None:
             fields.append({"label": label, "value": value, "short": True})
     if cycle.get("metadataChanged"):
         fields.append({"label": "模型与档位", "value": "运行中发生变化，省略单一值", "short": False})
+    if "error" in body:
+        fields.extend(_error_fields(body["error"], status, action))
+    if "signals" in body:
+        if action:
+            raise ValueError("signals_scope")
+        fields.extend(_signal_fields(body["signals"]))
     if cycle["partial"]:
         fields.append({"label": "观察范围", "value": "不完整", "short": True})
     summary = ""
@@ -609,7 +748,7 @@ class OmpProviderAdapter(ProviderAdapter):
             if header_event is not None and header_event != body_event_raw:
                 raise ProviderError("event_mismatch", "OMP 事件不匹配", retryable=False)
             try:
-                return _normalize_v2(payload)
+                return _normalize_credential_alert(payload) if body_event_raw == _CREDENTIAL_EVENT else _normalize_v2(payload)
             except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
                 raise ProviderError("invalid_payload", _OMP_ADAPTER_ERROR_MSG, retryable=False) from None
         if "version" in payload and (isinstance(payload["version"], bool) or payload["version"] not in (1, "1.0")):

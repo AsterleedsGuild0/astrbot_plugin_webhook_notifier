@@ -189,6 +189,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='30000'
 | `OMP_SESSION_WEBHOOK_TOKEN` | `ONEBOT_WEBHOOK_TOKEN` | 创建 Endpoint 时单独返回的 Bearer Token；本插件鉴权必需 |
 | `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | 100–30000 的整数毫秒，默认 30000 |
 | `OMP_SESSION_WEBHOOK_INSTANCE` | 无 | 显式实例别名，清洗控制字符并限制 96 字符 |
+| `OMP_SESSION_WEBHOOK_ACTION_CONTENT` | 无 | 待处理提醒的内容模式：`summary`（默认，与 v2.1.0 相同，发送 ask 题干与选项、计划标题、审批工具名）或 `strict`（只发送交互类别）。无法识别的取值按 `strict` 处理并记录 `action_content_invalid` |
 
 主变量优先；`ONEBOT_*` 仅保留已承诺的配置兼容。URL、Token 取首个非空值，URL 必须为 http(s)，不得含用户信息、查询或 fragment；Token 不得含换行。timeout 取首个有效值，否则使用默认值。凭据不读文件、不写日志。
 
@@ -211,7 +212,9 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='30000'
 
 只发送有界实例／会话／代理名称、cwd basename、匿名引用、结构化状态、时间及公开模型／实际 thinking。名称不从 prompt、问题或回答截取；路径形态名称舍弃。名称本身仍可能包含业务信息。
 
-禁止出站或日志出现正文、完整路径、原始 ID、工具参数、计划、原始错误和原始对象。OMP Sender 只记录固定失败分类，不保留异常正文与 traceback。V1 继续接收，但标准化不再透出旧完整路径、raw 元数据或原始 ID；`error`／`aborted` 纠正，普通 `stop` 缺最终证据时为 `unknown`。
+v2.2.0 起另外发送（全部可选，取不到时省略）：子代理所属主会话名称、会话创建时间、按 HTTP 状态码／`stopReason`／自动重试结果得出的错误类型、上下文占用、自动压缩次数、模型降级的源与备用模型、本次运行用量（不含费用）、Goal 目标与状态、最后一次 todo 提醒时未完成的条目，以及凭据被自动停用时只含 provider 的告警。Goal 目标与 todo 条目是用户为自己的任务写的内容，清洗 URL 与绝对路径后发送；对隐私敏感的场景使用私聊 Endpoint。字段与上限见[公共契约](public-contract.md)。
+
+禁止出站或日志出现正文、完整路径、原始 ID、工具参数、计划、原始错误、凭据身份（邮箱、账号、组织、凭据行 ID）和原始对象。OMP Sender 只记录固定失败分类，不保留异常正文与 traceback。V1 继续接收，但标准化不再透出旧完整路径、raw 元数据或原始 ID；`error`／`aborted` 纠正，普通 `stop` 缺最终证据时为 `unknown`。
 
 ## 本地验证与层级
 

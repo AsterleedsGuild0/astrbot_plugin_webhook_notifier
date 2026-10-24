@@ -5,12 +5,26 @@
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ExtensionEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { anonymous, askDetail, ref, text } from "./sanitize.ts";
-import { MAX_INTERACTIONS, MAX_SESSIONS, TTL, assistantStatus, bindings, lastStatus, linkRuns, snapshotJobs, type Binding, type Interaction, type Run, type Span } from "./state.ts";
+import { assistant, context, errorCategory, goal, lastAssistant, todo, usage, usageDelta, type Goal } from "./signals.ts";
+import { MAX_INTERACTIONS, MAX_SESSIONS, TTL, alertedProviders, bindings, linkRuns, snapshotJobs, type Binding, type Interaction, type Run, type Span } from "./state.ts";
 import { timelines } from "./timeline.ts";
 import { configuration, enqueue, schedulePump, type Log } from "./transport.ts";
-import type { Cycle, Envelope, InteractionDetail, Kind, Reason, Resolution, Status } from "./wire.ts";
+import type { Cycle, Envelope, InteractionDetail, Kind, Reason, Resolution, Signals, Status } from "./wire.ts";
 
 export type { Envelope } from "./wire.ts";
+
+const MAX_ALERTED_PROVIDERS = 64;
+
+/** 只读查询可能在会话收尾时抛错；失败按取不到处理。 */
+function read<T>(query: () => T): T | undefined {
+  try { return query(); } catch { return undefined; }
+}
+/** 会话创建时间取会话头的 timestamp；恢复旧会话时会话头不变。 */
+function createdAt(ctx: ExtensionContext): string | undefined {
+  const value = read(() => ctx.sessionManager.getHeader()?.timestamp);
+  const time = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
+}
 
 export default (pi: ExtensionAPI): void => {
   const owner = Symbol();
@@ -31,6 +45,8 @@ export default (pi: ExtensionAPI): void => {
     if (run.model !== model || run.thinking !== thinking) run.metadataChanged = true;
     if (!model || !thinking) run.metadataMissing = true;
     run.session.name = sessionName(ctx);
+    const created = createdAt(ctx);
+    if (created) run.session.createdAt = created;
   }
   /** 子代理会话通常没有标题；用 OMP 展示的任务名（agent.id，如 ReleaseManagementSmoke）兜底。 */
   function sessionName(ctx: ExtensionContext): string | undefined {
@@ -50,18 +66,43 @@ export default (pi: ExtensionAPI): void => {
       ...(run.metadataChanged ? { metadataChanged: true } : {}),
     };
   }
-  function notify(run: Run, status: Status, interaction?: Interaction): void {
+  /** 一次压缩可能依次尝试多个方法（失败后换下一种）；链条以成功或非压缩事件结束，只在整条链失败时计一次失败。 */
+  function settleCompaction(run: Run): void {
+    if (run.compactionPending) { run.compactionFailures = Math.min(999, run.compactionFailures + 1); run.compactionPending = false; }
+  }
+  function signals(run: Run, current: Goal | undefined): Signals | undefined {
+    settleCompaction(run);
+    const delta = usageDelta(run.usageStart, run.usageEnd);
+    // goal 在本次运行中更新过，或仍处于进行中／暂停／预算耗尽时附带。
+    const relevant = current && (current.status === "active" || current.status === "paused" || current.status === "budget-limited" || (run.start !== undefined && current.updatedAt >= run.start));
+    const value: Signals = {
+      ...(run.context ? { context: run.context } : {}),
+      ...(run.compactions || run.compactionFailures ? { compaction: { count: run.compactions, ...(run.compactionFailures ? { failed: run.compactionFailures } : {}) } } : {}),
+      ...(run.fallback ? { fallback: { ...run.fallback } } : {}),
+      ...(delta ? { usage: delta } : {}),
+      ...(relevant ? { goal: { objective: current.objective, status: current.status, tokensUsed: current.tokensUsed, ...(current.tokenBudget ? { tokenBudget: current.tokenBudget } : {}), timeUsedSeconds: current.timeUsedSeconds } } : {}),
+      ...(run.todo ? { todo: { ...run.todo, pending: [...run.todo.pending] } } : {}),
+    };
+    return Object.keys(value).length ? value : undefined;
+  }
+  function notify(run: Run, status: Status, interaction?: Interaction, current?: Goal): void {
     if (!config || interaction?.kind === "background_wait") return;
     // 暂缓发送的中止按 agent_end 时刻计时，不把等待窗口算进耗时。
     const at = interaction ? undefined : run.abortAt;
     const now = at?.now ?? Date.now();
     const monoNow = at?.mono ?? Math.floor(performance.now());
+    // 只在父子关联已由公开身份与快照证明时附带主会话名称，不猜测。
+    const rootName = run.root && run.root !== run ? run.root.session.name : undefined;
+    const error = interaction ? undefined : errorCategory(status, run.last, run.retryFailed);
+    const extra = interaction ? undefined : signals(run, current);
     const payload: Envelope = {
       event: interaction ? "omp.action_required" : "omp.run_finished", version: 2, id: ref(), emittedAt: new Date(now).toISOString(),
-      session: { ...run.session }, cycle: cycle(run, now, monoNow, !interaction), status,
+      session: { ...run.session, ...(rootName ? { rootName } : {}) }, cycle: cycle(run, now, monoNow, !interaction), status,
       ...(!interaction && run.session.scope === "root" ? timelines(run, monoNow) : {}),
       ...(config.instance ? { instance: config.instance } : {}),
-      ...(interaction ? { interaction: { ref: interaction.ref, kind: interaction.kind as Kind, ...interaction.detail } } : {}),
+      ...(interaction ? { interaction: { ref: interaction.ref, kind: interaction.kind as Kind, ...(config.actionContent === "summary" ? interaction.detail : {}) } } : {}),
+      ...(error ? { error } : {}),
+      ...(extra ? { signals: extra } : {}),
     };
     enqueue({ payload, config, live: interaction ? () => interaction.open && !run.closed : () => true, log });
   }
@@ -86,7 +127,7 @@ export default (pi: ExtensionAPI): void => {
     }
     run.closed = true;
     // 常规子代理收束由主通知汇总；异常仍独立提醒，便于在 root 缺失时发现问题。
-    if (!silent && (run.session.scope !== "subagent" || status !== "completed")) notify(run, status);
+    if (!silent && (run.session.scope !== "subagent" || status !== "completed")) notify(run, status, undefined, binding.goal);
   }
   function get(ctx: ExtensionContext): Binding | undefined {
     const now = Math.floor(performance.now());
@@ -133,7 +174,11 @@ export default (pi: ExtensionAPI): void => {
       model, thinking, metadataChanged: false, metadataMissing: !model || !thinking,
       agentKey: ctx.agent?.id ? anonymous(ctx.agent.id) : undefined, parentKey: ctx.agent?.parentId ? anonymous(ctx.agent.parentId) : undefined,
       depth: ctx.agent?.depth ?? 0, spans: [span], span, spanCount: 1, initialJobs: new Set(), observedSegments: 0, timelineReasons: new Set(),
+      compactions: 0, compactionFailures: 0, compactionPending: false,
+      ...(observed ? { usageStart: usage(read(() => ctx.sessionManager.getUsageStatistics())) } : {}),
     };
+    const created = createdAt(ctx);
+    if (created) run.session.createdAt = created;
     binding.run = run;
     if (run.session.scope === "root") { run.root = run; run.children = []; }
     run.initialJobs = new Set(snapshotJobs(binding, true).map(job => anonymous(job.id)));
@@ -190,16 +235,20 @@ export default (pi: ExtensionAPI): void => {
       run.stop = undefined;
       run.yielded = undefined;
       run.pendingEnd = undefined;
+      settleCompaction(run);
       metadata(run, ctx);
     }
   });
   for (const name of ["turn_start", "before_provider_request"] as const) observe(name, (_, ctx) => {
     const binding = get(ctx);
-    if (binding?.run && !binding.run.closed) metadata(binding.run, ctx);
+    if (!binding?.run || binding.run.closed) return;
+    // 压缩链中的后续方法（如 handoff）自身会发起模型请求；只有新回合开始才说明这条链已结束。
+    if (name === "turn_start") settleCompaction(binding.run);
+    metadata(binding.run, ctx);
   });
   observe("session_stop", (event, ctx) => {
     const binding = get(ctx);
-    if (binding && !binding.run?.closed) begin(binding, ctx, false).stop = assistantStatus(event.last_assistant_message);
+    if (binding && !binding.run?.closed) begin(binding, ctx, false).stop = assistant(event.last_assistant_message)?.status;
   });
   observe("auto_retry_start", (_, ctx) => {
     const binding = get(ctx);
@@ -218,6 +267,10 @@ export default (pi: ExtensionAPI): void => {
     if (!binding || binding.run?.closed) return;
     const run = begin(binding, ctx, false);
     metadata(run, ctx);
+    // 收束时的上下文占用与会话累计用量；续跑时下一次 agent_end 覆盖。
+    run.context = context(read(() => ctx.getContextUsage()));
+    run.usageEnd = usage(read(() => ctx.sessionManager.getUsageStatistics()));
+    run.last = lastAssistant(event.messages);
     if (run.span && run.span.ended === undefined) run.span.ended = Math.floor(performance.now());
     if (event.awaitingAsyncWork === true && !run.background) {
       if (run.interactions.size < MAX_INTERACTIONS) {
@@ -231,7 +284,7 @@ export default (pi: ExtensionAPI): void => {
     }
     // eval agent() 子代理以 yield 提交后结束，最终 stopReason 为 toolUse；workpool worker 提交全部条目后 OMP 中止其后续回合（aborted）。
     // 两者在成功 yield 之后都属于正常完成；yield 失败或未 yield 时保持原映射。
-    const last = lastStatus(event.messages);
+    const last = run.last?.status;
     const observedStatus = run.stop ?? (run.yielded && (last === "unknown" || last === "aborted") ? "completed" : last) ?? "unknown";
     const status = run.start === undefined && observedStatus === "completed" ? "unknown" : observedStatus;
     if (run.retrying) { run.pendingEnd = status; return; }
@@ -275,6 +328,41 @@ export default (pi: ExtensionAPI): void => {
       const binding = get(ctx);
       if (binding?.run && !binding.run.closed) binding.run.yielded = true;
     }
+  });
+  /** 以下信号只附着在已开始的运行上；运行外的事件（如空闲压缩）不单独开启周期。 */
+  function open(ctx: ExtensionContext): Run | undefined {
+    const run = get(ctx)?.run;
+    return run && !run.closed ? run : undefined;
+  }
+  observe("auto_compaction_end", (event, ctx) => {
+    const run = open(ctx);
+    if (!run || event.skipped) return;
+    if (event.result) { run.compactions = Math.min(999, run.compactions + 1); run.compactionPending = false; }
+    else run.compactionPending = true;
+  });
+  observe("retry_fallback_applied", (event, ctx) => {
+    const run = open(ctx);
+    const from = text(event.from, 128, true), to = text(event.to, 128, true);
+    if (run && from && to) run.fallback = { from, to, succeeded: false };
+  });
+  observe("retry_fallback_succeeded", (_, ctx) => {
+    const run = open(ctx);
+    if (run?.fallback) run.fallback.succeeded = true;
+  });
+  observe("todo_reminder", (event, ctx) => {
+    const run = open(ctx);
+    if (run) run.todo = todo(event) ?? run.todo;
+  });
+  observe("goal_updated", (event, ctx) => {
+    const binding = get(ctx);
+    if (binding) binding.goal = event.goal ? goal(event.goal) : undefined;
+  });
+  observe("credential_disabled", event => {
+    // 只发 provider 与固定类别；原因、邮箱、账号、组织与凭据行 ID 不读取。同一进程内同一 provider 只告警一次。
+    const provider = text(event.provider, 64);
+    if (!config || !provider || alertedProviders.has(provider) || alertedProviders.size >= MAX_ALERTED_PROVIDERS) return;
+    alertedProviders.add(provider);
+    enqueue({ payload: { event: "omp.credential_disabled", version: 2, id: ref(), emittedAt: new Date().toISOString(), provider, ...(config.instance ? { instance: config.instance } : {}) }, config, live: () => true, log });
   });
   for (const name of ["session_switch", "session_branch", "session_tree"] as const) observe(name, (_, ctx) => {
     if (active) finish(active, "unknown", "session_changed", active.run?.planHandoff === true);

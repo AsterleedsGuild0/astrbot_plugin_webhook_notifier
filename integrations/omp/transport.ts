@@ -1,9 +1,10 @@
 /** 配置读取与发送：环境变量配置、有界队列、并发、重试和 HTTP／业务结果分类。 */
-import type { Envelope } from "./wire.ts";
+import type { Outbound } from "./wire.ts";
 import { text } from "./sanitize.ts";
 
-export type Config = { url: string; token: string; timeout: number; instance?: string };
-export type Job = { payload: Envelope; config: Config; live: () => boolean; log: Log };
+/** actionContent：待处理提醒是否附带交互内容摘要（ask 题干与选项、计划标题、审批工具名）；strict 只发类别。 */
+export type Config = { url: string; token: string; timeout: number; instance?: string; actionContent: "summary" | "strict" };
+export type Job = { payload: Outbound; config: Config; live: () => boolean; log: Log };
 export type Log = (category: string, id?: string, status?: number, attempt?: number) => void;
 export type Result = "delivered" | "policy_skipped" | "partial_delivery" | "partial_failure" | "replayed" | "permanent_error" | "transient_error" | "transport_unknown" | "unknown";
 
@@ -29,7 +30,10 @@ export function configuration(log: Log): Config | undefined {
       const value = Number(process.env[key]);
       if (Number.isInteger(value) && value >= 100 && value <= 30000) { timeout = value; break; }
     }
-    return { url: url.href, token, timeout, instance: text(process.env.OMP_SESSION_WEBHOOK_INSTANCE) };
+    // 默认 summary 与 v2.1.0 行为一致；无法识别的取值按更保守的 strict 处理。
+    const mode = process.env.OMP_SESSION_WEBHOOK_ACTION_CONTENT?.trim().toLowerCase() || "summary";
+    if (mode !== "summary" && mode !== "strict") log("action_content_invalid");
+    return { url: url.href, token, timeout, instance: text(process.env.OMP_SESSION_WEBHOOK_INSTANCE), actionContent: mode === "summary" ? "summary" : "strict" };
   } catch { log("configuration_invalid"); }
 }
 
