@@ -1,12 +1,12 @@
 # 发布流程
 
-本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.0.0`，默认 Provider 从 OMP 改为 Markdown，属于兼容性变更；本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
+本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.1.0`，发布 OMP V2 通知；服务端需先于 OMP 客户端升级（见 CHANGELOG 升级须知）。本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
 
 版本号与文档表示源码契约，远端发布完成状态以 [GitHub Releases](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) 及对应 Actions run 为准。已发布 tag/asset 不覆盖、不重写；线上部署另行验收。
 
-## OMP V2 测试包与切换门禁（未发布）
+## OMP V2 测试包与切换门禁
 
-OMP V2 属于当前未发布变更，不把下方 v2.0.0 的历史部署证明作为本次验收。开发维护源与真实自动加载入口保持隔离；本次仅授权本地实现与隔离验证，部署、凭据使用、同步恢复、提交和发布另行授权。
+OMP V2 随 `v2.1.0` 发布，原生 OMP 与线上测试私聊的验收结果见 [OMP V2 验收记录](omp-v2-acceptance.md#原生-omp-验收)；下方 v2.0.0 的历史部署证明不作为本次验收。开发维护源与真实自动加载入口保持隔离，切换真实客户端与恢复同步器需另行决定。
 
 ### 本地测试包
 
@@ -89,11 +89,11 @@ uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --prob
 ## 发布前检查
 
 1. 确认目标版本号一致：
-   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.0.0`。
-   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.0.0`，`uv.lock` 根项目版本同步更新。
+   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.1.0`。
+   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.1.0`，`uv.lock` 根项目版本同步更新。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
-   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.0.0 - 2026-10-22`，包含破坏性变更与迁移说明。
-   - 发布准备与 dry-run 不创建 `v2.0.0` tag；仅在门禁通过后推送 tag 触发正式 Release。
+   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.1.0 - 2026-10-24`，包含升级须知（服务端先升级、V1 结束显示为未知、图片前文字、待处理卡改版、重启 OMP、重新复制 Hook、超时变量）。
+   - 发布准备与 dry-run 不创建 `v2.1.0` tag；仅在门禁通过后推送 tag 触发正式 Release。
 2. 维护本地锁定验证依赖：
 
    - `uv.lock` 必须随 `pyproject.toml` 的依赖声明一起维护并纳入提交。
