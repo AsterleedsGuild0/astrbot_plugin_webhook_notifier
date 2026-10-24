@@ -9,7 +9,7 @@ import pytest
 from core.omp import OmpProviderAdapter, is_omp_session_stop
 from core.notification_policy import should_filter_by_duration, should_notify
 from core.providers import ProviderError
-from core.renderer import render_html_default, render_text_default
+from core.renderer import render_html_default, render_image_caption, render_text_default
 
 
 def envelope(status="completed"):
@@ -142,6 +142,18 @@ def test_ask_interaction_renders_like_opencode_question_card():
     assert '<div class="action-block-title">问题 2</div>' in html
     recommended = html.index('class="action-option action-option-recommended"')
     assert recommended < html.index("手动复制，本机导入") < html.index(">推荐<") < html.index("临时 MITM 捕获")
+
+
+def test_image_caption_names_status_session_and_pending_action():
+    assert render_image_caption(parse(envelope("completed"))) == "【已完成】测试会话"
+    assert render_image_caption(parse(envelope("action_required"))) == "【待处理】测试会话 · 等待问题回答"
+
+    body = envelope("action_required")
+    body["session"]["name"] = "很长的会话名" * 16
+    caption = render_image_caption(parse(body))
+    assert len(caption) == 60
+    assert caption.startswith("【待处理】很长的会话名") and caption.endswith("… · 等待问题回答")
+
 
 
 @pytest.mark.parametrize("kind,label", [("approval", "审批工具"), ("plan_review", "计划标题")])

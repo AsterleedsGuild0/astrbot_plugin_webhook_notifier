@@ -32,6 +32,7 @@ from .renderer import (
     prepare_subagent_timeline,
     render_html_data,
     render_html_template,
+    render_image_caption,
     render_subagent_timeline,
     render_text_default,
     trim_viewport_whitespace,
@@ -650,6 +651,7 @@ class WebhookServer:
         *args: Any,
         tracker: DeliveryAttemptTracker | None,
         delivery_context: DeliveryContext | None = None,
+        caption: str = "",
     ) -> list[dict[str, Any]]:
         method = getattr(self._sender, method_name)
         kwargs: dict[str, Any] = {}
@@ -663,6 +665,8 @@ class WebhookServer:
                 for parameter in parameters
             ):
                 kwargs["delivery_context"] = delivery_context
+        if caption:
+            kwargs["caption"] = caption
         if not kwargs:
             return await method(*args)
         return await method(*args, **kwargs)
@@ -837,6 +841,15 @@ class WebhookServer:
             endpoint_name=endpoint.name,
         )
         try:
+            caption = render_image_caption(event, self._display_context)
+        except Exception as exc:
+            # 文字只是预览辅助；生成失败时仍发送图片，不阻塞投递。
+            caption = ""
+            logger.warning(
+                f"[WebhookNotifier] request_id={request_id} "
+                f"reason=image_caption_failed type={_safe_exception_type(exc)}"
+            )
+        try:
             if timeline_image is None:
                 send_results = await self._send_with_attempt_tracker(
                     "send_image",
@@ -845,6 +858,7 @@ class WebhookServer:
                     target_alias,
                     tracker=tracker,
                     delivery_context=dc,
+                    caption=caption,
                 )
             else:
                 send_results = await self._send_with_attempt_tracker(
@@ -854,6 +868,7 @@ class WebhookServer:
                     target_alias,
                     tracker=tracker,
                     delivery_context=dc,
+                    caption=caption,
                 )
         except Exception as exc:
             logger.error(
@@ -897,6 +912,7 @@ class WebhookServer:
                         target_alias,
                         tracker=tracker,
                         delivery_context=dc,
+                        caption=caption,
                     )
                 except Exception as exc:
                     logger.error(

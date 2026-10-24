@@ -153,6 +153,7 @@ class FakeSender(Sender):
         endpoint: EndpointRecord,
         target_alias: str | None = None,
         delivery_attempt_callback=None,
+        caption: str = "",
     ) -> list[dict]:
         self.send_image_calls += 1
         self.sent_images.append(image_result)
@@ -170,6 +171,7 @@ class FakeSender(Sender):
         endpoint: EndpointRecord,
         target_alias: str | None = None,
         delivery_attempt_callback=None,
+        caption: str = "",
     ) -> list[dict]:
         self.send_images_calls += 1
         batch = list(image_results)

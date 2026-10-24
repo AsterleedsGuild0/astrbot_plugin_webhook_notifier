@@ -186,6 +186,7 @@ class Sender:
         | DeliveryAttemptTracker
         | None = None,
         delivery_context: DeliveryContext | None = None,
+        caption: str = "",
     ) -> list[dict[str, Any]]:
         """向 endpoint 绑定的目标发送图片消息。
 
@@ -203,19 +204,19 @@ class Sender:
             target_alias: 可选的目标别名。
             delivery_attempt_callback: 可选发送边界回调。
             delivery_context: 可选投递日志上下文。
+            caption: 可选图片前单行文字，与图片同一条消息发送。
 
         Returns:
             每个目标的发送结果列表。
         """
-        if delivery_attempt_callback is None and delivery_context is None:
-            return await self.send_images([image_result], endpoint, target_alias)
-        return await self.send_images(
-            [image_result],
-            endpoint,
-            target_alias,
-            delivery_attempt_callback=delivery_attempt_callback,
-            delivery_context=delivery_context,
-        )
+        kwargs: dict[str, Any] = {}
+        if delivery_attempt_callback is not None:
+            kwargs["delivery_attempt_callback"] = delivery_attempt_callback
+        if delivery_context is not None:
+            kwargs["delivery_context"] = delivery_context
+        if caption:
+            kwargs["caption"] = caption
+        return await self.send_images([image_result], endpoint, target_alias, **kwargs)
 
     async def send_images(
         self,
@@ -226,6 +227,7 @@ class Sender:
         | DeliveryAttemptTracker
         | None = None,
         delivery_context: DeliveryContext | None = None,
+        caption: str = "",
     ) -> list[dict[str, Any]]:
         """向 endpoint 绑定的目标发送一条多图消息链。
 
@@ -235,6 +237,7 @@ class Sender:
             target_alias: 可选的目标别名。
             delivery_attempt_callback: 可选发送边界回调。
             delivery_context: 可选投递日志上下文。
+            caption: 可选单行文字，放在图片前，整条消息只出现一次。
         """
         if isinstance(image_results, (str, bytes)) or not isinstance(
             image_results, Sequence
@@ -281,8 +284,11 @@ class Sender:
                 ]
             images.append(image)
 
-        # 消息链 — 图片已生成，不再 T2I
+        # 消息链 — 图片已生成，不再 T2I。文字与主卡放在同一条消息，通知预览只看最后一条，
+        # 拆开发送会让预览只剩“[图片]”。QQ 官方 Bot 会把这段文字显示在图片之后。
         message_chain = MessageChain()
+        if caption:
+            message_chain.chain.append(Plain(caption))
         message_chain.chain.extend(images)
         message_chain.use_t2i(False)
 
@@ -430,8 +436,11 @@ def _log_delivery_exception(
     """OMP 只记录固定失败类别；其他 Provider 保持既有清洗行为。"""
     if delivery_context is not None and delivery_context.provider == "omp":
         _log_delivery(
-            logger.error, reason="send_failed", target_name=target_name,
-            elapsed_ms=elapsed_ms, delivery_context=delivery_context,
+            logger.error,
+            reason="send_failed",
+            target_name=target_name,
+            elapsed_ms=elapsed_ms,
+            delivery_context=delivery_context,
         )
         return
     parts = [

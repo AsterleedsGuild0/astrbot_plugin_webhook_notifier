@@ -146,6 +146,41 @@ def status_label(status: Any) -> str:
     return _STATUS_LABELS.get(raw.strip().lower(), raw)
 
 
+IMAGE_CAPTION_MAX_CHARS = 60
+
+
+def build_image_caption(data: dict[str, Any]) -> str:
+    """图片前的单行摘要：通知栏、手表和会话列表预览只能显示这一行文字。
+
+    `data` 是 `build_display_event_data()` 的结果；仅已知状态加【】前缀，
+    会话名优先、缺失时用标题，待处理卡追加摘要。超长时只截会话名，保留状态与摘要。
+    """
+
+    status = _STATUS_LABELS.get(str(data.get("status") or "").strip().lower(), "")
+    prefix = f"【{status}】" if status else ""
+    action = data.get("action_view")
+    headline = (
+        " ".join(str(action.get("headline") or "").split())
+        if isinstance(action, dict)
+        else ""
+    )
+    fields = data.get("fields") if isinstance(data.get("fields"), list) else []
+    name = next(
+        (
+            str(field.get("value") or "")
+            for field in fields
+            if isinstance(field, dict) and field.get("label") == "会话名称"
+        ),
+        "",
+    )
+    name = " ".join((name or str(data.get("title") or "")).split())
+    suffix = f" · {headline}" if headline and name else headline
+    budget = max(1, IMAGE_CAPTION_MAX_CHARS - len(prefix) - len(suffix))
+    if len(name) > budget:
+        name = name[: budget - 1].rstrip() + "…"
+    return f"{prefix}{name}{suffix}"
+
+
 def localize_field_label(label: Any) -> str:
     """映射已知字段，动态 question index 和未知字段保留原键名。"""
 

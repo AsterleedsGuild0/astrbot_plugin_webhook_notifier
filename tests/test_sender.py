@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context
 
 from core.models import EndpointRecord, TargetAlias
@@ -209,6 +209,33 @@ class TestSendImages:
         ]
         assert all(isinstance(component, Image) for component in chain.chain)
         assert chain.get_use_t2i() is False
+
+    @pytest.mark.asyncio
+    async def test_caption_leads_the_single_message_once(self):
+        ctx = Context()
+        sender = Sender(ctx)
+        endpoint = _make_endpoint(
+            targets=[TargetAlias(name="default", umo="test:Msg:1")]
+        )
+
+        await sender.send_images(
+            ["https://example.com/main.png", "https://example.com/timeline.png"],
+            endpoint,
+            caption="【待处理】会话 · 等待问题回答",
+        )
+        await sender.send_image(
+            "https://example.com/solo.png", endpoint, caption="【已完成】会话"
+        )
+
+        assert len(ctx._sent_messages) == 2
+        pair, solo = (chain.chain for _, chain in ctx._sent_messages)
+        assert (
+            isinstance(pair[0], Plain)
+            and pair[0].text == "【待处理】会话 · 等待问题回答"
+        )
+        assert [type(component) for component in pair] == [Plain, Image, Image]
+        assert isinstance(solo[0], Plain) and solo[0].text == "【已完成】会话"
+        assert [type(component) for component in solo] == [Plain, Image]
 
     @pytest.mark.asyncio
     async def test_targets_alias_and_private_policy_send_once_per_target(self):

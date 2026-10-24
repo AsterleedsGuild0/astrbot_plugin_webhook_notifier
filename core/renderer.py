@@ -16,7 +16,12 @@ from jinja2.utils import Namespace
 from markupsafe import Markup
 
 from .models import DisplayContext, NormalizedEvent
-from .display import build_display_event_data, format_duration_ms, format_timestamp
+from .display import (
+    build_display_event_data,
+    build_image_caption,
+    format_duration_ms,
+    format_timestamp,
+)
 from .markdown import render_markdown_html, render_markdown_text
 
 DEFAULT_FALLBACK_VIEWPORT_WIDTH = 1280
@@ -3547,6 +3552,19 @@ def render_html_default(
 ) -> str:
     """使用默认 HTML 模板将标准化事件渲染为 HTML 卡片。"""
     return render_html(event, DEFAULT_HTML_TEMPLATE, display_context)
+
+
+def render_image_caption(
+    event: NormalizedEvent, display_context: DisplayContext | None = None
+) -> str:
+    """图片消息前的单行文字，与卡片共用展示副本，不依赖当前模板。"""
+
+    return build_image_caption(
+        build_display_event_data(
+            event.to_dict(), flatten_source=True, display_context=display_context
+        )
+    )
+
 
 
 def render_subagent_timeline(

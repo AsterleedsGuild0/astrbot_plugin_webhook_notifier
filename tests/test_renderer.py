@@ -37,6 +37,7 @@ from core.renderer import (
     render_html,
     render_html_data,
     render_html_default,
+    render_image_caption,
     render_preview,
     render_subagent_timeline,
     render_subagent_timeline_html,
@@ -697,6 +698,11 @@ class TestRenderHtmlData:
         html = render_html_default(event)
         assert '<span class="status-badge status-warning">待处理</span>' in html
         assert ">warning<" not in html
+
+    def test_image_caption_omits_unknown_status_and_falls_back_to_title(self):
+        event = _make_event(title="部署 <完成>\n通知")
+        event.status = "info"
+        assert render_image_caption(event) == "部署 <完成> 通知"
 
     def test_opencode_child_card_shows_escaped_session_hierarchy_in_order(self):
         event = _make_event(title="子会话 <Child>")
