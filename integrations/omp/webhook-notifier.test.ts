@@ -112,7 +112,7 @@ describe("OMP V2 运行闭环", () => {
     await advance(); expect(requests).toEqual([]);
     expect(c.emit("agent_end", end(reason))).toBeUndefined();
     expect(requests).toEqual([]);
-    await advance();
+    await advance(150);
     expect(requests[0].body.status).toBe(status);
     expect(requests[0].body.cycle.durationMs).toBe(20000);
     expect(requests[0].body.event).toBe("omp.run_finished");
@@ -139,7 +139,7 @@ describe("OMP V2 运行闭环", () => {
   it("工具错误不升级为任务失败；中止优先于重试失败", async () => {
     const c = client(); c.emit("agent_start"); c.emit("tool_result", { toolName: "bash", isError: true, content: SENTINEL });
     c.emit("agent_end", end()); await advance(); expect(requests[0].body.status).toBe("completed");
-    c.emit("agent_start"); c.emit("auto_retry_end", { success: false }); c.emit("agent_end", end("aborted")); await advance();
+    c.emit("agent_start"); c.emit("auto_retry_end", { success: false }); c.emit("agent_end", end("aborted")); await advance(150);
     expect(requests[1].body.status).toBe("aborted"); expect(requests[1].body.cycle.ref).not.toBe(requests[0].body.cycle.ref);
   });
   it("恢复没有开始记录时不拿旧消息证明成功或伪造耗时", async () => {
@@ -180,12 +180,14 @@ describe("交互请求观察", () => {
   ];
   it.each(cases)("%s 快速解决、取消、重复和无 UI 不过期提醒", async (open, close, kind, idKey) => {
     const c = client(); c.emit("agent_start");
+    const reminders = () => requests.filter(r => r.body.event === "omp.action_required");
     const e = { [idKey]: `raw-${SENTINEL}`, sessionId: c.ctx.sessionManager.getSessionId(), toolName: "ask", input: SENTINEL, planContent: SENTINEL };
-    c.emit(open, e); c.emit(close, { ...e, approved: false, choice: undefined }); c.emit(open, e); await advance(1000); expect(requests).toEqual([]);
-    c.ctx.hasUI = false; c.emit(open, { ...e, [idKey]: "no-ui" }); await advance(1000); expect(requests).toEqual([]);
+    // 计划评审取消会结束本轮（见下方计划专项），此处用保持选择检验通用的重复与快速解决语义。
+    c.emit(open, e); c.emit(close, { ...e, approved: false, choice: kind === "plan_review" ? "keep" : undefined }); c.emit(open, e); await advance(1000); expect(reminders()).toEqual([]);
+    c.ctx.hasUI = false; c.emit(open, { ...e, [idKey]: "no-ui" }); await advance(1000); expect(reminders()).toEqual([]);
     c.ctx.hasUI = true; c.emit(open, { ...e, [idKey]: "visible" }); c.emit(open, { ...e, [idKey]: "visible" }); await advance(150);
-    expect(requests[0].body.interaction.kind).toBe(kind); expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+    expect(reminders()[0].body.interaction.kind).toBe(kind); expect(reminders()).toHaveLength(1);
+    expect(JSON.stringify(reminders()[0].body)).not.toContain(SENTINEL);
   });
   it("待处理提醒按 OpenCode 问题卡携带题干、标题、选项描述与推荐；审批带工具名、计划带标题，不带答案与正文", async () => {
     const c = client(); c.emit("agent_start");
@@ -486,16 +488,48 @@ describe("交互观察区间", () => {
     root.emit("tool_call", { toolName: "ask", toolCallId: "ask", input: SENTINEL });
     await advance(20);
     root.emit("tool_approval_resolved", { sessionId, toolCallId: "approval", approved: false });
-    root.emit("plan_review_resolved", { sessionId, reviewId: "plan", choice: undefined });
+    root.emit("plan_review_resolved", { sessionId, reviewId: "plan", choice: "keep" });
     root.emit("tool_result", { toolName: "ask", toolCallId: "ask", content: SENTINEL });
     await advance(10);
     root.emit("tool_result", { toolName: "ask", toolCallId: "ask" });
     root.emit("agent_end", end()); await advance();
     const t = rootPayload().userWaitTimeline;
     expect(t.partial).toBe(false);
-    expect(t.intervals.map(i => [i.kind, i.result, i.durationMs])).toEqual([["approval", "cancelled", 20], ["plan_review", "cancelled", 20], ["ask", "resolved", 20]]);
+    expect(t.intervals.map(i => [i.kind, i.result, i.durationMs])).toEqual([["approval", "cancelled", 20], ["plan_review", "resolved", 20], ["ask", "resolved", 20]]);
     expect(requests).toHaveLength(1);
     expect(JSON.stringify(t)).not.toContain(SENTINEL);
+  });
+  it("计划提交先报 aborted 时不发中止：评审沿用原周期，批准后转新会话静默收束，取消则按中止报告", async () => {
+    for (const choice of ["execute", undefined]) {
+      requests = [];
+      const root = client(); root.emit("agent_start");
+      const sessionId = root.ctx.sessionManager.getSessionId();
+      await advance(3000); root.emit("agent_end", end("aborted"));
+      root.emit("plan_review_requested", { sessionId, reviewId: "plan", title: "计划" });
+      await advance(150);
+      expect(requests.map(r => [r.body.event, r.body.status])).toEqual([["omp.action_required", "action_required"]]);
+      expect(requests[0].body.cycle.partial).toBe(false);
+      await advance(5000); root.emit("plan_review_resolved", { sessionId, reviewId: "plan", choice });
+      if (choice) {
+        const next = context(); root.emit("session_switch", { reason: "new" }, next);
+        root.emit("agent_start", {}, next); await advance(20000); root.emit("agent_end", end(), next); await advance();
+        expect(requests.map(r => [r.body.event, r.body.status])).toEqual([["omp.action_required", "action_required"], ["omp.run_finished", "completed"]]);
+        expect(requests[1].body.session.ref).not.toBe(requests[0].body.session.ref);
+      } else {
+        await advance();
+        expect(requests.map(r => [r.body.event, r.body.status])).toEqual([["omp.action_required", "action_required"], ["omp.run_finished", "aborted"]]);
+        expect(requests[1].body.userWaitTimeline.intervals.map((i: { kind: string; result: string }) => [i.kind, i.result])).toEqual([["plan_review", "cancelled"]]);
+      }
+      root.emit("session_shutdown"); await advance(40000);
+    }
+  });
+  it("交互中止在暂缓窗口后照常报告；窗口内退出仍按中止，不改成未知", async () => {
+    const a = client(); a.emit("agent_start"); a.emit("agent_end", end("aborted"));
+    await advance(149); expect(requests).toEqual([]);
+    await advance(1); expect(requests.map(r => r.body.status)).toEqual(["aborted"]);
+    const b = client(); b.emit("agent_start"); b.emit("agent_end", end("aborted")); b.emit("session_shutdown"); await advance();
+    expect(requests.map(r => r.body.status)).toEqual(["aborted", "aborted"]);
+    expect(requests[1].body.cycle.reasons).not.toContain("shutdown");
   });
   it("孤立解决与收束时未解决只显示边界，不补造开始／结束", async () => {
     const root = client(); root.emit("agent_start");

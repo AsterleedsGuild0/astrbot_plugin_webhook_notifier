@@ -33,6 +33,8 @@ type Run = {
   initialJobs: Set<string>; observedSegments: number; timelineReasons: Set<TimelineReason>;
   retrying: boolean; retryFailed: boolean; pendingEnd?: Status; stop?: Status; model?: string; thinking?: string;
   metadataChanged: boolean; metadataMissing: boolean; closed: boolean; yielded?: boolean;
+  /** 交互式根运行以 aborted 收束时暂缓发送：OMP 计划模式提交计划时先 agent_end(aborted) 再打开评审。 */
+  abortTimer?: NodeJS.Timeout; abortAt?: { now: number; mono: number }; planHandoff?: boolean;
 };
 type Binding = { owner: symbol; key: string; touched: number; run?: Run; snapshot?: () => Snapshot };
 type Config = { url: string; token: string; timeout: number; instance?: string };
@@ -339,8 +341,10 @@ export default (pi: ExtensionAPI): void => {
   }
   function notify(run: Run, status: Status, interaction?: Interaction): void {
     if (!config || interaction?.kind === "background_wait") return;
-    const now = Date.now();
-    const monoNow = Math.floor(performance.now());
+    // 暂缓发送的中止按 agent_end 时刻计时，不把等待窗口算进耗时。
+    const at = interaction ? undefined : run.abortAt;
+    const now = at?.now ?? Date.now();
+    const monoNow = at?.mono ?? Math.floor(performance.now());
     const payload: Envelope = {
       event: interaction ? "omp.action_required" : "omp.run_finished", version: 2, id: ref(), emittedAt: new Date(now).toISOString(),
       session: { ...run.session }, cycle: cycle(run, now, monoNow, !interaction), status,
@@ -350,9 +354,13 @@ export default (pi: ExtensionAPI): void => {
     };
     enqueue({ payload, config, live: interaction ? () => interaction.open && !run.closed : () => true, log });
   }
-  function finish(binding: Binding, status: Status, reason?: Reason): void {
+  function finish(binding: Binding, status: Status, reason?: Reason, silent = false): void {
     const run = binding.run;
     if (!run || run.closed) return;
+    if (run.abortTimer) {
+      // 暂缓中的中止被其他收束抢先：仍按观察到的 aborted 报告，不追加切换／退出原因。
+      clearTimeout(run.abortTimer); run.abortTimer = undefined; status = "aborted"; reason = undefined;
+    }
     if (reason) run.reasons.add(reason);
     linkRuns();
     if (run.root === run) {
@@ -367,7 +375,7 @@ export default (pi: ExtensionAPI): void => {
     }
     run.closed = true;
     // 常规子代理收束由主通知汇总；异常仍独立提醒，便于在 root 缺失时发现问题。
-    if (run.session.scope !== "subagent" || status !== "completed") notify(run, status);
+    if (!silent && (run.session.scope !== "subagent" || status !== "completed")) notify(run, status);
   }
   function get(ctx: ExtensionContext): Binding | undefined {
     const now = Math.floor(performance.now());
@@ -456,7 +464,10 @@ export default (pi: ExtensionAPI): void => {
   observe("agent_start", (_, ctx) => {
     const binding = get(ctx);
     if (binding) {
+      // 暂缓窗口内开始新一轮（没有计划评审）：先按中止收束上一轮。
+      if (binding.run?.abortTimer) finish(binding, "aborted");
       const run = begin(binding, ctx, true);
+      run.planHandoff = undefined;
       const now = Math.floor(performance.now());
       if (run.background?.open) { run.background.open = false; run.background.ended = now; run.background.result = "resolved"; run.background = undefined; }
       if (run.span?.ended !== undefined) {
@@ -513,7 +524,16 @@ export default (pi: ExtensionAPI): void => {
     const observedStatus = run.stop ?? (run.yielded && (last === "unknown" || last === "aborted") ? "completed" : last) ?? "unknown";
     const status = run.start === undefined && observedStatus === "completed" ? "unknown" : observedStatus;
     if (run.retrying) { run.pendingEnd = status; return; }
-    finish(binding, status === "aborted" ? "aborted" : run.retryFailed ? "failed" : status);
+    const final = status === "aborted" ? "aborted" : run.retryFailed ? "failed" : status;
+    if (final === "aborted" && run.session.scope === "root" && ctx.hasUI) {
+      // OMP 计划模式提交计划时先 agent_end(aborted)，随后同步打开评审；暂缓同一提醒窗口，评审打开则不发“已中止”。
+      run.abortAt = { now: Date.now(), mono: Math.floor(performance.now()) };
+      run.abortTimer = setTimeout(() => {
+        try { if (run.abortTimer) finish(binding, "aborted"); } catch { log("observation_failed"); }
+      }, 150);
+      return;
+    }
+    finish(binding, final);
   });
   observe("tool_approval_requested", (event, ctx) => {
     if (event.sessionId !== ctx.sessionManager.getSessionId()) return;
@@ -523,10 +543,20 @@ export default (pi: ExtensionAPI): void => {
   observe("tool_approval_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.toolCallId, "approval", event.approved ? "resolved" : "cancelled"); });
   observe("plan_review_requested", (event, ctx) => {
     if (event.sessionId !== ctx.sessionManager.getSessionId()) return;
+    const run = get(ctx)?.run;
+    if (run?.abortTimer && !run.closed) { clearTimeout(run.abortTimer); run.abortTimer = undefined; run.abortAt = undefined; }
     const title = text(event.title, 180);
     request(ctx, event.reviewId, "plan_review", title ? { title } : undefined);
   });
-  observe("plan_review_resolved", (event, ctx) => { if (event.sessionId === ctx.sessionManager.getSessionId()) resolve(ctx, event.reviewId, "plan_review", event.choice === undefined ? "cancelled" : "resolved"); });
+  observe("plan_review_resolved", (event, ctx) => {
+    if (event.sessionId !== ctx.sessionManager.getSessionId()) return;
+    resolve(ctx, event.reviewId, "plan_review", event.choice === undefined ? "cancelled" : "resolved");
+    const binding = get(ctx);
+    if (!binding?.run || binding.run.closed) return;
+    // 取消评审即本轮计划结束，按中止报告；选择后若随即切到新会话执行，交由新会话通知，旧周期静默收束。
+    if (event.choice === undefined) finish(binding, "aborted");
+    else binding.run.planHandoff = true;
+  });
   observe("tool_call", (event, ctx) => { if (event.toolName === "ask") request(ctx, event.toolCallId, "ask", askDetail(event.input)); });
   observe("tool_result", (event, ctx) => {
     if (event.toolName === "ask") resolve(ctx, event.toolCallId, "ask", event.isError ? "unknown" : "resolved");
@@ -536,7 +566,7 @@ export default (pi: ExtensionAPI): void => {
     }
   });
   for (const name of ["session_switch", "session_branch", "session_tree"] as const) observe(name, (_, ctx) => {
-    if (active) finish(active, "unknown", "session_changed");
+    if (active) finish(active, "unknown", "session_changed", active.run?.planHandoff === true);
     active = undefined;
     get(ctx);
   });
