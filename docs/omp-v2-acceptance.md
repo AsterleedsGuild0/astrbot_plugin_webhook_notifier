@@ -31,7 +31,7 @@
 
 ### 未覆盖与限制
 
-- 原生 OMP：只验证实际版本，尚未在原生 producer 中执行上述生命周期、UI 或标准 eval 间接 ask；Bun 注入公开事件只是确定性回归，不冒充原生覆盖。
+- 原生 OMP：本节为本地确定性层；原生 producer 的生命周期、审批／计划／ask 结果见下文[原生 OMP 验收](#原生-omp-验收)。Bun 注入公开事件只是确定性回归，不冒充原生覆盖。
 - 线上 AstrBot：未部署、未使用专用测试 Endpoint／线上凭据、未核对 QQ 实际消息。HTTP smoke 的消息边界是内存接收器。
 - #29 的默认 HTML 字段检查不是视觉验收；真实渲染表面由 #31 单独记录。
 - V1 `stop` 缺最终续跑证据，保留 unknown；只有 V2 规范 completed 进入最短时长过滤。重试取消／耗尽没有公开结构化判别字段，不读取原始错误猜原因。
@@ -58,7 +58,7 @@
 
 ### 未覆盖与限制
 
-- 上述“批量／eval／worker”来自确定性公开事件序列，不是实际 task、eval 或 workpool 调度证明。原生 OMP 事件层尚未执行；实际二进制仍只验过 `18.12.6` 版本。
+- 上述“批量／eval／worker”来自确定性公开事件序列；实际 task、eval `agent()` 与 workpool 调度的原生观察见下文[原生 OMP 验收](#原生-omp-验收)。
 - 仅关联已加载且证据唯一的实例。快照为 owner scoped 有界可见记录，不能恢复全历史；未加载、跨模块副本、跨进程、旧事件缺 cycle 身份等情况不宣称精确归属或完整计时。
 - #30 的规范字段和区间并集已验收；卡片入口、分类标签、真实渲染和附图降级由 #31 验证。线上目标消息仍未授权、未执行。
 - #30 已达到 #31 本地展示集成的依赖基线；原生与线上验收未勾选，Issue 与总任务保持未完成。
@@ -90,8 +90,65 @@
 
 ### 未覆盖与验收门禁
 
-- 原生 OMP：实际版本为 18.12.6，但未执行真实 producer 的最终收束、重试／维护／后台恢复、审批／计划／直接及 eval 间接 ask、task／eval／workpool 场景。缺口是独立原生场景授权、隔离配置与入口、专用测试目标及对应测试凭据；不得使用正在生效的生产 Hook 或继承其环境补验。
-- 线上 AstrBot：已验证插件安装、真实 T2I 渲染和私聊目标消息，但输入为合成 V2 事件；原生 OMP 运行产生的线上通知、群目标及 OpenCode／Markdown 的线上回归未单独记录。
+- 原生 OMP：实际版本 18.12.6 的真实 producer 场景已在隔离环境执行，结果见下文[原生 OMP 验收](#原生-omp-验收)。
+- 线上 AstrBot：已验证插件安装、真实 T2I 渲染和私聊目标消息；原生 OMP 产生的线上私聊通知见下文。群目标及 OpenCode／Markdown 的线上回归未单独记录。
 - 旧端拒绝证据使用基线 Adapter＋当前 Server 传输链路，不声称重新安装并启动过整个旧版本 AstrBot。
 - 卡片布局与显示结论仅限已列出的有界输入和浏览器版本；时间线表示可见观察，不保证完整调度历史、精确人工等待或业务目标成功。
-- #29 → #30 → #31 的本地依赖工作已经推进，线上合成投递已通过；原生 OMP 场景仍未勾选，Issue／总任务未关闭，不宣称 #28 整体完成。
+- #29 → #30 → #31 的本地依赖工作已经推进，线上合成投递已通过；原生场景结果与剩余缺口见下文。
+
+## 原生 OMP 验收
+
+### 环境与隔离
+
+- 日期 2026-10-24；OMP `omp/18.12.6`；线上 AstrBot v4.27.2 已加载测试包 `v2.0.0-test.20261024.1448.caption-inline`。客户端源为本仓库 `integrations/omp/webhook-notifier.ts`，验收过程中先后为 `9b9b1c4`、`03b1ac9`、`9ea46cf`（各场景注明）。
+- 隔离：子进程环境从空白构造，`HOME` 与 `PI_CODING_AGENT_DIR` 指向仓库 `tmp/omp-native/home/`，`--no-extensions --no-skills --no-rules`，`--hook` 显式加载仓库 Hook，cwd 为 `tmp/omp-native/work/<场景>`。未继承调用方 shell 中的生产 `OMP_SESSION_WEBHOOK_*`。真实 `~/.omp` 配置与 `hooks/post/webhook-notifier.ts` 未改动，后者 SHA-256 仍与 `bdcae29` 中的 Hook 一致；Hook 同步器保持停止。
+- 模型：隔离 `models.yml` 只含本机 CPA provider 结构，`apiKey` 写环境变量名，由启动进程从用户 shell 环境只读注入，凭据不落盘。模型 `cpa/deepseek-flash`，thinking `low`。
+- 测试目标：`verify-receiver` 中的测试 Endpoint（官方 Bot「626」私聊接收账号），不是生产 Endpoint。Hook 发往本机 `127.0.0.1` 记录代理，代理原样转发并记录请求体与响应，不记录 Token。模型请求经本机故障代理转发到 CPA，仅重试场景注入 HTTP 错误。
+- 观察：另以 `-e` 显式加载一个仅供验收的事件记录器，记录公开事件类型与结构字段（stopReason、willContinue、awaitingAsyncWork、toolName、审批／计划结果、子代理身份），不记录正文、参数或输出，不返回控制值。驱动方式：RPC（`--mode rpc-ui`，Hook 可见 `hasUI=true`）；计划评审只在交互 TUI 中可达，用伪终端驱动。
+- 读回：`.agents/scripts/tencent3year-napcat-receiver-probe messages <since> 原生验收`。会话名统一以“原生验收 <场景>”开头，图片前文字即 `【状态】会话名`。每次读回最多下载 8 张图片，未下载的图片只核对存在与顺序。
+- 原始证据保存在 `tmp/omp-native/logs/`（`events.jsonl`、`webhook.jsonl`、`model.jsonl`、`runs.jsonl`、各场景 RPC／TTY 日志、`probe-*.json`），本地产物，不随 ZIP 分发。
+
+### 场景结果
+
+“通知”列为 Hook 实际发出的 V2 请求与服务端响应；“接收端”为读回的同条消息文字与图片。服务端默认最短完成时长 15 秒，短于该值的完成通知按设计跳过。
+
+| 场景 | OMP 实际公开事件 | 通知 | 接收端 |
+| --- | --- | --- | --- |
+| 正常结束 | `agent_start` → bash → `session_stop(stop)` → `agent_end(stop)` | `run_finished` completed，17.4s，无缺口；200 `ok` delivered | 【已完成】原生验收 S1，主卡 1056×711 |
+| 失败（注入 400） | `session_stop(error)` → `agent_end(error)` | failed，33ms；delivered（失败不受时长过滤） | 【失败】原生验收 S2-failed |
+| 中止（RPC `abort`） | bash 结果 isError → `agent_end(aborted)`，无 `session_stop` | aborted，19.6s；delivered | 【已中止】原生验收 S2-aborted |
+| 审批批准 | `tool_approval_requested` → 12s 后 `tool_approval_resolved(approved)` | `action_required` approval（150ms 后）；完成 completed 21.8s，等待区间 `approval:resolved:complete`；均 delivered | 【待处理】… · 等待工具审批；【已完成】主卡＋时间线附图 1872×901 |
+| 审批拒绝 | `tool_approval_resolved(approved=false)`，模型随后正常结束 | `action_required` delivered；完成 completed 14.1s，`approval:cancelled` → 200 `skipped`（`completion_below_duration_threshold`） | 仅待处理卡；完成卡按策略未发 |
+| ask 回答 | `tool_call(ask)` → 20s 后 `tool_result(ask)` | `action_required` ask，携带题干、标题与选项；完成 completed 21.6s，`ask:resolved` | 待处理卡显示 Color／Which color do you prefer?／1 Red 2 Blue；完成卡＋附图 |
+| ask 取消 | 取消后 `tool_result(ask, isError)`，OMP 随即 `agent_end(aborted)` | `action_required`；最终 aborted，`ask:unknown`（无结构化取消字段，按契约不读错误猜原因） | 【待处理】；【已中止】＋附图 |
+| 计划评审 | 见下文“待决策” | — | — |
+| 重试恢复 | 注入 7 次 503：`auto_retry_start(1/10)` → `agent_end(willContinue, error)` → `agent_start` → `auto_retry_end(success)` → 正常结束 | 仅 1 条 completed，40.6s | 【已完成】原生验收 S4-retry-recovered |
+| 重试耗尽 | 10 次 `auto_retry_start`，每次 `agent_end(willContinue, error)`；`auto_retry_end(success=false)` → `agent_end(error)` | 仅 1 条 failed，217s；中间续跑不发送 | 【失败】原生验收 S4-retry-exhausted |
+| 后台续跑 | 异步 bash 后 `agent_end(willContinue, awaitingAsyncWork)`；任务完成后 `agent_start` → `agent_end(stop)` | 1 条 completed 21.9s，`background_wait:resolved:complete` | 【已完成】＋附图 |
+| task 多代理 | 父会话 `task` 派生 2 个 `sub` depth 1，子代理 `agent_end(stop)`，无 `session_stop` | 子代理不单独通知；根 completed，时间线 2 段 completed | 【已完成】原生验收 S5-task，主卡 1056×1175 |
+| eval `agent()` | `before_subagent_spawn(invocationKind=eval)` ×2；子代理以 `yield` 提交后 `agent_end(toolUse)` | `9b9b1c4`：子代理各发一条 unknown，根时间线为未知（缺陷）；`9ea46cf`：仅根 completed，2 段 completed | 修复前 2 条【未知】；修复后 1 条【已完成】 |
+| workpool | 2 个 worker `yield` 成功后 OMP 中止后续回合，`agent_end(aborted)` | `03b1ac9`：每个 worker 单独 aborted（缺陷）；`9ea46cf`：仅根 completed，2 段 completed | 修复前 4 条【已中止】；修复后 1 条【已完成】，时间线显示 accept-pool-1／2 已完成 |
+
+重试恢复首次只注入 1 次 503，被 provider 传输层重试吸收，未触发 `auto_retry_*`；每次自动重试内含 6 个传输层请求，因此改为注入 7 次。
+
+### 原生验收发现与修正
+
+- 默认 5 秒超时（`03b1ac9` 修正）：服务端同步渲染并投递，单图实测约 9～10 秒、主卡加附图约 19～21 秒。5 秒默认使已送达的请求超时重试，服务端返回 `idempotency_replay`；改 15 秒后附图场景仍触发同样回放。默认改为 30 秒后，后续场景均为单次 delivered。
+- 子代理 `yield` 收束（`9ea46cf` 修正）：eval 子代理结尾为 `toolUse`、workpool worker 结尾为 `aborted`，原映射分别得到 unknown／aborted 并单独提醒。成功 `yield` 后的这两种结尾现计为完成；`yield` 失败仍按原状态。
+- 退出中断：运行中关闭 RPC stdin 时只观察到 `session_shutdown`、没有 `agent_end`，Hook 按 `shutdown` 生成的 unknown 未在进程退出前发出；TUI 以 Ctrl-C 退出的同类场景则送达。与“退出只尽力移交”的契约一致，未改动。
+
+### 待决策：计划评审
+
+交互 TUI 中 `/plan` 后模型写计划并提交评审，实际事件顺序为：`agent_end(aborted)` → `plan_review_requested`；批准（execute）后 `plan_review_resolved(choice=execute)` → `session_switch(reason=new)`，在新会话中执行计划；Esc 取消后 `plan_review_resolved(choice 缺省)`，之后没有新的运行事件。当前 Hook 据此发出：
+
+1. 【已中止】：计划提交被 OMP 记为 aborted，在评审打开前已收束；
+2. 【待处理】… · 等待计划审阅：评审属于新的观察周期，缺少开始（`missing_start`）；
+3. 批准后【未知】（`session_changed`）；取消后直到进程退出才有【未知】（`shutdown`）。执行计划的新会话另行通知（本次 4.3s，按时长策略跳过）。
+
+V2 线协议能表达上述每条消息，但一次计划评审产生“已中止＋待处理＋未知”三条通知，与用户意图不符。需要在 Hook 端取舍处理方式，记录在此，暂未实现。
+
+### 未覆盖
+
+- 群目标、OpenCode／Markdown 的线上回归、插件市场安装未在本轮执行。
+- 计划评审的处理方式待定；审批“为本会话批准”等其他选项、eval 间接 ask、嵌套多层子代理、上下文压缩与会话分支未在原生环境触发。
+- 接收端图片只人工抽查了 ask 待处理卡、ask 完成卡、计划中止卡与 workpool 完成卡；其余仅核对文字、同条与图片尺寸。
