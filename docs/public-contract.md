@@ -44,13 +44,13 @@
 
 | 状态 | 证据与含义 |
 | --- | --- |
-| `completed` | 最终 `agent_end`，无重试未决／失败证据，最后 assistant 的结构化 `stopReason=stop`。表示本次运行正常结束，不证明业务目标通过验收。 |
+| `completed` | 最终 `agent_end`，无重试未决／失败证据，最后 assistant 的结构化 `stopReason=stop`。子代理成功调用 `yield` 后以 `toolUse`（eval `agent()`）或 `aborted`（workpool 提交全部条目后由 OMP 中止）结束，同样计为完成。表示本次运行正常结束，不证明业务目标通过验收。 |
 | `failed` | 最终 assistant `stopReason=error`，或重试已报告失败且运行最终收束。 |
-| `aborted` | 最终 assistant `stopReason=aborted`；优先于重试失败分类。 |
+| `aborted` | 最终 assistant `stopReason=aborted`；优先于重试失败分类。有 UI 的根运行暂缓 150ms 发送，耗时按 `agent_end` 计；同会话随即打开计划评审时不发送（OMP 计划模式提交计划即以 aborted 收束本轮），取消该评审时才按 aborted 报告。 |
 | `action_required` | 有 UI 的可观察交互请求仍未解决，仅用于 `omp.action_required`。ask 事件不证明 UI 已呈现。 |
 | `unknown` | 缺少可靠结果、其他 stopReason、会话切换／退出等未完成观察。不得显示为完成。 |
 
-重试失败事件没有结构化“取消／耗尽”判别字段；不能解析 `finalError` 文本猜测原因。没有最终 `agent_end` 时不凭重试结果补造完成。会话切换只在已发生的 switch／branch／tree 后隔离旧周期，不在可取消的 before 事件中提前终结。
+重试失败事件没有结构化“取消／耗尽”判别字段；不能解析 `finalError` 文本猜测原因。没有最终 `agent_end` 时不凭重试结果补造完成。会话切换只在已发生的 switch／branch／tree 后隔离旧周期，不在可取消的 before 事件中提前终结；计划评审选择后紧随的切换视为把计划交给新会话执行，旧周期静默收束，不发送 unknown。
 
 交互用本地 session + agent + 请求 ID 配对去重。150ms 后及每次发送前再次检查；已解决／取消／无 UI 不补发提醒。审批 requested 早于上游 UI 检查，计划 review resolved 表示界面关闭且可能包含处理时间；ask 只看公开 `tool_call/tool_result`，主调用与标准 eval 间接调用沿用同一边界，不扫描 eval 代码。请求无对应结束时保留不完整语义。已发出的提醒不能撤回；解决后不再重试。
 
