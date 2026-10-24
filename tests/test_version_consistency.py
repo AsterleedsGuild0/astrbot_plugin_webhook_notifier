@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -55,3 +56,20 @@ def test_release_flags_distinguish_rc_and_stable_versions() -> None:
     assert package_plugin.release_flags("v1.2.0") == (False, True)
     assert package_plugin.release_flags("v1.3.0") == (False, True)
     assert package_plugin.release_flags("v1.0.0") == (False, True)
+
+
+def test_omp_client_package_and_marketplace_track_plugin_version() -> None:
+    """marketplace 安装版本取自客户端包 package.json，须与插件版本一致；目录条目可解析到该包。"""
+    metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
+    client = json.loads((ROOT / "integrations/omp/package.json").read_text(encoding="utf-8"))
+    catalog = json.loads((ROOT / ".omp-plugin/marketplace.json").read_text(encoding="utf-8"))
+
+    assert Version(client["version"]) == Version(metadata["version"].removeprefix("v"))
+    assert catalog["name"] == "astrbot-webhook-notifier"
+    [entry] = catalog["plugins"]
+    assert entry["name"] == "omp-webhook-notifier"
+    assert entry["name"].casefold() != catalog["name"].casefold()
+    assert "version" not in entry or Version(entry["version"]) == Version(client["version"])
+    source = (ROOT / entry["source"]).resolve()
+    assert source == (ROOT / "integrations/omp").resolve()
+    assert client["omp"]["extensions"] == ["./index.ts"] and (source / "index.ts").is_file()

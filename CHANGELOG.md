@@ -4,7 +4,7 @@
 
 ### 升级须知
 
-- **OMP 客户端改为 extension 包，手动复制过单文件 Hook 的用户需要迁移。** 客户端由 `integrations/omp/` 整个目录组成（`package.json`、入口 `index.ts` 与同目录模块），不再是单个 `webhook-notifier.ts`。迁移时先退出 OMP，删除 `~/.omp/agent/hooks/post/webhook-notifier.ts`（及项目级副本、旧 `onebot.ts`），再把整个目录复制为 `~/.omp/agent/extensions/webhook-notifier/`，然后重启 OMP。新旧入口同时存在会使每次运行发送两条通知。环境变量不变。步骤见[接入指南](docs/client-integration.md#从单文件-hook-迁移)。
+- **OMP 客户端改为 extension 包，手动复制过单文件 Hook 的用户需要迁移。** 客户端由 `integrations/omp/` 整个目录组成（`package.json`、入口 `index.ts` 与同目录模块），不再是单个 `webhook-notifier.ts`。迁移时先退出 OMP，删除 `~/.omp/agent/hooks/post/webhook-notifier.ts`（及项目级副本、旧 `onebot.ts`），再通过 OMP marketplace 安装（`/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier`、`/marketplace install omp-webhook-notifier@astrbot-webhook-notifier`），或把整个目录复制为 `~/.omp/agent/extensions/webhook-notifier/`，二者只选一种，然后重启 OMP。新旧入口同时存在会使每次运行发送两条通知。环境变量不变。步骤见[接入指南](docs/client-integration.md#从单文件-hook-迁移)。
 
 ### 变更
 
@@ -12,6 +12,7 @@
 - `scripts/smoke_omp_hook.py` 改用 `--package <目录>`，按 `package.json#omp.extensions` 解析入口。
 - `scripts/sync_omp_hook.py` 改为同步整个客户端包目录到 OMP 扩展目录：整包摘要判稳、隐藏暂存目录写好后换入，冲突时整目录备份；源缺失或外置盘未挂载时保留部署副本，目标被独立修改后锁存暂停。
 - 原生 OMP 验收工具整理进 `scripts/omp_native/`：隔离 HOME、本机代理、RPC／TUI 场景驱动与事件记录器；测试 Endpoint 从外部文件读取，不继承调用方 shell 的生产变量。
+- #33 本仓库提供 OMP marketplace（`.omp-plugin/marketplace.json`）：`/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier` 后 `/marketplace install omp-webhook-notifier@astrbot-webhook-notifier` 安装客户端，`/marketplace update` 加 `/marketplace upgrade` 升级，安装或升级后需重启 OMP。版本取自 `integrations/omp/package.json`，发布门禁要求与插件版本一致。
 - 补测计划评审“保存”“细化”：保存后 OMP 切到新会话，旧周期静默收束；细化在同一周期继续并按最终评审结果收束。不存在一直不收束的问题。
 
 ## v2.1.0 - 2026-10-24

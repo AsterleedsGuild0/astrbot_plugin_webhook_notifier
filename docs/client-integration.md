@@ -50,9 +50,28 @@ OMP 自带 Bun/TypeScript 运行能力，客户端包没有运行依赖，不需
 
 模块之间只用相对路径导入，不依赖仓库其他位置；整个目录复制到任何位置都能独立加载。
 
-### 复制到扩展目录
+### 通过 OMP marketplace 安装（推荐）
 
-推荐使用 OMP 自动发现：OMP 会加载扩展目录下一级子目录中 `package.json#omp.extensions` 声明的入口。二选一安装：
+本仓库根目录的 `.omp-plugin/marketplace.json` 是一个只含本客户端的 marketplace，名为 `astrbot-webhook-notifier`，插件名 `omp-webhook-notifier`，版本取自 `integrations/omp/package.json`，与插件发布版本一致。在 OMP 中执行：
+
+```text
+/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier
+/marketplace install omp-webhook-notifier@astrbot-webhook-notifier
+```
+
+命令行等价写法为 `omp plugin marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier` 与 `omp plugin install omp-webhook-notifier@astrbot-webhook-notifier`。安装只写磁盘：OMP 把客户端包缓存到 `~/.omp/plugins/cache/plugins/`，并在 `~/.omp/plugins/node_modules/omp-webhook-notifier` 建立链接；**安装后要重启 OMP 才会加载**。配置仍是下文的环境变量，包内不含也不保存任何凭据。
+
+| 操作 | 命令 | 说明 |
+| --- | --- | --- |
+| 升级 | `/marketplace update astrbot-webhook-notifier`，再 `/marketplace upgrade omp-webhook-notifier@astrbot-webhook-notifier` | `update` 重新拉取本仓库的目录与客户端文件，`upgrade` 按 `package.json` 版本判断并重装；省略插件名会升级全部有新版本的插件。先升级 AstrBot 服务端，升级后重启 OMP |
+| 禁用 | `/plugins disable omp-webhook-notifier@astrbot-webhook-notifier` | 保留安装，`/plugins enable …` 恢复；重启 OMP 后生效 |
+| 卸载 | `/marketplace uninstall omp-webhook-notifier@astrbot-webhook-notifier` | 删除缓存与链接；重启 OMP 后不再发送 |
+
+marketplace 从本仓库默认分支读取；客户端版本只在插件发版时变化，`upgrade` 因此只会在新版本发布后更新。marketplace 安装、手动复制与[本地开发同步](#本地开发同步)三种方式只选一种，同时存在会重复发送。
+
+### 手动复制到扩展目录
+
+不使用 marketplace 时，可以把客户端包复制到 OMP 扩展目录。OMP 会加载扩展目录下一级子目录中 `package.json#omp.extensions` 声明的入口。二选一安装：
 
 - 用户级：`~/.omp/agent/extensions/webhook-notifier/`，对该用户启动的 OMP 生效。
 - 项目级：`<项目根>/.omp/extensions/webhook-notifier/`，只在以该目录为 cwd 启动的 OMP 中生效。
@@ -77,14 +96,15 @@ v2.1.0 及更早版本以单文件 `webhook-notifier.ts` 放在 `hooks/post/` �
 
 1. 退出正在运行的 OMP 会话。
 2. 删除旧入口：`~/.omp/agent/hooks/post/webhook-notifier.ts`、项目级 `.omp/hooks/post/webhook-notifier.ts`，以及更早的 `onebot.ts`；如需保留，移到自动发现目录之外。若在 `settings.json` 或 `config.yml` 的 `extensions` 中显式写过旧文件路径，一并删除。
-3. 按上一节安装客户端包（或使用 marketplace 安装，二者只选一种）。
+3. 按上文通过 marketplace 安装，或手动复制客户端包，二者只选一种。
 4. 自检只剩一个入口：
 
    ```bash
    ls ~/.omp/agent/hooks/post/ ~/.omp/agent/extensions/
+   omp plugin list
    ```
 
-   `hooks/post/` 中不应再有 `webhook-notifier.ts` 或 `onebot.ts`，`extensions/` 中只有 `webhook-notifier/` 一个客户端目录。
+   `hooks/post/` 中不应再有 `webhook-notifier.ts` 或 `onebot.ts`；marketplace 安装时 `extensions/` 中不应再有客户端目录，手动复制时 `omp plugin list` 中不应有 `omp-webhook-notifier`。
 5. 重启 OMP。`/reload-plugins` 不会重新加载扩展模块，必须新开 OMP 进程。执行一次超过最短完成时长的任务，确认只收到一条通知。
 
 环境变量沿用原有设置，无需修改。

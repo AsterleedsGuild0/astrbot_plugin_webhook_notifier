@@ -91,6 +91,8 @@ uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --prob
 1. 确认目标版本号一致：
    - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.1.0`。
    - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.1.0`，`uv.lock` 根项目版本同步更新。
+   - `integrations/omp/package.json` 的 `version` 与插件版本等价。OMP marketplace 的安装与升级都按这个版本判断，Release workflow 会校验它与 tag 一致；`.omp-plugin/marketplace.json` 不写版本。
+   - marketplace 读取默认分支，客户端改动只在发版时推送到 `main`，避免用户装到尚未发布的客户端。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
    - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.1.0 - 2026-10-24`，包含升级须知（服务端先升级、V1 结束显示为未知、图片前文字、待处理卡改版、重启 OMP、重新复制 Hook、超时变量）。
    - 发布准备与 dry-run 不创建 `v2.1.0` tag；仅在门禁通过后推送 tag 触发正式 Release。

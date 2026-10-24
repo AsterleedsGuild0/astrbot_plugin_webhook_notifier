@@ -1,0 +1,20 @@
+{
+  "name": "astrbot-webhook-notifier",
+  "owner": {
+    "name": "AsterleedsGuild0"
+  },
+  "metadata": {
+    "description": "AstrBot Webhook Notifier 的 OMP 客户端"
+  },
+  "plugins": [
+    {
+      "name": "omp-webhook-notifier",
+      "source": "./integrations/omp",
+      "description": "把 OMP 运行收束与待处理交互以 V2 Webhook 发送到 AstrBot Webhook Notifier；配置使用 OMP_SESSION_WEBHOOK_* 环境变量",
+      "homepage": "https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier",
+      "repository": "https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier",
+      "license": "MIT",
+      "category": "productivity"
+    }
+  ]
+}

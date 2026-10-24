@@ -124,7 +124,7 @@ JSON
 
 ### OMP 快速接入
 
-先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用默认创建的 Markdown Endpoint 发送 OMP payload。把本仓库或 Release ZIP 中完整的 [`integrations/omp/`](integrations/omp/) 客户端包复制为 `~/.omp/agent/extensions/webhook-notifier/`（`*.test.ts` 可省略），在启动 OMP 的环境中配置 `OMP_SESSION_WEBHOOK_URL` 和 `OMP_SESSION_WEBHOOK_TOKEN`，然后重启 OMP。项目级安装、从单文件 Hook 迁移和 macOS 开发同步见[客户端接入文档](docs/client-integration.md)；服务端部署见[专题教程](docs/end-to-end-setup.md)。
+先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用默认创建的 Markdown Endpoint 发送 OMP payload。在 OMP 中执行 `/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier` 和 `/marketplace install omp-webhook-notifier@astrbot-webhook-notifier` 安装客户端（也可把 Release ZIP 中完整的 [`integrations/omp/`](integrations/omp/) 目录复制为 `~/.omp/agent/extensions/webhook-notifier/`），在启动 OMP 的环境中配置 `OMP_SESSION_WEBHOOK_URL` 和 `OMP_SESSION_WEBHOOK_TOKEN`，然后重启 OMP。项目级安装、从单文件 Hook 迁移和 macOS 开发同步见[客户端接入文档](docs/client-integration.md)；服务端部署见[专题教程](docs/end-to-end-setup.md)。
 
 OMP 原生只提供扩展加载和生命周期事件，HTTP POST 由客户端实现；`ONEBOT_*` 环境变量作为历史回退仍可使用。
 

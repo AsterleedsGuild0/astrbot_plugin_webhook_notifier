@@ -69,6 +69,7 @@ jobs:
           uv run --frozen python - <<'PY'
           from __future__ import annotations
 
+          import json
           import os
           import re
           import tomllib
@@ -102,6 +103,14 @@ jobs:
                   "pyproject.toml PEP 440 version "
                   f"{project_version!r} is not equivalent to tag {tag!r}"
               )
+          # OMP marketplace 安装版本取自客户端包 package.json；目录条目不另写版本，写了也必须一致。
+          client_version = json.loads(Path("integrations/omp/package.json").read_text(encoding="utf-8")).get("version")
+          if not isinstance(client_version, str) or Version(client_version) != Version(tag.removeprefix("v")):
+              errors.append(f"integrations/omp/package.json version {client_version!r} is not equivalent to tag {tag!r}")
+          catalog = json.loads(Path(".omp-plugin/marketplace.json").read_text(encoding="utf-8"))
+          for entry in catalog.get("plugins", []):
+              if "version" in entry and Version(str(entry["version"])) != Version(tag.removeprefix("v")):
+                  errors.append(f"marketplace entry {entry.get('name')!r} version {entry['version']!r} != tag {tag!r}")
 
           if errors:
               raise SystemExit("\n".join(errors))

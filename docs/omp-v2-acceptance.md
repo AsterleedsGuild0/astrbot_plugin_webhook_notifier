@@ -182,6 +182,33 @@
 - 外置盘未挂载以重命名目录模拟，未做物理拔盘；登录重启后 LaunchAgent 的恢复未测。
 - 符号链接方案未采用：OMP 18.12.6 的扩展目录发现会跳过悬空链接（`discovery/helpers.ts`），盘未挂载时客户端会静默失效，属源码依据，未做原生实测。
 
+## #33：通过 OMP marketplace 分发
+
+### 变更组
+
+- 仓库根目录新增 `.omp-plugin/marketplace.json`：marketplace `astrbot-webhook-notifier`，唯一插件 `omp-webhook-notifier`，`source` 为 `./integrations/omp`，不写版本，安装与升级比较都读取客户端包 `package.json` 的 `version`（OMP 18.12.6 `marketplace/manager.ts` 的 `#resolveCatalogVersion` 对相对路径来源按 plugin.json → 目录版本 → package.json 的顺序解析）。
+- 发布门禁：Release workflow 的版本校验要求 `integrations/omp/package.json` 与 tag 等价，目录条目如写了版本也须一致；`tests/test_version_consistency.py` 同时校验客户端版本与 `metadata.yaml` 一致、目录可解析到客户端包。本地以 v2.2.0 tag 和改写后的客户端版本试运行该脚本，均按预期失败。
+- 接入文档补充 marketplace 安装、升级、禁用、卸载与迁移。AstrBot 插件 ZIP 的文件清单与加入目录前完全相同，不含 `.omp-plugin/`。
+
+### 已执行验证（隔离 HOME，发布前）
+
+隔离根 `tmp/omp-native-mkt/`，`OMP_NATIVE_LOAD=installed`（不加 `--no-extensions`），marketplace 来源为仓库内容的本地副本 `tmp/mkt-src/`（OMP 归类为 local 来源）。slash command 通过 RPC 发送。
+
+| 步骤 | OMP 实际结果 | 通知 |
+| --- | --- | --- |
+| `/marketplace add <本地副本>` | `Added marketplace: astrbot-webhook-notifier` | — |
+| `/marketplace install omp-webhook-notifier@astrbot-webhook-notifier` | 安装 2.1.0：缓存 `astrbot-webhook-notifier___omp-webhook-notifier___2.1.0`，`node_modules/omp-webhook-notifier` 指向该缓存，lockfile `enabled: true` | 新开进程运行 S1：1 条【已完成】原生验收 S7-mkt-installed |
+| 副本中 `package.json` 改为 2.1.1 后 `/marketplace upgrade` | `Upgraded 1 plugin(s): … 2.1.0 -> 2.1.1`，链接改指 2.1.1 缓存，旧缓存删除 | 1 条【已完成】S7-mkt-upgraded |
+| `/plugins disable …` | `(disabled)`，lockfile `enabled: false` | 新开进程运行 S1：0 条 |
+| `/plugins enable …` 后 `/marketplace uninstall …` | `No marketplace plugins installed`，缓存与链接均删除 | 0 条 |
+
+local 来源每次直接读目录，`upgrade` 前无需 `update`；GitHub 来源读取的是 marketplace 克隆，需先 `/marketplace update`。
+
+### 未覆盖与限制
+
+- 从 GitHub 添加本仓库、按文档安装并在旧单文件 Hook 并存时迁移，需要目录文件推送到默认分支后才能执行，记录在发版后的补充验收中。
+- 升级以本地副本改版本号模拟，未从两个真实发布版本之间升级。
+
 ## 原生验收工具
 
 `scripts/omp_native/` 提供隔离环境下的原生 OMP 验收，日志、隔离 HOME 与工作目录在被 Git 忽略的 `tmp/omp-native/`。
@@ -197,4 +224,5 @@ uv run --frozen python scripts/omp_native/scenarios.py plan S3-plan save     # �
 - 子进程环境从空白构造，不继承调用方 shell 的生产 `OMP_SESSION_WEBHOOK_*`；Webhook 请求发往本机代理，再原样转发到测试 Endpoint，日志记录请求体与响应，不记录 Token。
 - 模型 provider 只把真实 `models.yml` 中一个 provider 的结构写入隔离 HOME，`apiKey` 写成环境变量名，值启动时从登录 shell 只读注入，不落盘。`OMP_NATIVE_PROVIDER`／`OMP_NATIVE_MODEL` 可改 provider 与模型。
 - `OMP_NATIVE_LOAD=package`（默认）只显式加载仓库客户端包；`installed` 不加 `--no-extensions`，使用隔离 HOME 中的扩展目录或已安装插件。
+- `OMP_NATIVE_ROOT` 可换一套隔离根（如 marketplace 验收用的 `tmp/omp-native-mkt`）。代理与场景必须使用同一个根，否则代理把请求记到另一个根的 `logs/webhook.jsonl`，场景读不到通知。
 - `event-recorder.ts` 只记录公开事件类型与结构字段，不记录正文、参数或输出；每个场景在 `logs/runs.jsonl` 记切片索引。
