@@ -143,8 +143,8 @@
 
 ### 未覆盖
 
-- 群目标、OpenCode／Markdown 的线上回归、插件市场安装未在本轮执行。
-- 审批“为本会话批准”、eval 间接 ask 与会话分支未在原生环境触发。嵌套多层子代理（深度 2）与运行中上下文压缩已在 #34／#35 验收中补测，见下文 S13-nested、S13-compaction，结论符合契约。
+- 群目标与 OpenCode／Markdown 的线上回归未执行：需要另建群 Endpoint、Markdown Endpoint 及对应接收账号。插件市场安装见 #33 一节。
+- 审批“为本会话批准”、eval 间接 ask、会话分支（branch／fork／tree）、嵌套多层子代理与运行中上下文压缩已补测，见下文 #34／#35 与 #37 两节，均符合契约。
 - 计划评审“保存”“细化”已于 2026-10-24 实测（见上表），没有出现“一直不收束”：保存在确认路径后立即切到新会话，旧周期静默收束；细化在同一周期内继续，最终按第二次评审的结果收束。保存后不再发送收束通知，与“批准后交给执行会话”的静默交接一致，不作为缺陷。保存路径对话框中按 Esc 的分支未测。
 - 接收端图片只人工抽查了 ask 待处理卡、ask 完成卡、计划中止卡（修正前）、计划待处理卡、计划取消卡与 workpool 完成卡；其余仅核对文字、同条与图片尺寸。
 - 上述未覆盖项的补测由 #37 跟踪。
@@ -279,6 +279,20 @@ local 来源每次直接读目录，`upgrade` 前无需 `update`；GitHub 来源
 - Release：<https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v2.2.0>，tag 指向 `219d407`，非草稿、非预发布、Latest；Actions dry-run `40117680049` 与正式 run `40117780500` 均成功。资产 `astrbot_plugin_webhook_notifier-v2.2.0.zip` 2,978,003 bytes，SHA-256 `1c31b1148774669ca4d6b733b9d9605292cfeb0dedaf526d0b2f6cd9890178bc`；与本地正式包 60 个条目、全部文件内容一致，含完整客户端包、不含测试与 `.omp-plugin/`。
 - 线上：`deploy_dev.py --zip <Release 资产> --verify` 把线上换成 v2.2.0 原件，4 条固定冒烟 delivered，接收端读回与基准图一致。
 - 本机：默认同步器从单文件绑定迁移到包目录绑定（源 `integrations/omp`，目标 `~/.omp/agent/extensions/webhook-notifier`），已启动，`status` 为 `in_sync`、`contents_equal=true`；部署目录 8 个文件与 Release 资产中的客户端包逐字节一致，权限 `0600`。旧 `hooks/post/webhook-notifier.ts`（与 `b210195` 逐字节一致，SHA-256 `d9154b13…`）及旧绑定的 `config.json`／`state.json` 移入同步器实例的 `backups/20261025-v2.1.0-file-binding/`。`hooks/post/` 只剩无关的 `openai-codex-endpoint.ts`，`extensions/` 只有 `webhook-notifier/`，`~/.omp/plugins` 不存在。为不向生产 Endpoint 发送，部署目录的加载以隔离 OMP 显式加载该目录验证（S15-deployed-copy，1 条 completed 送达测试 Endpoint）；已在运行的真实 OMP 进程需重启后才会加载新包。
+
+## #37 补测：为本会话批准、eval 间接 ask、会话分支
+
+2026-10-25，OMP 18.12.6，隔离 HOME，显式加载仓库客户端包（`9511b69`），测试 Endpoint。场景在 `scripts/omp_native/scenarios.py`（`S16-*` 与 `tree`），接收端读回 `probe-37.json`。
+
+| 场景 | OMP 实际公开事件 | 通知 | 结论 |
+| --- | --- | --- | --- |
+| 审批“为本会话批准” | 首次 `tool_approval_requested` → 选 “Approve bash for this session” → `tool_approval_resolved(approved)`；同会话第二次 bash 不再出现任何审批事件 | 首轮：1 条【待处理】等待工具审批＋1 条【已完成】（等待区间 `approval:resolved:complete`）；第二轮无待处理卡，completed 13.2s 按时长策略跳过 | 符合契约：自动批准没有公开事件，不发提醒，也不在时间线中记交互 |
+| eval 间接 ask | `tool_call(eval)` → `tool_call(ask, toolCallId=js-ask-…)` → 20s 后 `tool_result(ask)` → `tool_result(eval)` | 1 条【待处理】等待问题回答＋1 条【已完成】，`ask:resolved:complete` | 符合契约：间接调用与主调用走同一边界 |
+| RPC `branch`（后台等待中） | 第二轮 `agent_end(willContinue, awaitingAsyncWork)` 后执行 `branch` 回到首条用户消息：`session_branch(reason=branch)` | 旧周期 1 条【未知】，`reasons=[session_changed, unpaired_interaction]`，后台等待区间 `right_censored`；分支上的下一轮正常 completed | 符合契约：切换后隔离旧周期并标注不完整 |
+| RPC `fork`（后台等待中） | `session_switch(reason=fork)` | 旧周期 1 条【未知】`session_changed`；新会话后续运行在后台任务结果送达后 completed，等待区间 `background_wait:resolved` | 符合契约 |
+| TUI `/tree`（后台等待中） | 选中首轮 assistant 回复：`session_tree` | 旧周期 1 条【未知】`session_changed`、后台等待 `right_censored` | 符合契约。驱动脚本退出时又发出 1 条 `shutdown` 的【未知】，来自退出而不是 `/tree` |
+
+观察：后台等待被会话切换截断时，`cycle.reasons` 同时带 `unpaired_interaction`，因为收束时把仍打开的后台等待一并按未配对处理。卡片只显示“观察范围 不完整”，不影响结论，未改动。
 
 ## 原生验收工具
 

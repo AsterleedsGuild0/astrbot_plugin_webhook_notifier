@@ -253,6 +253,7 @@ class Tui:
     """伪终端中的交互式 OMP；RPC 没有 ``/plan``，计划评审只能在 TUI 中触发。原始终端输出写入 ``<名称>.tty.log``。"""
 
     DOWN = b"\x1b[B"
+    UP = b"\x1b[A"
 
     def __init__(self, name: str, *args: str) -> None:
         self.name = name

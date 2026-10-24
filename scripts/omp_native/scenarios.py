@@ -8,6 +8,7 @@
     uv run --frozen python scripts/omp_native/scenarios.py proxies      # 前台运行本机代理（另开终端或后台）
     uv run --frozen python scripts/omp_native/scenarios.py S1 S2-failed # 执行 RPC 场景
     uv run --frozen python scripts/omp_native/scenarios.py plan S3-plan resolve|cancel|save|refine
+    uv run --frozen python scripts/omp_native/scenarios.py tree S16-tree
 
 ``OMP_NATIVE_LOAD=installed`` 时不显式加载仓库包，改用隔离 HOME 中已安装的插件（marketplace 验收）。
 每个场景在 ``logs/runs.jsonl`` 追加一行切片索引；会话名统一以“原生验收 <场景>”开头，便于接收端读回。
@@ -304,6 +305,66 @@ async def s9_nested(o):
                                 "then report that output. Wait for the result, then reply with exactly: nested done", timeout=900))
 
 
+# ---- #37 补测：为本会话批准、eval 间接 ask、会话分支 ----
+
+def approve_session(seen: list[dict]):
+    """优先选“本会话内都允许”类选项；记录实际看到的选项，便于核对 OMP 文案。"""
+    def answer(frame):
+        seen.append({k: frame.get(k) for k in ("method", "title", "options")})
+        if frame["method"] == "select":
+            opts = frame.get("options", [])
+            pick = next((x for x in opts if "session" in x.lower()), None) or next((x for x in opts if x.lower().startswith(("allow", "approve", "yes"))), opts[0] if opts else "")
+            return {"value": pick}
+        return {"confirmed": True} if frame["method"] == "confirm" else {"cancelled": True}
+    return answer
+
+
+@scenario("S16-approval-session", ASK, 2, settle=120)
+async def s16_approval_session(o):
+    seen: list[dict] = []
+    ui_policy(o, approve_session(seen), 12)
+    first = strip(await o.prompt("Run the bash command `sleep 8 && echo first` exactly once, then reply with exactly: first done"))
+    await asyncio.sleep(5)
+    second = strip(await o.prompt("Run the bash command `sleep 12 && echo second` exactly once, then reply with exactly: second done"))
+    return {"first": first.get("status"), "second": second.get("status"), "ui": seen}
+
+
+@scenario("S16-eval-ask", YOLO, 2, settle=120)
+async def s16_eval_ask(o):
+    ui_policy(o, ask_answer, 20)
+    return strip(await o.prompt("Call the eval tool exactly once with language js and exactly this code:\n"
+                                "const answer = await tool.ask({ questions: [{ id: \"color\", question: \"Which color do you prefer?\", header: \"Color\", "
+                                "options: [{ label: \"Red\" }, { label: \"Blue\" }] }] });\nprint(JSON.stringify(answer));\n"
+                                "Then reply with exactly: eval asked", timeout=600))
+
+
+@scenario("S16-branch", YOLO, 3, settle=150)
+async def s16_branch(o):
+    """首轮正常结束；第二轮启动后台任务并结束本轮（后台等待中周期未收束），随后 branch 回首条用户消息，观察旧周期收束。"""
+    first = strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: first"))
+    entries = (await o.call({"type": "get_entries"}))["data"]["entries"]
+    user = next(e for e in entries if e.get("type") == "message" and (e.get("message") or {}).get("role") == "user")
+    second = strip(await o.prompt("Start the bash command `sleep 40 && echo late` with async: true so it runs in the background, "
+                                  "and end your turn immediately without waiting.", timeout=300))
+    await asyncio.sleep(3)
+    branched = strip(await o.call({"type": "branch", "entryId": user["id"]}))
+    await asyncio.sleep(5)
+    third = strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: after branch"))
+    return {"first": first.get("status"), "second": second.get("status"), "branch": branched.get("success"), "third": third.get("status")}
+
+
+@scenario("S16-fork", YOLO, 2, settle=150)
+async def s16_fork(o):
+    """后台等待中执行 fork：会话切换到新文件，旧周期应以 session_changed 收束。"""
+    await o.prompt("Start the bash command `sleep 40 && echo late` with async: true so it runs in the background, "
+                   "and end your turn immediately without waiting.", timeout=300)
+    await asyncio.sleep(3)
+    forked = strip(await o.call({"type": "fork"}))
+    await asyncio.sleep(5)
+    after = strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: after fork"))
+    return {"fork": forked.get("data"), "after": after.get("status")}
+
+
 PLAN_PROMPT = ("Plan how to create a file named hello.txt containing the single word hi in the current directory. "
                "Keep the plan to two short steps, write it to the plan file, then request plan review immediately without asking questions.")
 # 计划评审菜单（OMP 18.12.6）：Approve and execute／compact context／keep context／Refine plan／Save and quit。
@@ -347,6 +408,35 @@ def plan(name: str, mode: str) -> None:
     report(name, since, 0, result, w0, e0, ["tui", mode])
 
 
+def tree(name: str) -> None:
+    """/tree 只在 TUI 中可用：首轮正常结束，第二轮留下后台任务后结束本轮，再用 /tree 跳回较早节点，观察旧周期收束。"""
+    w0, e0 = len(rows("webhook.jsonl")), len(rows("events.jsonl"))
+    since = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    tui = harness.Tui(name, "--approval-mode", "yolo")
+    result: dict[str, Any] = {"ready": tui.wait_screen("π >", 90)}
+    tui.pump(3)
+    tui.type_line(f"/rename {MARKER} {name}")
+    tui.pump(2)
+    tui.type_line("Run the bash command `sleep 16` exactly once, then reply with exactly: first")
+    result["first"] = bool(tui.wait_event(e0, lambda e: e["type"] == "agent_end", 300))
+    tui.pump(5)
+    mark = len(rows("events.jsonl"))
+    tui.type_line("Start the bash command `sleep 60 && echo late` with async: true so it runs in the background, and end your turn immediately without waiting.")
+    result["background"] = bool(tui.wait_event(mark, lambda e: e["type"] == "agent_end" and e.get("awaitingAsyncWork"), 300))
+    tui.pump(3)
+    tui.type_line("/tree")
+    tui.pump(3)
+    # 光标初始在当前叶子；上移两项到首轮的 assistant 回复（选用户消息会改为回填草稿，选当前叶子是空操作）。
+    for _ in range(2):
+        tui.keys(harness.Tui.UP)
+    tui.keys(b"\r", 2)
+    moved = tui.wait_event(mark, lambda e: e["type"] == "session_tree", 30)
+    result["tree"] = bool(moved)
+    tui.pump(45)  # 等待旧周期通知发送
+    tui.quit()
+    report(name, since, 0, result, w0, e0, ["tui", "tree"])
+
+
 def main(argv: list[str]) -> None:
     if not argv:
         raise SystemExit(__doc__)
@@ -357,6 +447,8 @@ def main(argv: list[str]) -> None:
         harness.proxies()
     elif command == "plan":
         plan(argv[1], argv[2])
+    elif command == "tree":
+        tree(argv[1])
     else:
         # “场景:别名”以别名作为会话名与日志名，便于同一场景在不同部署形态下重复执行。
         for item in argv:
