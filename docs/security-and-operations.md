@@ -105,7 +105,7 @@ OMP 原生提供公开事件与扩展加载机制；HTTP POST 与 V2 协议由�
 | --- | --- | --- |
 | `OMP_SESSION_WEBHOOK_URL` | `ONEBOT_WEBHOOK_URL` | 完整 Endpoint URL；应只在受控环境中组合和保存 |
 | `OMP_SESSION_WEBHOOK_TOKEN` | `ONEBOT_WEBHOOK_TOKEN` | 独立 Bearer Token；不得写入 URL |
-| `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | 请求超时毫秒值；默认约 5 秒 |
+| `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | 请求超时毫秒值；默认 30 秒（图片模式下服务端同步渲染，不建议调低） |
 
 当前维护源只外发有界显式名称、cwd basename、匿名关联、时间和结构化状态；不外发正文、完整路径、原始 ID、工具参数、计划或原始错误。名称仍可能含业务信息；不要从正文截取名称。
 

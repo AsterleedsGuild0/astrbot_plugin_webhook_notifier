@@ -72,7 +72,7 @@ OMP 只发现 `post` 目录中的直接子文件，不递归扫描其子目录�
 ```bash
 export OMP_SESSION_WEBHOOK_URL='<Base URL与Endpoint Path组合后的完整Endpoint URL>'
 export OMP_SESSION_WEBHOOK_TOKEN='<创建Endpoint时单独返回的Bearer Token>'
-export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
+export OMP_SESSION_WEBHOOK_TIMEOUT_MS='30000'
 ```
 
 可以把变量配置在 shell 启动配置、受控包装启动脚本或服务管理器的环境配置中。环境变量必须实际传入启动 OMP 的进程；设置后需要重启 OMP。当前没有上游确认的 OMP 自动加载 `.env` 约定，不要仅创建 `.env` 后假设变量已经生效。
@@ -130,7 +130,7 @@ omp --hook /path/to/webhook-notifier.ts
 2. 在与 Bot 的聊天中创建或查看 Endpoint，取得 Endpoint Path；Token 仅在创建、轮换或确认成功时独立交付。
 3. 在受控环境中组合 Base URL 与 Endpoint Path，避免在聊天、Issue、截图或 shell history 中公开完整 URL。
 4. 将完整 URL 配置到 Hook 的 URL 环境变量，将 Token 配置到独立 Token 环境变量。
-5. 如需调整请求超时，设置毫秒值；未设置时默认 5 秒。
+5. 如需调整请求超时，设置毫秒值；未设置时默认 30 秒。服务端同步渲染图片并投递，单图约 10 秒、主卡加时间线附图约 20 秒；超时过短会在已送达后触发重试，只得到幂等回放。
 6. 按本文安装并加载 Hook，再触发验证。
 
 安全占位示例：
@@ -138,7 +138,7 @@ omp --hook /path/to/webhook-notifier.ts
 ```bash
 export OMP_SESSION_WEBHOOK_URL='<受控环境中组合的完整URL>'
 export OMP_SESSION_WEBHOOK_TOKEN='<独立保存的Bearer Token>'
-export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
+export OMP_SESSION_WEBHOOK_TIMEOUT_MS='30000'
 ```
 
 不要把 Token 拼入 URL，也不要在公开材料中替换占位符为真实值。
@@ -151,7 +151,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='5000'
 | --- | --- | --- |
 | `OMP_SESSION_WEBHOOK_URL` | `ONEBOT_WEBHOOK_URL` | Webhook Notifier 的完整 Endpoint URL |
 | `OMP_SESSION_WEBHOOK_TOKEN` | `ONEBOT_WEBHOOK_TOKEN` | 创建 Endpoint 时单独返回的 Bearer Token；本插件鉴权必需 |
-| `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | 100–30000 的整数毫秒，默认 5000 |
+| `OMP_SESSION_WEBHOOK_TIMEOUT_MS` | `ONEBOT_WEBHOOK_TIMEOUT_MS` | 100–30000 的整数毫秒，默认 30000 |
 | `OMP_SESSION_WEBHOOK_INSTANCE` | 无 | 显式实例别名，清洗控制字符并限制 96 字符 |
 
 主变量优先；`ONEBOT_*` 仅保留已承诺的配置兼容。URL、Token 取首个非空值，URL 必须为 http(s)，不得含用户信息、查询或 fragment；Token 不得含换行。timeout 取首个有效值，否则使用默认值。凭据不读文件、不写日志。

@@ -94,7 +94,8 @@ function configuration(log: Log): Config | undefined {
   try {
     const url = new URL(raw);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || /[\r\n]/.test(token) || token.length > 4096) throw new Error();
-    let timeout = 5000;
+    // 服务端同步渲染并投递：单图约 10 秒，主卡加时间线附图实测约 20 秒；超时过短会在已送达后重试，只得到幂等回放。
+    let timeout = 30000;
     for (const key of ["OMP_SESSION_WEBHOOK_TIMEOUT_MS", "ONEBOT_WEBHOOK_TIMEOUT_MS"]) {
       const value = Number(process.env[key]);
       if (Number.isInteger(value) && value >= 100 && value <= 30000) { timeout = value; break; }
