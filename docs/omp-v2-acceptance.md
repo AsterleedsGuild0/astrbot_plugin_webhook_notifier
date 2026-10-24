@@ -123,6 +123,8 @@
 | ask 取消 | 取消后 `tool_result(ask, isError)`，OMP 随即 `agent_end(aborted)` | `action_required`；最终 aborted，`ask:unknown`（无结构化取消字段，按契约不读错误猜原因）；`b210195` 复测结果相同 | 【待处理】；【已中止】＋附图 |
 | 计划评审批准（TUI） | `/plan` 后 `agent_end(aborted)` → `plan_review_requested` → 15s 后 `plan_review_resolved(execute)` → `session_switch(new)`，新会话执行并 `agent_end(stop)` | `b210195`：只有 1 条 `action_required` plan_review，周期无缺口（5.7s）；旧周期静默收束；新会话 completed 3.5s 按时长策略跳过 | 仅【待处理】… · 等待计划审阅，卡片显示计划标题 |
 | 计划评审取消（TUI） | `agent_end(aborted)` → `plan_review_requested` → Esc 后 `plan_review_resolved(choice 缺省)`，之后无运行事件 | `b210195`：`action_required` 后 1 条 aborted 19.2s，`plan_review:cancelled:complete` | 【待处理】；【已中止】＋附图，交互区间“计划审阅 1” |
+| 计划评审保存（TUI，`b210195`） | `agent_end(aborted)` → `plan_review_requested` → 选“Save and quit”后 `plan_review_resolved(choice=save)`；OMP 随即弹出保存路径对话框，确认路径后写入计划文件并 `session_switch(new)`，之后无运行事件 | 只有 1 条 `action_required` plan_review（5.6s）；旧周期在 `session_switch` 时按交接静默收束，退出时没有补发【未知】 | 仅【待处理】… · 等待计划审阅 |
+| 计划评审细化（TUI，`b210195`） | 选“Refine plan”后 `plan_review_resolved(choice=refine)`；输入细化意见后同一会话 `agent_start`，再次 `agent_end(aborted)` → `plan_review_requested`；第二次评审按 Esc 取消 | 2 条 `action_required`（同一周期，3.8s／31.4s），随后 1 条 aborted 46.8s，`cycle.reasons` 为空 | 两张【待处理】；【已中止】 |
 | 重试恢复 | 注入 7 次 503：`auto_retry_start(1/10)` → `agent_end(willContinue, error)` → `agent_start` → `auto_retry_end(success)` → 正常结束 | 仅 1 条 completed，40.6s | 【已完成】原生验收 S4-retry-recovered |
 | 重试耗尽 | 10 次 `auto_retry_start`，每次 `agent_end(willContinue, error)`；`auto_retry_end(success=false)` → `agent_end(error)` | 仅 1 条 failed，217s；中间续跑不发送 | 【失败】原生验收 S4-retry-exhausted |
 | 后台续跑 | 异步 bash 后 `agent_end(willContinue, awaitingAsyncWork)`；任务完成后 `agent_start` → `agent_end(stop)` | 1 条 completed 21.9s，`background_wait:resolved:complete` | 【已完成】＋附图 |
@@ -142,6 +144,7 @@
 ### 未覆盖
 
 - 群目标、OpenCode／Markdown 的线上回归、插件市场安装未在本轮执行。
-- 计划评审的“保存”“细化”等其他选项、审批“为本会话批准”、eval 间接 ask、嵌套多层子代理、上下文压缩与会话分支未在原生环境触发。只选“保存”且不切换会话时，旧周期会保持打开直到下一轮或退出（推断，未实测）。
+- 审批“为本会话批准”、eval 间接 ask、嵌套多层子代理、上下文压缩与会话分支未在原生环境触发。
+- 计划评审“保存”“细化”已于 2026-10-24 实测（见上表），没有出现“一直不收束”：保存在确认路径后立即切到新会话，旧周期静默收束；细化在同一周期内继续，最终按第二次评审的结果收束。保存后不再发送收束通知，与“批准后交给执行会话”的静默交接一致，不作为缺陷。保存路径对话框中按 Esc 的分支未测。
 - 接收端图片只人工抽查了 ask 待处理卡、ask 完成卡、计划中止卡（修正前）、计划待处理卡、计划取消卡与 workpool 完成卡；其余仅核对文字、同条与图片尺寸。
-- 上述未覆盖项的补测由 #37 跟踪；计划评审“保存”“细化”在 #32～#35 实施开始时先实测。
+- 上述未覆盖项的补测由 #37 跟踪。
