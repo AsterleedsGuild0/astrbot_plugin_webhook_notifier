@@ -1,11 +1,13 @@
 # 更新日志
 
-## 未发布
+## v2.2.0 - 2026-10-25
+
+本版本把 OMP 客户端改为多模块 extension 包并通过本仓库的 OMP marketplace 分发（#32、#33），通知补充错误类型、所属主会话、会话时长与运行健康信号（#34、#35）。原生 OMP 18.12.6 的验收结果见 [OMP V2 验收记录](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/blob/v2.2.0/docs/omp-v2-acceptance.md)。
 
 ### 升级须知
 
 - **先升级服务端，再升级客户端。** v2.2.0 客户端会发送错误类型、资源信号等新增可选字段和凭据告警事件，v2.1.0 及更早的服务端会以 HTTP 400 拒绝这些请求（客户端视为永久错误、不重试，通知丢失）。新服务端继续接收旧客户端。
-- **OMP 客户端改为 extension 包，手动复制过单文件 Hook 的用户需要迁移。** 客户端由 `integrations/omp/` 整个目录组成（`package.json`、入口 `index.ts` 与同目录模块），不再是单个 `webhook-notifier.ts`。迁移时先退出 OMP，删除 `~/.omp/agent/hooks/post/webhook-notifier.ts`（及项目级副本、旧 `onebot.ts`），再通过 OMP marketplace 安装（`/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier`、`/marketplace install omp-webhook-notifier@astrbot-webhook-notifier`），或把整个目录复制为 `~/.omp/agent/extensions/webhook-notifier/`，二者只选一种，然后重启 OMP。新旧入口同时存在会使每次运行发送两条通知。环境变量不变。步骤见[接入指南](docs/client-integration.md#从单文件-hook-迁移)。
+- **OMP 客户端改为 extension 包，手动复制过单文件 Hook 的用户需要迁移。** 客户端由 `integrations/omp/` 整个目录组成（`package.json`、入口 `index.ts` 与同目录模块），不再是单个 `webhook-notifier.ts`。迁移时先退出 OMP，删除 `~/.omp/agent/hooks/post/webhook-notifier.ts`（及项目级副本、旧 `onebot.ts`），再通过 OMP marketplace 安装（`/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier`、`/marketplace install omp-webhook-notifier@astrbot-webhook-notifier`），或把整个目录复制为 `~/.omp/agent/extensions/webhook-notifier/`，二者只选一种，然后重启 OMP。新旧入口同时存在会使每次运行发送两条通知。环境变量不变。步骤见[接入指南](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/blob/v2.2.0/docs/client-integration.md#从单文件-hook-迁移)。
 
 ### 变更
 
