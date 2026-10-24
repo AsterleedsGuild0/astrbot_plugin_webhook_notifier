@@ -344,7 +344,9 @@ python3 "$SYNC" uninstall
 
 2026-10-22 已完成本机真实入口切换：旧 `onebot.ts` 移至默认实例的 `backups/onebot-before-cutover-20261022.ts.bak`，SHA-256 与切换前一致；新入口为 `~/.omp/agent/hooks/post/webhook-notifier.ts`，是权限 `0600` 的普通文件，与外置盘维护源内容一致。默认 LaunchAgent 已启动，检查时进程运行且状态为 `in_sync`、无冲突；OMP 配置仓库的忽略规则已放行新文件。
 
-该验收只覆盖部署文件、备份及同步服务，不证明当前 OMP Session 已重新加载 Hook。OMP 原生加载、线上投递、登录重启恢复和物理磁盘拔插未执行；此前源消失恢复使用临时路径操作模拟。
+该验收只覆盖部署文件、备份及同步服务，不证明当前 OMP Session 已重新加载 Hook。
+
+2026-10-25 已把本机默认实例迁移到包目录同步：旧单文件入口与旧绑定状态移入实例 `backups/20261025-v2.1.0-file-binding/`，新目标 `~/.omp/agent/extensions/webhook-notifier/` 与 v2.2.0 Release 资产中的客户端包逐字节一致，LaunchAgent 已启动、状态 `in_sync`。包目录同步器的回归（30 项）与隔离实测（源缺失、目标被独立修改、外置盘未挂载）见 [验收记录](omp-v2-acceptance.md#32omp-客户端改为-extension-包)。OMP 原生加载、线上投递、登录重启恢复和物理磁盘拔插未执行；此前源消失恢复使用临时路径操作模拟。
 
 ---
 

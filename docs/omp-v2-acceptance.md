@@ -204,9 +204,13 @@
 
 local 来源每次直接读目录，`upgrade` 前无需 `update`；GitHub 来源读取的是 marketplace 克隆，需先 `/marketplace update`。
 
+### 发版后补充验收（v2.2.0，2026-10-25）
+
+- 隔离 HOME（`OMP_NATIVE_LOAD=installed`）中按文档执行 `/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier`：`sourceType=github`；`/marketplace install omp-webhook-notifier@astrbot-webhook-notifier` 安装 2.2.0。
+- 迁移：同时保留 v2.1.0 单文件 `hooks/post/webhook-notifier.ts` 时，同一次运行发出 2 条通知（一条 v2.1.0 形态、一条带 `createdAt`／`signals` 的 v2.2.0 形态）；按文档删除旧文件后同类运行只发 1 条（S14-gh-with-old-hook／S14-gh-only）。
+
 ### 未覆盖与限制
 
-- 从 GitHub 添加本仓库、按文档安装并在旧单文件 Hook 并存时迁移，需要目录文件推送到默认分支后才能执行，记录在发版后的补充验收中。
 - 升级以本地副本改版本号模拟，未从两个真实发布版本之间升级。
 
 ## #34／#35：错误类型、会话信息与运行健康信号
@@ -269,6 +273,12 @@ local 来源每次直接读目录，`upgrade` 前无需 `update`；GitHub 来源
 - 凭据停用告警未原生触发；输出长度截断（`stopReason=length`）未原生触发，均只有合成回归与回环 HTTP。
 - 2026-10-24 23:00 前后线上 T2I 因定时群分析拥塞，部分原生通知渲染耗时 2～4 分钟或回退文本；客户端按同一 ID 重试，服务端返回幂等回放，每个场景只投递一次。该时段的读回不作为卡片画面证据，画面以 T2I 恢复后的重跑为准。
 - 新字段卡片画面不在固定基准图中；接收端截图见上表，需人工确认。
+
+## v2.2.0 发布与部署
+
+- Release：<https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v2.2.0>，tag 指向 `219d407`，非草稿、非预发布、Latest；Actions dry-run `40117680049` 与正式 run `40117780500` 均成功。资产 `astrbot_plugin_webhook_notifier-v2.2.0.zip` 2,978,003 bytes，SHA-256 `1c31b1148774669ca4d6b733b9d9605292cfeb0dedaf526d0b2f6cd9890178bc`；与本地正式包 60 个条目、全部文件内容一致，含完整客户端包、不含测试与 `.omp-plugin/`。
+- 线上：`deploy_dev.py --zip <Release 资产> --verify` 把线上换成 v2.2.0 原件，4 条固定冒烟 delivered，接收端读回与基准图一致。
+- 本机：默认同步器从单文件绑定迁移到包目录绑定（源 `integrations/omp`，目标 `~/.omp/agent/extensions/webhook-notifier`），已启动，`status` 为 `in_sync`、`contents_equal=true`；部署目录 8 个文件与 Release 资产中的客户端包逐字节一致，权限 `0600`。旧 `hooks/post/webhook-notifier.ts`（与 `b210195` 逐字节一致，SHA-256 `d9154b13…`）及旧绑定的 `config.json`／`state.json` 移入同步器实例的 `backups/20261025-v2.1.0-file-binding/`。`hooks/post/` 只剩无关的 `openai-codex-endpoint.ts`，`extensions/` 只有 `webhook-notifier/`，`~/.omp/plugins` 不存在。为不向生产 Endpoint 发送，部署目录的加载以隔离 OMP 显式加载该目录验证（S15-deployed-copy，1 条 completed 送达测试 Endpoint）；已在运行的真实 OMP 进程需重启后才会加载新包。
 
 ## 原生验收工具
 
