@@ -31,7 +31,21 @@ uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --dry-run
 
 - 凭据文件为 `KEY=VALUE`：`ASTRBOT_DASHBOARD_URL`、`ASTRBOT_API_KEY`（Dashboard 中创建、仅需 `plugin` scope）、`WEBHOOK_NOTIFIER_URL`、`WEBHOOK_NOTIFIER_TOKEN`。放在 Git 忽略的私有位置，不进入仓库。
 - 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上传或加载失败时，自动回装 `tmp/deploy-dev/last-deployed.json` 记录的上次成功包并以非零退出。
-- 冒烟卡片发送到凭据中的 Endpoint 目标；脚本只验证 HTTP 与业务结果，卡片显示效果仍需在目标聊天中查看。AstrBot 升级后先用 `--dry-run` 和接口源码核对路由是否变化。
+- 冒烟卡片发送到凭据中的 Endpoint 目标；默认冒烟只验证 HTTP 与业务结果，卡片显示效果仍需在目标聊天中查看。AstrBot 升级后先用 `--dry-run` 和接口源码核对路由是否变化。
+
+#### 接收端验收（`--verify`）
+
+```bash
+uv run --frozen python scripts/deploy_dev.py --env-file <Dashboard 凭据> --label <标签> \
+  --verify <测试 Endpoint 凭据> --probe <接收端探测命令>       # 部署后验收
+uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --probe <…>   # 只验收线上现有版本
+uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --probe <…> --update-baselines  # 有意改版后更新基准
+```
+
+- `--verify` 代替默认冒烟：只读取该文件中的 `WEBHOOK_NOTIFIER_URL`／`WEBHOOK_NOTIFIER_TOKEN`，不使用环境变量里的生产 Endpoint，避免测试卡发往生产聊天。测试 Endpoint 应绑定一个不接入任何会自动回复的 AstrBot 平台的接收账号。
+- 冒烟内容固定（会话名带 `[视觉基准]`，时间固定为 2026-01-01 08:00:30 CST），卡片逐像素确定。脚本按会话顺序读回消息并核对：每组文字与预期一字不差、文字与主卡在同一条消息（通知预览只显示最后一条，拆开发送会只剩“[图片]”）、图片张数（时间线用例为主卡加附图），再与 `tests/visual/baselines/<用例>-<序号>.png` 比较；超过 0.1% 像素差（通道差 > 16）即失败，并在接收图片旁写出差异图。
+- 基准图来自线上 T2I 实际渲染、经 QQ 接收端读回的 PNG，不在本机生成，以避开字体差异。有意改版时先人工看过本次收到的图片，再用 `--update-baselines` 覆盖并在同一提交中更新基准图；不要为了让验收通过而更新基准图。
+- `--probe` 是外部只读命令，接口为 `<probe> messages <since_rfc3339> <marker>`，输出 JSON：`ok`、`history_status`，以及按会话顺序排列的 `messages[]`（`marked`、命中标记时的 `text`、`segments[]` 中图片的 `format`／`width`／`height`／本地 `path`）。具体接收账号与读回方式属于部署环境，不在本仓库实现。
 
 ### 授权后的切换顺序
 

@@ -10,6 +10,10 @@
   WEBHOOK_NOTIFIER_URL    OMP Endpoint 完整 URL（冒烟用，可用 --skip-smoke 跳过）
   WEBHOOK_NOTIFIER_TOKEN  对应 Bearer Token
 
+接收端验收（--verify ENV_FILE --probe PROBE）：改为向 ENV_FILE 中的测试 Endpoint 发送固定内容的
+冒烟，由 PROBE 从接收账号读回消息，核对每条文字、文字与主卡在同一条消息、图片张数，并与
+tests/visual/baselines/ 中的基准图逐像素比较；首次或有意改版时加 --update-baselines。
+
 接口依据 AstrBot v4.27.2 的 /api/v1/plugins*；其他版本使用前先核对。
 """
 from __future__ import annotations
@@ -165,8 +169,9 @@ def _ref() -> str:
     return secrets.token_hex(16)
 
 
-def smoke_payloads(marker: str) -> list[tuple[str, dict]]:
-    end = datetime.now(timezone.utc).replace(microsecond=0)
+def smoke_payloads(marker: str, at: datetime | None = None) -> list[tuple[str, dict]]:
+    # at 固定时，卡片上的时间与时长都确定，接收端图片可与基准图逐像素比较。
+    end = at or datetime.now(timezone.utc).replace(microsecond=0)
     start = end - timedelta(seconds=30)
     iso = lambda value: value.isoformat().replace("+00:00", "Z")  # noqa: E731
 
@@ -214,10 +219,10 @@ def smoke_payloads(marker: str) -> list[tuple[str, dict]]:
     ]
 
 
-def smoke(url: str, token: str, version: str) -> list[dict]:
+def smoke(url: str, token: str, marker: str, at: datetime | None = None) -> list[dict]:
     results = []
     deadline = time.monotonic() + 30
-    for label, body in smoke_payloads(f"[部署验收 {version}]"):
+    for label, body in smoke_payloads(marker, at):
         request = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode(), method="POST")
         request.add_header("Authorization", f"Bearer {token}")
         request.add_header("Content-Type", "application/json")
@@ -243,6 +248,126 @@ def smoke(url: str, token: str, version: str) -> list[dict]:
     return results
 
 
+VISUAL_MARKER = "[视觉基准]"
+VISUAL_AT = datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc)
+# 冒烟用例 → 接收端应看到的文字（独立写出，不复用插件实现）与图片张数。
+VISUAL_EXPECTED = (
+    ("simple", "【已完成】[视觉基准] 简单完成", 1),
+    ("timeline", "【已完成】[视觉基准] 多代理时间线", 2),
+    ("failed", "【失败】[视觉基准] 失败", 1),
+    ("action", "【待处理】[视觉基准] 待处理 · 等待问题回答", 1),
+)
+BASELINE_DIR = ROOT / "tests" / "visual" / "baselines"
+PIXEL_TOLERANCE = 16
+MAX_DIFF_RATIO = 0.001
+RECEIVE_TIMEOUT_S = 120
+
+
+def read_env_values(path: Path) -> dict[str, str]:
+    values = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def run_probe(probe: Path, since: str) -> dict:
+    result = subprocess.run([str(probe), "messages", since, VISUAL_MARKER],
+                            capture_output=True, text=True, timeout=180)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise DeployError(f"接收端探测输出无法解析（exit {result.returncode}）") from None
+    if not payload.get("ok") or payload.get("history_status") != "ok":
+        raise DeployError("接收端探测失败：" + json.dumps(
+            {k: payload.get(k) for k in ("stage", "peer_matches", "history_status", "history_retcode")}, ensure_ascii=False))
+    return payload
+
+
+def group_received(messages: list[dict]) -> tuple[list[dict], int]:
+    """按会话顺序把文字与其后的图片归为一组；文字之前的孤立图片单独计数。"""
+    groups: list[dict] = []
+    orphans = 0
+    for message in messages:
+        segments = message.get("segments", [])
+        types = [segment.get("type") for segment in segments]
+        images = [segment for segment in segments if segment.get("type") == "image"]
+        if message.get("marked"):
+            # 文字必须与主卡同条：通知预览只显示最后一条，拆开发送会只剩“[图片]”。
+            groups.append({"caption": message.get("text", ""), "with_card": "image" in types, "images": images})
+        elif groups:
+            groups[-1]["images"].extend(images)
+        else:
+            orphans += len(images)
+    return groups, orphans
+
+
+def compare_image(actual: Path, baseline: Path, diff_path: Path) -> str | None:
+    from PIL import Image, ImageChops
+
+    with Image.open(actual) as a, Image.open(baseline) as b:
+        a, b = a.convert("RGB"), b.convert("RGB")
+        if a.size != b.size:
+            return f"尺寸 {a.size} 与基准 {b.size} 不同"
+        diff = ImageChops.difference(a, b).convert("L")
+        changed = sum(diff.histogram()[PIXEL_TOLERANCE + 1:])
+        ratio = changed / (a.size[0] * a.size[1])
+        if ratio <= MAX_DIFF_RATIO:
+            return None
+        diff.point(lambda value: 255 if value > PIXEL_TOLERANCE else 0).save(diff_path)
+        return f"{ratio:.2%} 像素与基准不同，差异图 {diff_path}"
+
+
+def verify(url: str, token: str, probe: Path, update_baselines: bool) -> list[str]:
+    """向测试接收端发送固定内容冒烟，读回并逐项核对；返回问题列表，空表示通过。"""
+    since = (datetime.now(timezone.utc) - timedelta(seconds=2)).replace(microsecond=0)
+    sent = smoke(url, token, VISUAL_MARKER, at=VISUAL_AT)
+    problems = [f"{item['case']}：HTTP {item['http']} 未送达" for item in sent if not item["ok"]]
+    if problems:
+        return problems
+    since_text = since.isoformat().replace("+00:00", "Z")
+    deadline = time.monotonic() + RECEIVE_TIMEOUT_S
+    while True:
+        groups, orphans = group_received(run_probe(probe, since_text).get("messages", []))
+        complete = len(groups) >= len(VISUAL_EXPECTED) and all(
+            len(group["images"]) >= expected for group, (_, _, expected) in zip(groups, VISUAL_EXPECTED))
+        if complete or time.monotonic() > deadline:
+            break
+        time.sleep(5)
+
+    if orphans:
+        problems.append(f"有 {orphans} 张图片出现在第一行文字之前")
+    if len(groups) != len(VISUAL_EXPECTED):
+        problems.append(f"收到 {len(groups)} 组带标记的消息，预期 {len(VISUAL_EXPECTED)} 组")
+    BASELINE_DIR.mkdir(parents=True, exist_ok=True)
+    for group, (key, caption, expected) in zip(groups, VISUAL_EXPECTED):
+        if group["caption"] != caption:
+            problems.append(f"{key}：文字为 {group['caption']!r}，预期 {caption!r}")
+        if not group["with_card"]:
+            problems.append(f"{key}：文字没有和主卡在同一条消息里")
+        if len(group["images"]) != expected:
+            problems.append(f"{key}：收到 {len(group['images'])} 张图片，预期 {expected} 张")
+        for index, image in enumerate(group["images"], start=1):
+            if image.get("format") != "png" or "path" not in image:
+                problems.append(f"{key}#{index}：图片不可用（{image.get('format') or image.get('error')}）")
+                continue
+            actual = Path(image["path"])
+            baseline = BASELINE_DIR / f"{key}-{index}.png"
+            print(f"接收 {key}#{index}：{image['width']}×{image['height']} {actual}")
+            if update_baselines:
+                baseline.write_bytes(actual.read_bytes())
+                continue
+            if not baseline.exists():
+                problems.append(f"{key}#{index}：缺少基准图 {baseline.relative_to(ROOT)}，确认画面后用 --update-baselines 生成")
+                continue
+            mismatch = compare_image(actual, baseline, actual.with_name(f"diff-{key}-{index}.png"))
+            if mismatch:
+                problems.append(f"{key}#{index}：{mismatch}")
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     source = parser.add_mutually_exclusive_group()
@@ -251,25 +376,49 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", type=Path, help="KEY=VALUE 格式的凭据文件；已有环境变量优先")
     parser.add_argument("--skip-smoke", action="store_true", help="只部署，不发送冒烟通知")
     parser.add_argument("--dry-run", action="store_true", help="只核对包与线上版本，不卸载、不上传")
+    parser.add_argument("--verify", type=Path, metavar="ENV_FILE",
+                        help="接收端验收：向该文件中的测试 Endpoint 发送固定内容冒烟，读回核对文字、顺序、图片数量并与基准图比较；"
+                             "代替默认冒烟，不读取环境变量中的 WEBHOOK_NOTIFIER_*")
+    parser.add_argument("--probe", type=Path, help="接收端探测命令，接口为 `<probe> messages <since> <marker>`；--verify 必填")
+    parser.add_argument("--update-baselines", action="store_true", help="--verify 时用本次收到的图片覆盖基准图")
+    parser.add_argument("--skip-deploy", action="store_true", help="不打包部署，只对线上现有版本执行 --verify")
     args = parser.parse_args(argv)
+    if (args.verify is None) != (args.probe is None):
+        parser.error("--verify 与 --probe 必须同时提供")
+    if (args.update_baselines or args.skip_deploy) and args.verify is None:
+        parser.error("--update-baselines 与 --skip-deploy 只用于 --verify")
     try:
         if args.env_file:
             load_env_file(args.env_file)
-        env = require_env(REQUIRED_ENV)
-        smoke_env = None if args.skip_smoke or args.dry_run else require_env(SMOKE_ENV)
-        zip_path = (args.zip or build_package(args.label)).resolve()
-        plugin_id, version = zip_identity(zip_path)
-        dashboard = Dashboard(env["ASTRBOT_DASHBOARD_URL"], env["ASTRBOT_API_KEY"])
-        if args.dry_run:
-            current = dashboard.plugin(plugin_id)
-            print(f"包：{zip_path.name}（{version}）；线上：{current.get('version') if current else '未加载'}")
-            return 0
-        deploy(dashboard, zip_path)
-        if smoke_env:
-            results = smoke(smoke_env["WEBHOOK_NOTIFIER_URL"], smoke_env["WEBHOOK_NOTIFIER_TOKEN"], version)
-            if not all(item["ok"] for item in results):
-                raise DeployError("冒烟未全部送达：" + json.dumps(results, ensure_ascii=False))
-            print(f"冒烟全部送达；请在聊天中确认 {len(results)} 张卡片的显示效果。")
+        verify_env = None
+        if args.verify:
+            values = read_env_values(args.verify)
+            missing = [name for name in SMOKE_ENV if not values.get(name)]
+            if missing:
+                raise DeployError(f"{args.verify} 缺少 {', '.join(missing)}")
+            verify_env = values
+        if not args.skip_deploy:
+            env = require_env(REQUIRED_ENV)
+            smoke_env = None if args.skip_smoke or args.dry_run or verify_env else require_env(SMOKE_ENV)
+            zip_path = (args.zip or build_package(args.label)).resolve()
+            plugin_id, version = zip_identity(zip_path)
+            dashboard = Dashboard(env["ASTRBOT_DASHBOARD_URL"], env["ASTRBOT_API_KEY"])
+            if args.dry_run:
+                current = dashboard.plugin(plugin_id)
+                print(f"包：{zip_path.name}（{version}）；线上：{current.get('version') if current else '未加载'}")
+                return 0
+            deploy(dashboard, zip_path)
+            if smoke_env:
+                results = smoke(smoke_env["WEBHOOK_NOTIFIER_URL"], smoke_env["WEBHOOK_NOTIFIER_TOKEN"], f"[部署验收 {version}]")
+                if not all(item["ok"] for item in results):
+                    raise DeployError("冒烟未全部送达：" + json.dumps(results, ensure_ascii=False))
+                print(f"冒烟全部送达；请在聊天中确认 {len(results)} 张卡片的显示效果。")
+        if verify_env:
+            problems = verify(verify_env["WEBHOOK_NOTIFIER_URL"], verify_env["WEBHOOK_NOTIFIER_TOKEN"],
+                              args.probe, args.update_baselines)
+            if problems:
+                raise DeployError("接收端验收未通过：\n- " + "\n- ".join(problems))
+            print("接收端验收通过" + ("；基准图已更新" if args.update_baselines else "；与基准图一致"))
         return 0
     except (DeployError, subprocess.CalledProcessError) as exc:
         print(f"部署失败：{exc}", file=sys.stderr)
