@@ -143,7 +143,7 @@
 
 ### 未覆盖
 
-- 群目标的线上投递未执行，需要另建群 Endpoint 和接收账号。OpenCode／Markdown 的线上回归不在补测范围内（当前以 OMP 为主力）。插件市场安装见 #33 一节。
+- 群目标已补测，见下文“#37 补测：群目标”。OpenCode／Markdown 的线上回归不在补测范围内（当前以 OMP 为主力）。插件市场安装见 #33 一节。
 - 审批“为本会话批准”、eval 间接 ask、会话分支（branch／fork／tree）、嵌套多层子代理与运行中上下文压缩已补测，见下文 #34／#35 与 #37 两节，均符合契约。
 - 计划评审“保存”“细化”已于 2026-10-24 实测（见上表），没有出现“一直不收束”：保存在确认路径后立即切到新会话，旧周期静默收束；细化在同一周期内继续，最终按第二次评审的结果收束。保存后不再发送收束通知，与“批准后交给执行会话”的静默交接一致，不作为缺陷。保存路径对话框中按 Esc 的分支未测。
 - 接收端图片只人工抽查了 ask 待处理卡、ask 完成卡、计划中止卡（修正前）、计划待处理卡、计划取消卡与 workpool 完成卡；其余仅核对文字、同条与图片尺寸。
@@ -293,6 +293,18 @@ local 来源每次直接读目录，`upgrade` 前无需 `update`；GitHub 来源
 | TUI `/tree`（后台等待中） | 选中首轮 assistant 回复：`session_tree` | 旧周期 1 条【未知】`session_changed`、后台等待 `right_censored` | 符合契约。驱动脚本退出时又发出 1 条 `shutdown` 的【未知】，来自退出而不是 `/tree` |
 
 观察：后台等待被会话切换截断时，`cycle.reasons` 同时带 `unpaired_interaction`，因为收束时把仍打开的后台等待一并按未配对处理。卡片只显示“观察范围 不完整”，不影响结论，未改动。
+
+## #37 补测：群目标
+
+2026-10-26，隔离 OMP 18.12.6 显式加载仓库客户端包，经 QQ 官方 Bot「626」的群测试 Endpoint（`group_test`，`--provider omp`）投递到测试群；接收端用猫猫头账号读回（`receiver-probe group-messages`，`probe-37-group.json`）。当时 AstrBot 默认配置的 T2I 指向 TencentSH3 备用实例。
+
+| 场景 | 通知 | 群内读回 |
+| --- | --- | --- |
+| S18-group | completed，200 `ok` delivered | 【已完成】原生验收 S18-group，主卡 1056×981 |
+| S18-group-ask | `action_required` ask＋completed，`ask:resolved:complete` | 【待处理】… · 等待问题回答（1056×864，题干与选项完整）；【已完成】1056×1211 |
+| S18-group-failed | failed，`error=request`，delivered | 【失败】原生验收 S18-group-failed，1056×981 |
+
+文字与主卡同条，图片按 1.3 倍渲染，布局与私聊一致。首次尝试（2026-10-25）全部返回 QQ `40034105 主动消息失败, 无权限`：QQ 官方 Bot 的群主动消息需要群主在群设置中开启“机器人主动在群聊内发言”，开启后通过。此前提已写入接收端验收文档。
 
 ## 原生验收工具
 
