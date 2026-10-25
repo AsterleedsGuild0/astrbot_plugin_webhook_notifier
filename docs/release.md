@@ -39,12 +39,14 @@ uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --dry-run
 uv run --frozen python scripts/deploy_dev.py --env-file <Dashboard 凭据> --label <标签> \
   --verify <测试 Endpoint 凭据> --probe <接收端探测命令>       # 部署后验收
 uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --probe <…>   # 只验收线上现有版本
+uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <深色测试 Endpoint 凭据> --probe <…> --theme dark  # 深色卡片验收
 uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --probe <…> --update-baselines  # 有意改版后更新基准
 ```
 
 - `--verify` 代替默认冒烟：只读取该文件中的 `WEBHOOK_NOTIFIER_URL`／`WEBHOOK_NOTIFIER_TOKEN`，不使用环境变量里的生产 Endpoint，避免测试卡发往生产聊天。测试 Endpoint 应绑定一个不接入任何会自动回复的 AstrBot 平台的接收账号。
-- 冒烟内容固定（会话名带 `[视觉基准]`，时间固定为 2026-01-01 08:00:30 CST），卡片逐像素确定。脚本按会话顺序读回消息并核对：每组文字与预期一字不差、文字与主卡在同一条消息（通知预览只显示最后一条，拆开发送会只剩“[图片]”）、图片张数（时间线用例为主卡加附图），再与 `tests/visual/baselines/<用例>-<序号>.png` 比较；超过 0.1% 像素差（通道差 > 16）即失败，并在接收图片旁写出差异图。
-- 基准图来自线上 T2I 实际渲染、经 QQ 接收端读回的 PNG，不在本机生成，以避开字体差异。有意改版时先人工看过本次收到的图片，再用 `--update-baselines` 覆盖并在同一提交中更新基准图；不要为了让验收通过而更新基准图。
+- 冒烟内容固定（会话名带 `[视觉基准]`，时间固定为 2026-01-01 08:00:30 CST），卡片逐像素确定。用例为简单完成、多代理时间线（主卡加附图）、失败、待处理、中止、未知和凭据告警，共 8 张图。凭据告警没有会话名，文字不含标记，按“未命中标记但文字与图片同条”的消息核对，实例字段显示 `[视觉基准]` 便于辨认。脚本按会话顺序读回消息并核对：每组文字与预期一字不差、文字与主卡在同一条消息（通知预览只显示最后一条，拆开发送会只剩“[图片]”）、图片张数，再与基准图比较；超过 0.1% 像素差（通道差 > 16）即失败，并在接收图片旁写出差异图。
+- 基准图按测试 Endpoint 的卡片主题分组：`--theme light`（默认）比较 `tests/visual/baselines/<用例>-<序号>.png`，`--theme dark` 比较 `tests/visual/baselines/dark/`。`--theme` 只选择基准图，不修改 Endpoint；深色验收须使用以 `--theme dark` 创建或切换为深色的测试 Endpoint。浅色基准图同时是“默认浅色、旧 Endpoint 画面不变”的证据。
+- 基准图来自线上 T2I 实际渲染、经 QQ 接收端读回的 PNG，不在本机生成，以避开字体差异；T2I 实例更换后浅色、深色两组都要重跑。有意改版时先人工看过本次收到的图片，再用 `--update-baselines` 补齐缺少的基准图、覆盖与基准不一致的基准图（容差内一致的保持原文件），并在同一提交中更新；不要为了让验收通过而更新基准图。
 - `--probe` 是外部只读命令，接口为 `<probe> messages <since_rfc3339> <marker>`，输出 JSON：`ok`、`history_status`，以及按会话顺序排列的 `messages[]`（`marked`、命中标记时的 `text`、`segments[]` 中图片的 `format`／`width`／`height`／本地 `path`）。具体接收账号与读回方式属于部署环境，不在本仓库实现。
 
 ### 授权后的切换顺序

@@ -1,5 +1,22 @@
 # 更新日志
 
+## 未发布
+
+本版本为 OMP Endpoint 增加深色通知卡片（#36）。
+
+### 升级须知
+
+- **默认仍为浅色，已有 Endpoint 无需迁移。** Registry 记录新增可选字段 `theme`，旧记录缺少该字段时按浅色处理；浅色卡片与 v2.2.0 逐像素一致。OMP 客户端与 Webhook 协议不变，不需要升级客户端。
+- **回退到旧版本会丢失深色设置。** 旧服务端忽略 `theme`，下一次写回 Registry 时该字段被丢弃，卡片恢复浅色。
+
+### 变更
+
+- #36 OMP Endpoint 可选深色卡片：`token new … --provider omp --theme dark` 创建时指定，`token theme <名称> <light|dark>` 由 owner 在私聊切换；不写 `--theme` 时为浅色。只开放给 OMP Endpoint，OpenCode、Markdown Endpoint 使用主题参数、非 owner 切换、非法取值均拒绝且不修改 Registry。没有全局主题配置，不提供跟随系统的 `auto`。
+- 深色采用“中性深灰”方案：外层 `#18191c`、卡片 `#171717`，表头与问题块略亮；待处理卡和凭据告警保留品牌黄状态条，推荐选项编号改为黄底深字；主文字约 `#e6e6e8`，次要文字满足 WCAG AA 对比度。主卡与时间线附图同一主题，页面外层背景随主题取色，深色卡片外不留浅色边。纯文本模式与文本降级不受影响。
+- 内置主卡与时间线附图的颜色全部改为 CSS 变量，按根元素 `data-theme` 切换。模板上下文新增 `event.theme`，自定义模板可读取以自行支持深色；不读取该变量的模板输出不变。
+- `token list` 对 OMP Endpoint 显示卡片主题，状态命令显示 active OMP Endpoint 按主题的数量，帮助卡增加 `token theme` 命令。
+- `scripts/deploy_dev.py --verify` 增加 `--theme light|dark`，深色基准图位于 `tests/visual/baselines/dark/`；验收用例补充中止、未知和凭据告警，共 8 张图。`--update-baselines` 只补齐缺少的、覆盖不一致的基准图。
+
 ## v2.2.0 - 2026-10-25
 
 本版本把 OMP 客户端改为多模块 extension 包并通过本仓库的 OMP marketplace 分发（#32、#33），通知补充错误类型、所属主会话、会话时长与运行健康信号（#34、#35）。原生 OMP 18.12.6 的验收结果见 [OMP V2 验收记录](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/blob/v2.2.0/docs/omp-v2-acceptance.md)。

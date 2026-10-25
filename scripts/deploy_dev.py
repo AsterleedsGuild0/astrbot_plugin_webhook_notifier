@@ -12,7 +12,8 @@
 
 接收端验收（--verify ENV_FILE --probe PROBE）：改为向 ENV_FILE 中的测试 Endpoint 发送固定内容的
 冒烟，由 PROBE 从接收账号读回消息，核对每条文字、文字与主卡在同一条消息、图片张数，并与
-tests/visual/baselines/ 中的基准图逐像素比较；首次或有意改版时加 --update-baselines。
+tests/visual/baselines/ 中的基准图逐像素比较；--theme dark 时测试 Endpoint 须为深色，比较
+tests/visual/baselines/dark/。首次或有意改版时加 --update-baselines。
 
 接口依据 AstrBot v4.27.2 的 /api/v1/plugins*；其他版本使用前先核对。
 """
@@ -219,10 +220,29 @@ def smoke_payloads(marker: str, at: datetime | None = None) -> list[tuple[str, d
     ]
 
 
-def smoke(url: str, token: str, marker: str, at: datetime | None = None) -> list[dict]:
+def visual_payloads(marker: str, at: datetime) -> list[tuple[str, dict]]:
+    """接收端验收用例：默认冒烟之外补齐中止、未知与凭据告警卡型。"""
+    payloads = smoke_payloads(marker, at)
+    by_label = dict(payloads)
+    for status, label in (("aborted", "中止"), ("unknown", "未知")):
+        body = json.loads(json.dumps(by_label["失败"]))
+        body.update(id=_ref(), status=status)
+        body["session"].update(ref=_ref(), name=f"{marker} {label}")
+        body["cycle"]["ref"] = _ref()
+        payloads.append((label, body))
+    # 凭据告警没有会话名，文字里不含标记；instance 显示在卡片上，便于在聊天中辨认测试卡。
+    payloads.append(("凭据告警", {
+        "event": "omp.credential_disabled", "version": 2, "id": _ref(),
+        "emittedAt": at.isoformat().replace("+00:00", "Z"), "provider": "smoke-provider", "instance": marker,
+    }))
+    return payloads
+
+
+def smoke(url: str, token: str, marker: str, at: datetime | None = None,
+          payloads: list[tuple[str, dict]] | None = None) -> list[dict]:
     results = []
     deadline = time.monotonic() + 30
-    for label, body in smoke_payloads(marker, at):
+    for label, body in payloads or smoke_payloads(marker, at):
         request = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode(), method="POST")
         request.add_header("Authorization", f"Bearer {token}")
         request.add_header("Content-Type", "application/json")
@@ -251,16 +271,26 @@ def smoke(url: str, token: str, marker: str, at: datetime | None = None) -> list
 VISUAL_MARKER = "[视觉基准]"
 VISUAL_AT = datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc)
 # 冒烟用例 → 接收端应看到的文字（独立写出，不复用插件实现）与图片张数。
+# 文字为 None 表示该卡不含会话名标记，按“文字与图片同条但未命中标记”的消息核对。
 VISUAL_EXPECTED = (
     ("simple", "【已完成】[视觉基准] 简单完成", 1),
     ("timeline", "【已完成】[视觉基准] 多代理时间线", 2),
     ("failed", "【失败】[视觉基准] 失败", 1),
     ("action", "【待处理】[视觉基准] 待处理 · 等待问题回答", 1),
+    ("aborted", "【已中止】[视觉基准] 中止", 1),
+    ("unknown", "【未知】[视觉基准] 未知", 1),
+    ("credential", None, 1),
 )
 BASELINE_DIR = ROOT / "tests" / "visual" / "baselines"
+THEMES = ("light", "dark")
 PIXEL_TOLERANCE = 16
 MAX_DIFF_RATIO = 0.001
 RECEIVE_TIMEOUT_S = 120
+
+
+def baseline_dir(theme: str) -> Path:
+    # 浅色基准图保持原位置，深色单独成组。
+    return BASELINE_DIR if theme == "light" else BASELINE_DIR / theme
 
 
 def read_env_values(path: Path) -> dict[str, str]:
@@ -287,7 +317,10 @@ def run_probe(probe: Path, since: str) -> dict:
 
 
 def group_received(messages: list[dict]) -> tuple[list[dict], int]:
-    """按会话顺序把文字与其后的图片归为一组；文字之前的孤立图片单独计数。"""
+    """按会话顺序把文字与其后的图片归为一组；文字之前的孤立图片单独计数。
+
+    未命中标记、但文字与图片在同一条消息里的，视为另一张卡（如凭据告警），单独成组，文字记为 None。
+    """
     groups: list[dict] = []
     orphans = 0
     for message in messages:
@@ -297,6 +330,8 @@ def group_received(messages: list[dict]) -> tuple[list[dict], int]:
         if message.get("marked"):
             # 文字必须与主卡同条：通知预览只显示最后一条，拆开发送会只剩“[图片]”。
             groups.append({"caption": message.get("text", ""), "with_card": "image" in types, "images": images})
+        elif "text" in types and images:
+            groups.append({"caption": None, "with_card": True, "images": images})
         elif groups:
             groups[-1]["images"].extend(images)
         else:
@@ -320,10 +355,10 @@ def compare_image(actual: Path, baseline: Path, diff_path: Path) -> str | None:
         return f"{ratio:.2%} 像素与基准不同，差异图 {diff_path}"
 
 
-def verify(url: str, token: str, probe: Path, update_baselines: bool) -> list[str]:
+def verify(url: str, token: str, probe: Path, update_baselines: bool, theme: str = "light") -> list[str]:
     """向测试接收端发送固定内容冒烟，读回并逐项核对；返回问题列表，空表示通过。"""
     since = (datetime.now(timezone.utc) - timedelta(seconds=2)).replace(microsecond=0)
-    sent = smoke(url, token, VISUAL_MARKER, at=VISUAL_AT)
+    sent = smoke(url, token, VISUAL_MARKER, at=VISUAL_AT, payloads=visual_payloads(VISUAL_MARKER, VISUAL_AT))
     problems = [f"{item['case']}：HTTP {item['http']} 未送达" for item in sent if not item["ok"]]
     if problems:
         return problems
@@ -340,8 +375,9 @@ def verify(url: str, token: str, probe: Path, update_baselines: bool) -> list[st
     if orphans:
         problems.append(f"有 {orphans} 张图片出现在第一行文字之前")
     if len(groups) != len(VISUAL_EXPECTED):
-        problems.append(f"收到 {len(groups)} 组带标记的消息，预期 {len(VISUAL_EXPECTED)} 组")
-    BASELINE_DIR.mkdir(parents=True, exist_ok=True)
+        problems.append(f"收到 {len(groups)} 组卡片消息，预期 {len(VISUAL_EXPECTED)} 组")
+    baselines = baseline_dir(theme)
+    baselines.mkdir(parents=True, exist_ok=True)
     for group, (key, caption, expected) in zip(groups, VISUAL_EXPECTED):
         if group["caption"] != caption:
             problems.append(f"{key}：文字为 {group['caption']!r}，预期 {caption!r}")
@@ -354,16 +390,21 @@ def verify(url: str, token: str, probe: Path, update_baselines: bool) -> list[st
                 problems.append(f"{key}#{index}：图片不可用（{image.get('format') or image.get('error')}）")
                 continue
             actual = Path(image["path"])
-            baseline = BASELINE_DIR / f"{key}-{index}.png"
+            baseline = baselines / f"{key}-{index}.png"
             print(f"接收 {key}#{index}：{image['width']}×{image['height']} {actual}")
-            if update_baselines:
-                baseline.write_bytes(actual.read_bytes())
-                continue
             if not baseline.exists():
-                problems.append(f"{key}#{index}：缺少基准图 {baseline.relative_to(ROOT)}，确认画面后用 --update-baselines 生成")
+                if update_baselines:
+                    baseline.write_bytes(actual.read_bytes())
+                    print(f"  新增基准图 {baseline.relative_to(ROOT)}")
+                else:
+                    problems.append(f"{key}#{index}：缺少基准图 {baseline.relative_to(ROOT)}，确认画面后用 --update-baselines 生成")
                 continue
             mismatch = compare_image(actual, baseline, actual.with_name(f"diff-{key}-{index}.png"))
-            if mismatch:
+            if mismatch and update_baselines:
+                # 只覆盖确有差异的基准图，容差内一致的保持原文件，避免无意义的二进制改动。
+                baseline.write_bytes(actual.read_bytes())
+                print(f"  覆盖基准图 {baseline.relative_to(ROOT)}（{mismatch}）")
+            elif mismatch:
                 problems.append(f"{key}#{index}：{mismatch}")
     return problems
 
@@ -380,13 +421,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="接收端验收：向该文件中的测试 Endpoint 发送固定内容冒烟，读回核对文字、顺序、图片数量并与基准图比较；"
                              "代替默认冒烟，不读取环境变量中的 WEBHOOK_NOTIFIER_*")
     parser.add_argument("--probe", type=Path, help="接收端探测命令，接口为 `<probe> messages <since> <marker>`；--verify 必填")
-    parser.add_argument("--update-baselines", action="store_true", help="--verify 时用本次收到的图片覆盖基准图")
+    parser.add_argument("--update-baselines", action="store_true",
+                        help="--verify 时用本次收到的图片补齐缺少的基准图，并覆盖与基准不一致的基准图")
+    parser.add_argument("--theme", choices=THEMES, default="light",
+                        help="--verify 的测试 Endpoint 卡片主题，决定比较哪组基准图；默认 light")
     parser.add_argument("--skip-deploy", action="store_true", help="不打包部署，只对线上现有版本执行 --verify")
     args = parser.parse_args(argv)
     if (args.verify is None) != (args.probe is None):
         parser.error("--verify 与 --probe 必须同时提供")
-    if (args.update_baselines or args.skip_deploy) and args.verify is None:
-        parser.error("--update-baselines 与 --skip-deploy 只用于 --verify")
+    if (args.update_baselines or args.skip_deploy or args.theme != "light") and args.verify is None:
+        parser.error("--update-baselines、--skip-deploy 与 --theme 只用于 --verify")
     try:
         if args.env_file:
             load_env_file(args.env_file)
@@ -415,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"冒烟全部送达；请在聊天中确认 {len(results)} 张卡片的显示效果。")
         if verify_env:
             problems = verify(verify_env["WEBHOOK_NOTIFIER_URL"], verify_env["WEBHOOK_NOTIFIER_TOKEN"],
-                              args.probe, args.update_baselines)
+                              args.probe, args.update_baselines, args.theme)
             if problems:
                 raise DeployError("接收端验收未通过：\n- " + "\n- ".join(problems))
             print("接收端验收通过" + ("；基准图已更新" if args.update_baselines else "；与基准图一致"))
