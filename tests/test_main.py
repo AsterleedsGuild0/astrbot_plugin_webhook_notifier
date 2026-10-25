@@ -763,7 +763,7 @@ async def test_private_endpoint_creation_warns_when_notifications_disabled():
     class RegistryStub:
         def create_private_endpoint(self, **kwargs):
             return SimpleNamespace(
-                path="u/generated/private", provider="omp"
+                path="u/generated/private", provider="omp", theme="light"
             ), "secret-token"
 
     class EventStub:

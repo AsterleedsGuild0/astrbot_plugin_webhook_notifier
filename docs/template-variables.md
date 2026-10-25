@@ -12,6 +12,10 @@ HTML 模板只提供一个根变量：`event`。不要使用顶层 `title`、`fi
 
 `templates/help_card.html` 是独立的内置命令帮助模板，不读取、不替换也不占用 Webhook Template Registry 的 active 模板。帮助卡片的命令前缀由运行时解析当前会话 `wake_prefix` 后注入或安全格式化；静态文档统一写作 `<唤醒词>`。当配置异常时使用安全占位符与诊断提示，不把 Token、owner、UMO、Base URL 或其他敏感字段作为帮助模板变量。
 
+### 卡片主题
+
+`event.theme` 来自投递 Endpoint 的 Registry 设置（见[命令参考](command-reference.md#卡片主题)），只有 `light`、`dark` 两个值。内置主卡与时间线附图在根元素输出 `data-theme`，全部颜色取自 CSS 变量，`:root[data-theme="dark"]` 覆盖为深色值，因此浅色画面与旧版本一致。自定义模板可以照此写法，或直接按 `{% if event.theme == 'dark' %}` 分支；不读取该变量的模板对两种主题输出相同的 HTML。深色模板应同时设置 `html, body` 的背景色，截图裁切只去掉多余背景，不会补边。WebUI 预览不会自动注入 `theme`，需要时在预览 JSON 中提供。
+
 ---
 
 ## Subagent timeline 的字段层次
@@ -56,6 +60,7 @@ Subagent timeline 是 root `opencode.session_idle` 的可选数据；其他 even
 | `event.display_timezone` | string | `Asia/Shanghai` | 当前全局展示时区；首版不支持 Endpoint override |
 | `event.generated_at` | string | `2026-07-15 20:00:01 CST (UTC+08:00)` | 本次 HTML 渲染生成时间，已转换到展示时区 |
 | `event.event_time` | string | `2026-07-15 20:00:00 CST (UTC+08:00)` | `event.emitted_at` 的展示值，已转换到展示时区 |
+| `event.theme` | string | `dark` | 投递 Endpoint 的卡片主题，`light` 或 `dark`；非 OMP Endpoint 恒为 `light`。内置模板据此切换颜色，自定义模板可自行选择是否支持深色 |
 | `event.subagent_timeline` | object，可选 | `{}` | 已标准化的 timeline 数据；只读，不应直接展示匿名图引用 |
 | `event.user_wait_timeline` | object，可选 | `{}` | 已标准化的用户等待时间线；只读，不含原始 request/session ID，censored 区间不得补造 duration |
 | `event.subagent_timeline_view` | object，可选 | `{}` | 安全派生展示数据；默认模板使用它展示子任务摘要、阶段卡或甘特图 |

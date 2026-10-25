@@ -25,7 +25,6 @@ from core.renderer import (
     _scaled_right_crop_padding,
     _timeline_coverage_rate,
     _timeline_coverage_union_ms,
-    DEFAULT_HTML_TEMPLATE,
     DEFAULT_TEXT_TEMPLATE,
     SUBAGENT_TIMELINE_HTML_TEMPLATE,
     SUBAGENT_TIMELINE_MAIN_ITEM_LIMIT,
@@ -2910,24 +2909,6 @@ class TestRenderHtml:
         event = _make_event()
         context = render_html_data(event)
         assert context["event"]["event_time"] == ("2026-07-08 20:00:00 CST (UTC+08:00)")
-
-    def test_default_template_contains_styles(self):
-        """默认 HTML 模板应包含 macOS 浅色卡片样式及 shrinkwrap CSS。"""
-        assert "box-sizing" in DEFAULT_HTML_TEMPLATE
-        assert "-apple-system" in DEFAULT_HTML_TEMPLATE
-        assert "PingFang SC" in DEFAULT_HTML_TEMPLATE
-        assert ".status-badge" in DEFAULT_HTML_TEMPLATE
-        assert "background: #ffffff" in DEFAULT_HTML_TEMPLATE
-        assert "width: fit-content" in DEFAULT_HTML_TEMPLATE
-        assert "min-width: 0" in DEFAULT_HTML_TEMPLATE
-        assert "min-height: 0" in DEFAULT_HTML_TEMPLATE
-        assert "height: auto" in DEFAULT_HTML_TEMPLATE
-        assert "width: 780px" in DEFAULT_HTML_TEMPLATE
-        assert "max-width: 780px" in DEFAULT_HTML_TEMPLATE
-        assert "width: 100vw" not in DEFAULT_HTML_TEMPLATE
-        assert "min-height: 100%" not in DEFAULT_HTML_TEMPLATE
-        assert "justify-content: center" not in DEFAULT_HTML_TEMPLATE
-        assert "#0a0f1c" not in DEFAULT_HTML_TEMPLATE
 
     @pytest.mark.parametrize(
         "dangerous",

@@ -46,7 +46,7 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
         "commands": (
             {
                 "syntax": "token new private [名称] [--provider <{providers}>]",
-                "description": f"创建私聊 Endpoint；默认 {DEFAULT_PROVIDER}，OMP/OpenCode 需显式指定",
+                "description": f"创建私聊 Endpoint；默认 {DEFAULT_PROVIDER}，OMP/OpenCode 需显式指定；omp 可加 --theme dark",
             },
             {
                 "syntax": "token new group <数字群号> [名称] [--provider <{providers}>]",
@@ -70,7 +70,7 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
         "number": "03",
         "tone": "violet",
         "title": "管理自己的 Endpoint",
-        "description": "列表、轮换、撤销和永久删除均按当前平台与用户隔离，并在私聊中操作。",
+        "description": "列表、轮换、切换主题、撤销和永久删除均按当前平台与用户隔离，并在私聊中操作。",
         "commands": (
             {
                 "syntax": "token list",
@@ -79,6 +79,10 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
             {
                 "syntax": "token rotate <名称>",
                 "description": "轮换凭据并立即停用旧凭据",
+            },
+            {
+                "syntax": "token theme <名称> <light|dark>",
+                "description": "切换 OMP Endpoint 的通知卡片主题（浅色/深色）",
             },
             {
                 "syntax": "token revoke <名称>",

@@ -456,7 +456,7 @@ async def test_html_image_and_fallback_paths() -> None:
 
 
 def _fake_image_attempt(captured: dict[str, Any]):
-    async def fake(event, template, _request_id, _prepared):
+    async def fake(event, template, _request_id, _prepared, _theme):
         captured["html"] = render_html(event, template.content)
         return b"image", {}
 

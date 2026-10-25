@@ -17,6 +17,12 @@ class EndpointStatus(str, enum.Enum):
     REVOKED = "revoked"
 
 
+# 通知卡片主题：Endpoint 级设置，只开放给 OMP Endpoint；缺省为浅色。
+CARD_THEMES = ("light", "dark")
+DEFAULT_CARD_THEME = "light"
+THEMED_PROVIDER = "omp"
+
+
 @dataclass
 class TargetAlias:
     """目标别名。"""
@@ -30,7 +36,8 @@ class EndpointRecord:
     """端到端注册记录。
 
     每条记录对应一个独立 endpoint/token 绑定关系。
-    渲染配置（render_mode）属于插件全局配置，不在 endpoint 级保存。
+    渲染模式（render_mode）属于插件全局配置，不在 endpoint 级保存；
+    卡片主题（theme）是 endpoint 级设置，只有 OMP endpoint 可以不是浅色。
     token 明文不持久化，只保存 token_hash。
     """
 
@@ -51,6 +58,7 @@ class EndpointRecord:
     owner_platform_id: str = ""
     management_state: str = "managed"
     legacy_record_key: str | None = None
+    theme: str = DEFAULT_CARD_THEME
 
 
 @dataclass(frozen=True)

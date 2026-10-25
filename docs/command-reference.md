@@ -28,13 +28,14 @@
 | `<唤醒词>webhook_notifier` | 私聊、群聊 | 所有人 | `aiocqhttp`、`qq_official` | 查看完整状态 |
 | `<唤醒词>whn status` | 私聊、群聊 | 所有人 | `aiocqhttp`、`qq_official` | 查看状态 |
 | `<唤醒词>whn help` | 私聊、群聊 | 所有人 | `aiocqhttp`、`qq_official` | 查看图片或纯文本帮助 |
-| `<唤醒词>whn token new private [名称] [--provider <omp|opencode|markdown>]` | 仅私聊 | 当前用户 | `aiocqhttp`、`qq_official` | 创建绑定当前私聊的 Endpoint |
-| `<唤醒词>whn token new group <数字群号> [名称] [--provider <omp|opencode|markdown>]` | 仅私聊 | 当前用户 | 仅 `aiocqhttp` | 发起预绑定数字群号的群验证 |
-| `<唤醒词>whn token new group current [名称] [--provider <omp|opencode|markdown>]` | 仅私聊 | 当前用户 | 仅 `qq_official` | 发起“验证时绑定当前群”的群验证 |
+| `<唤醒词>whn token new private [名称] [--provider <omp|opencode|markdown>] [--theme <light|dark>]` | 仅私聊 | 当前用户 | `aiocqhttp`、`qq_official` | 创建绑定当前私聊的 Endpoint |
+| `<唤醒词>whn token new group <数字群号> [名称] [--provider <omp|opencode|markdown>] [--theme <light|dark>]` | 仅私聊 | 当前用户 | 仅 `aiocqhttp` | 发起预绑定数字群号的群验证 |
+| `<唤醒词>whn token new group current [名称] [--provider <omp|opencode|markdown>] [--theme <light|dark>]` | 仅私聊 | 当前用户 | 仅 `qq_official` | 发起“验证时绑定当前群”的群验证 |
 | `<唤醒词>whn token verify <request_id> <code>` | 仅目标群 | 群主或群管理员；`aiocqhttp` 还必须是原申请者 | `aiocqhttp`、`qq_official` | 完成群管理员验证阶段 |
 | `<唤醒词>whn token confirm <request_id>` | 仅私聊 | QQ 官方原 C2C 申请者 | 仅 `qq_official` | 确认群绑定、激活并领取 Token |
 | `<唤醒词>whn token list` | 仅私聊 | 当前用户 | `aiocqhttp`、`qq_official` | 列出当前平台 scope 内可见 Endpoint |
 | `<唤醒词>whn token rotate <名称>` | 仅私聊 | Endpoint owner | `aiocqhttp`、`qq_official` | 生成新 Token，并立即使旧 Token 失效 |
+| `<唤醒词>whn token theme <名称> <light|dark>` | 仅私聊 | Endpoint owner | `aiocqhttp`、`qq_official` | 切换 OMP Endpoint 的通知卡片主题 |
 | `<唤醒词>whn token revoke <名称>` | 仅私聊 | Endpoint owner | `aiocqhttp`、`qq_official` | 软撤销并保留审计记录 |
 | `<唤醒词>whn token delete <名称>` | 仅私聊 | Endpoint owner | `aiocqhttp`、`qq_official` | 永久删除终态记录 |
 | `<唤醒词>whn admin token list` | 仅私聊 | 全局超级管理员 | `aiocqhttp`、`qq_official` | 查看 managed Endpoint 的最小管理元数据 |
@@ -68,6 +69,30 @@
 
 ---
 
+## 卡片主题
+
+OMP Endpoint 可以选择浅色（`light`）或深色（`dark`）通知卡片。创建时指定：
+
+```text
+<唤醒词>whn token new private <名称> --provider omp --theme dark
+```
+
+创建后切换：
+
+```text
+<唤醒词>whn token theme <名称> dark
+<唤醒词>whn token theme <名称> light
+```
+
+- 主题按 Endpoint 保存，没有全局主题配置。不写 `--theme` 时为 `light`；`v2.3.0` 之前创建的 Endpoint 没有主题字段，按 `light` 处理，无需迁移。
+- 只有 `light` 和 `dark` 两个值，按原样小写书写。图片是静态的，不提供跟随接收端系统主题的 `auto`。
+- 只开放给 `provider=omp` 的 Endpoint：OpenCode、Markdown Endpoint 使用 `--theme`（包括 `--theme light`）或 `token theme` 都会被拒绝，不写入 Registry。`--theme` 的书写规则与 `--provider` 相同：缺值、重复、`--theme=dark` 或以 `--` 开头的值都会拒绝。
+- `token theme` 只能由 owner 在私聊中对 `active` 或 `pending_verification` 的 Endpoint 执行；其他平台或其他 owner 的同名记录按不存在处理。非法取值、非 OMP、终态记录均拒绝且不修改 Registry。切换不影响 Token、Path 与目标。
+- 主题同时作用于主卡和时间线附图；纯文本模式与文本降级不受影响。自定义模板通过 `event.theme` 读取主题，是否提供深色由模板自行决定，见 [HTML 模板变量](template-variables.md)。
+- `token list` 对 OMP Endpoint 显示“卡片主题”；状态命令显示 active OMP Endpoint 按主题的数量，不显示具体 Endpoint。
+
+---
+
 ## 状态与帮助
 
 ### 状态命令
@@ -80,7 +105,7 @@
 <唤醒词>webhook_notifier
 ```
 
-状态包括插件启用状态、HTTP 服务状态、可投递 Endpoint 数量、渲染模式、文本降级、私聊通知开关、监听 IP、端口和基础路径。聊天中不会显示完整 Base URL；固定提示为“Base URL：请在 Plugin Page 中复制”。
+状态包括插件启用状态、HTTP 服务状态、可投递 Endpoint 数量、渲染模式、active OMP Endpoint 按卡片主题的数量、文本降级、私聊通知开关、监听 IP、端口和基础路径。聊天中不会显示完整 Base URL；固定提示为“Base URL：请在 Plugin Page 中复制”。
 
 ### 帮助命令
 
@@ -200,7 +225,7 @@
 <唤醒词>whn token list
 ```
 
-列表展示当前 scope 内用户可见的 Endpoint 名称、Path、状态、目标别名和时间摘要。已撤销或已过期记录不在默认用户列表中显示；quarantine 记录也不可见。
+列表展示当前 scope 内用户可见的 Endpoint 名称、Provider、OMP Endpoint 的卡片主题、Path、状态、目标别名和时间摘要。已撤销或已过期记录不在默认用户列表中显示；quarantine 记录也不可见。
 
 ### 轮换
 
@@ -212,6 +237,14 @@
 
 - aiocqhttp 群验证后的首次 Token 领取；
 - 创建、confirm 或上次 rotate 的 Token 消息发送失败后的恢复。
+
+### 切换卡片主题
+
+```text
+<唤醒词>whn token theme <ENDPOINT_NAME> <light|dark>
+```
+
+仅适用于 OMP Endpoint，规则见[卡片主题](#卡片主题)。
 
 ### 撤销
 

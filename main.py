@@ -29,7 +29,13 @@ from .core.help_card import (
     render_help_card_html,
 )
 from .core.display import DEFAULT_DISPLAY_TIMEZONE, create_display_context
-from .core.models import EndpointStatus, ServerConfig
+from .core.models import (
+    CARD_THEMES,
+    DEFAULT_CARD_THEME,
+    THEMED_PROVIDER,
+    EndpointStatus,
+    ServerConfig,
+)
 from .core.notification_policy import (
     MIN_COMPLETION_DURATION_DEFAULT,
     MIN_COMPLETION_DURATION_MAX,
@@ -68,6 +74,11 @@ PLUGIN_NAME = "Webhook Notifier"
 COMMAND = "whn"
 WAKE_PREFIX_PLACEHOLDER = "<AstrBot唤醒词>"
 WAKE_PREFIX_DIAGNOSTIC = "无法读取当前会话唤醒词，请检查 AstrBot 配置和插件日志"
+THEME_LABELS = {"light": "浅色", "dark": "深色"}
+
+
+def _theme_text(theme: str) -> str:
+    return f"{theme}（{THEME_LABELS.get(theme, theme)}）"
 
 
 @dataclass(frozen=True)
@@ -988,7 +999,9 @@ class WebhookNotifierPlugin(Star):
             target_names = ",".join(target.name for target in rec.targets) or "无"
             lines.append(
                 f"{index}. owner={rec.owner_user_id} | name={rec.name} | "
-                f"provider={rec.provider} | Endpoint Path={rec.path} | "
+                f"provider={rec.provider} | "
+                + (f"theme={rec.theme} | " if rec.provider == THEMED_PROVIDER else "")
+                + f"Endpoint Path={rec.path} | "
                 f"status={rec.status} | "
                 f"targets={target_names} ({len(rec.targets)}) | "
                 f"created={rec.created_at[:19]}"
@@ -1110,17 +1123,19 @@ class WebhookNotifierPlugin(Star):
         if not args:
             return (
                 "用法:\n"
-                f"  {commands.short} token new private [名称]\n"
+                f"  {commands.short} token new private [名称] [--provider <provider>] [--theme <light|dark>]\n"
                 f"  {commands.short} token new group <数字群号> [名称]  (aiocqhttp)\n"
                 f"  {commands.short} token new group current [名称]  (qq_official)\n"
                 f"  {commands.short} token verify <request_id> <code>\n"
                 f"  {commands.short} token confirm <request_id>  (qq_official)\n"
                 f"  {commands.short} token list\n"
                 f"  {commands.short} token rotate <名称>\n"
+                f"  {commands.short} token theme <名称> <light|dark>  (omp)\n"
                 f"  {commands.short} token revoke <名称>\n"
                 f"  {commands.short} token delete <名称>\n\n"
                 "aiocqhttp：原申请者须在预指定群以群主/管理员身份 verify，随后私聊 rotate。\n"
                 "qq_official：当前群任一群主/管理员可 verify；原申请者随后同 Bot 私聊 confirm。\n"
+                "--theme 与 token theme 只适用于 omp endpoint，缺省为 light。\n"
                 "revoke 保留审计记录；delete 仅永久删除 revoked/expired 终态记录。"
             )
 
@@ -1136,6 +1151,8 @@ class WebhookNotifierPlugin(Star):
             return self._handle_token_list(event, commands)
         elif action == "rotate":
             return await self._handle_token_rotate(event, args[1:], commands)
+        elif action == "theme":
+            return self._handle_token_theme(event, args[1:], commands)
         elif action == "revoke":
             return await self._handle_token_revoke(event, args[1:], commands)
         elif action == "delete":
@@ -1164,13 +1181,21 @@ class WebhookNotifierPlugin(Star):
                 "用法:\n"
                 f"  {commands.short} token new private [名称]\n"
                 f"  {commands.short} token new group <数字群号> [名称]  (aiocqhttp)\n"
-                f"  {commands.short} token new group current [名称]  (qq_official)"
+                f"  {commands.short} token new group current [名称]  (qq_official)\n"
+                "可选参数：--provider <provider>；omp endpoint 可加 --theme <light|dark>"
             )
 
         # 只在完全省略 flag 时使用默认 Provider；错误参数不得静默回落。
-        provider, filtered_args, provider_error = self._extract_provider_flag(args)
+        provider, filtered_args, provider_error = self._extract_value_flag(
+            args, "--provider"
+        )
         if provider_error:
             return f"❌ {provider_error}"
+        theme, filtered_args, theme_error = self._extract_value_flag(
+            filtered_args, "--theme"
+        )
+        if theme_error:
+            return f"❌ {theme_error}"
         provider_notice = ""
         if provider is None:
             provider = DEFAULT_PROVIDER
@@ -1189,10 +1214,18 @@ class WebhookNotifierPlugin(Star):
         provider_ok, provider_msg = self._validate_create_provider(provider)
         if not provider_ok:
             return provider_msg
+        theme_ok, theme_msg = self._validate_create_theme(provider, theme)
+        if not theme_ok:
+            return theme_msg
+        theme = theme or DEFAULT_CARD_THEME
 
         if mode == "private":
             return await self._create_private_endpoint(
-                event, name_param, provider=provider, provider_notice=provider_notice
+                event,
+                name_param,
+                provider=provider,
+                provider_notice=provider_notice,
+                theme=theme,
             )
         elif mode == "group":
             return await self._create_group_pending(
@@ -1201,50 +1234,68 @@ class WebhookNotifierPlugin(Star):
                 commands,
                 provider=provider,
                 provider_notice=provider_notice,
+                theme=theme,
             )
         else:
             return (
                 f"未知类型: {mode}\n"
-                f"用法: {commands.short} token new private [名称] [--provider <provider>]；"
+                f"用法: {commands.short} token new private [名称] [--provider <provider>] [--theme <light|dark>]；"
                 "群聊请按当前平台使用数字群号或 current"
             )
 
     @staticmethod
-    def _extract_provider_flag(
-        args: list[str],
+    def _extract_value_flag(
+        args: list[str], flag: str
     ) -> tuple[str | None, list[str], str | None]:
-        """从命令参数中提取 ``--provider <value>``。
+        """从命令参数中提取 ``<flag> <value>``，如 ``--provider omp``。
 
-        缺值、重复、``--provider=value`` 和以 ``--`` 开头的值均明确拒绝，
-        不得与“未提供 flag”混淆后静默使用默认 Provider。
+        缺值、重复、``<flag>=value`` 和以 ``--`` 开头的值均明确拒绝，
+        不得与“未提供 flag”混淆后静默使用默认值。
 
         Returns:
-            (provider_value, remaining_args, error_message)
-            未提供时 provider_value 为 None；语法错误时 error_message 非空。
+            (value, remaining_args, error_message)
+            未提供时 value 为 None；语法错误时 error_message 非空。
         """
         result_args: list[str] = []
-        provider: str | None = None
-        found_provider = False
+        value: str | None = None
+        found = False
         i = 0
         while i < len(args):
             arg = args[i]
-            if arg.startswith("--provider="):
-                return None, result_args, "--provider 必须使用独立参数形式"
-            if arg == "--provider":
-                if found_provider:
-                    return None, result_args, "--provider 不能重复指定"
-                found_provider = True
+            if arg.startswith(f"{flag}="):
+                return None, result_args, f"{flag} 必须使用独立参数形式"
+            if arg == flag:
+                if found:
+                    return None, result_args, f"{flag} 不能重复指定"
+                found = True
                 if i + 1 >= len(args):
-                    return None, result_args, "--provider 缺少值"
-                value = args[i + 1].strip()
-                if not value or value.startswith("--"):
-                    return None, result_args, "--provider 缺少有效值"
-                provider = value
+                    return None, result_args, f"{flag} 缺少值"
+                candidate = args[i + 1].strip()
+                if not candidate or candidate.startswith("--"):
+                    return None, result_args, f"{flag} 缺少有效值"
+                value = candidate
                 i += 2
                 continue
             result_args.append(arg)
             i += 1
-        return provider, result_args, None
+        return value, result_args, None
+
+    @staticmethod
+    def _validate_create_theme(provider: str, theme: str | None) -> tuple[bool, str]:
+        """--theme 只适用于 OMP endpoint；指定给其他 Provider 时直接拒绝，不静默保存。"""
+        if theme is None:
+            return True, ""
+        if provider != THEMED_PROVIDER:
+            return (
+                False,
+                f"❌ --theme 只适用于 {THEMED_PROVIDER} endpoint，当前 provider 为 {provider}。",
+            )
+        if theme not in CARD_THEMES:
+            return (
+                False,
+                f"❌ 不支持的主题: {theme}。可选: {' / '.join(CARD_THEMES)}",
+            )
+        return True, ""
 
     def _validate_create_provider(self, provider: str) -> tuple[bool, str]:
         """验证创建时指定的 provider 值是否可用。
@@ -1282,6 +1333,7 @@ class WebhookNotifierPlugin(Star):
         name_param: str,
         provider: str = DEFAULT_PROVIDER,
         provider_notice: str = "",
+        theme: str = DEFAULT_CARD_THEME,
     ) -> list[str] | str:
         """创建私聊 endpoint。"""
         registry = self._ensure_registry()
@@ -1302,6 +1354,7 @@ class WebhookNotifierPlugin(Star):
                 target_umo=target_umo,
                 description=f"私聊 endpoint for {owner_id}",
                 provider=provider,
+                theme=theme,
             )
         except Exception as e:
             logger.error(f"[WebhookNotifier] 创建私聊 endpoint 失败: {e}")
@@ -1323,6 +1376,7 @@ class WebhookNotifierPlugin(Star):
             "✅ 私聊 endpoint 创建成功\n"
             f"名称: {endpoint_name}\n"
             f"Provider: {record.provider}\n"
+            f"{self._theme_line(record)}"
             f"Endpoint Path: {endpoint_path}\n"
             "Base URL：请在 Plugin Page 中复制"
             f"{provider_notice}"
@@ -1337,6 +1391,7 @@ class WebhookNotifierPlugin(Star):
         commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
         provider: str = DEFAULT_PROVIDER,
         provider_notice: str = "",
+        theme: str = DEFAULT_CARD_THEME,
     ) -> str:
         """创建群聊待验证 endpoint。"""
         registry = self._ensure_registry()
@@ -1381,6 +1436,7 @@ class WebhookNotifierPlugin(Star):
                 target_group_id=target_group_id,
                 description=f"群聊 endpoint for {owner_id}",
                 provider=provider,
+                theme=theme,
             )
         except Exception as e:
             logger.error(f"[WebhookNotifier] 创建群聊待验证 endpoint 失败: {e}")
@@ -1406,6 +1462,7 @@ class WebhookNotifierPlugin(Star):
             f"✅ 待验证申请已创建\n\n"
             f"名称: {endpoint_name}\n"
             f"Provider: {record.provider}\n"
+            f"{self._theme_line(record)}"
             f"{target_line}"
             f"Endpoint Path: {endpoint_path}\n"
             f"请求 ID: {request_id}\n"
@@ -1572,6 +1629,7 @@ class WebhookNotifierPlugin(Star):
             lines.append(
                 f"{status_emoji} {rec.name}\n"
                 f"   Provider: {rec.provider}\n"
+                f"{self._theme_line(rec, indent='   ')}"
                 f"   Endpoint Path: {rec.path}\n"
                 f"   状态: {rec.status}\n"
                 f"   目标: {targets_str}\n"
@@ -1616,6 +1674,45 @@ class WebhookNotifierPlugin(Star):
             "⚠️ 旧 Token 已立即失效。请更新外部系统配置。"
         )
         return [summary, _TokenDeliveryText(f"Bearer Token: {result}", name)]
+
+    @staticmethod
+    def _theme_line(record: Any, indent: str = "") -> str:
+        """OMP endpoint 才显示卡片主题；其他 Provider 不适用主题，不显示。"""
+        if record.provider != THEMED_PROVIDER:
+            return ""
+        return f"{indent}卡片主题: {_theme_text(record.theme)}\n"
+
+    def _handle_token_theme(
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        commands: _CommandRoots = PLACEHOLDER_COMMAND_ROOTS,
+    ) -> str:
+        """切换自己 OMP endpoint 的卡片主题。"""
+        if not self._is_private(event):
+            return "❌ 切换卡片主题请在私聊中执行。"
+        if len(args) < 2:
+            return (
+                f"❌ 用法: {commands.short} token theme <名称> <light|dark>"
+            )
+
+        registry = self._ensure_registry()
+        if not registry:
+            return "❌ Registry 未初始化，请检查日志。"
+
+        name = normalize_endpoint_name(" ".join(args[:-1]))
+        theme = args[-1].strip()
+        success, message = registry.set_endpoint_theme(
+            event.get_platform_id(), event.get_sender_id(), name, theme
+        )
+        if not success:
+            return f"❌ {message}"
+        return (
+            f"✅ {message}\n"
+            f"名称: {name}\n"
+            f"卡片主题: {_theme_text(theme)}\n"
+            "之后这个 endpoint 的图片通知按此主题渲染；纯文本通知不受影响。"
+        )
 
     async def _handle_token_revoke(
         self,
@@ -1844,6 +1941,14 @@ class WebhookNotifierPlugin(Star):
         enabled = self._enabled
         server_running = self._server is not None and self._server.running
         active_count = self._registry.count_deliverable() if self._registry else 0
+        theme_counts = (
+            self._registry.count_active_omp_by_theme()
+            if self._registry
+            else dict.fromkeys(CARD_THEMES, 0)
+        )
+        theme_summary = " · ".join(
+            f"{THEME_LABELS[theme]} {theme_counts[theme]} 个" for theme in CARD_THEMES
+        )
         render_mode = self._get_render_mode()
         fallback = self.config.get("fallback_to_text", True)
         private_notifications = bool(
@@ -1881,6 +1986,7 @@ class WebhookNotifierPlugin(Star):
             f"HTTP 服务：{'✅ 运行中' if server_running else '⏸ 未启动'}",
             f"Active Endpoint：{active_count} 个",
             f"渲染模式：{render_mode}",
+            f"OMP 卡片主题：{theme_summary}（按 Endpoint 设置，token list 查看）",
             f"渲染降级：{'开启' if fallback else '关闭'}",
             f"Webhook 私聊状态通知：{'开启' if private_notifications else '关闭'}",
             f"通知降噪模式：{notification_mode}",

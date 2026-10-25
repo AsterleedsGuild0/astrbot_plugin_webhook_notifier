@@ -19,6 +19,15 @@
 - Endpoint Provider 不可变，不能通过 rotate 或编辑 Registry 原位切换。`provider=markdown` 决定输入协议；`render_mode=text|html_image` 决定输出展示，Markdown 请求同样可以使用 HTML 图片与文本降级。
 - 此变更使用新的主版本号表达兼容性边界，Webhook payload 版本与 Registry 格式版本不变。测试、部署与发布证据分别记录，不将本地回归或测试包投递扩大为全部生产路径通过。
 
+## v2.3.0：OMP Endpoint 卡片主题
+
+- Registry 记录新增可选字段 `theme`，取值只有 `light`、`dark`。缺少该字段的旧记录按 `light` 读取，无需迁移；Registry 格式版本仍为 2。新服务端写回时为每条记录保存 `theme`；回退到旧服务端时旧版本忽略该字段，深色设置随下一次写回丢失，卡片恢复浅色。
+- 只有 `provider=omp` 的记录可以是 `dark`。其他 Provider 的记录若出现非 `light` 主题，或任何记录出现其他取值，Registry 加载按损坏处理（fail-closed），不静默改写。
+- 主题只能通过 `token new … --provider omp --theme <light|dark>` 创建时指定，或由 owner 用 `token theme <名称> <light|dark>` 切换；非 OMP、非 owner、非法取值、终态记录一律拒绝且不写 Registry。没有全局主题配置项，不复用已移除的 `render_mode`／`template` Endpoint 字段名，不提供 `auto`。
+- 内置主卡与时间线附图按 Endpoint 主题渲染同一套颜色变量；页面外层背景随主题取色，截图裁切只去掉多余背景，深色卡片外不留浅色边。`light` 与此前版本逐像素一致。纯文本模式与文本降级不受主题影响。
+- 模板上下文新增 `event.theme`（`light` 或 `dark`），内置模板和自定义模板都能读取；不使用该变量的自定义模板输出不变。WebUI 预览不自动注入，需要时在预览 JSON 中提供 `theme`。
+- Webhook 请求、响应与 OMP 客户端协议不变；主题只由服务端 Registry 决定，调用方无法在请求中指定。
+
 ## OMP V2：运行收束与交互观察（未发布）
 
 新客户端只发送 `omp.run_finished`、`omp.action_required` 和凭据告警 `omp.credential_disabled`，`version` 必须是整数 `2`；`X-OMP-Event` 如提供，必须与 body 完全相同。旧服务端不识别这两个事件，不得自动降级为 `omp.session_stop`。仍使用显式 `provider=omp` Endpoint、Bearer 和既有目标别名白名单。

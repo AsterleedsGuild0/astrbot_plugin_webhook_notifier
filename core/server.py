@@ -16,7 +16,13 @@ from .idempotency import (
     IdempotencyStore,
     make_idempotency_key,
 )
-from .models import DisplayContext, EndpointRecord, NormalizedEvent, ServerConfig
+from .models import (
+    DEFAULT_CARD_THEME,
+    DisplayContext,
+    EndpointRecord,
+    NormalizedEvent,
+    ServerConfig,
+)
 from .notification_policy import (
     normalize_min_completion_duration,
     normalize_notification_mode,
@@ -795,7 +801,7 @@ class WebhookServer:
         for template in attempts:
             try:
                 image_result, render_options = await self._render_image_attempt(
-                    event, template, request_id, prepared_timeline
+                    event, template, request_id, prepared_timeline, endpoint.theme
                 )
                 break
             except Exception as exc:
@@ -825,7 +831,7 @@ class WebhookServer:
         timeline_image: Any = None
         try:
             timeline_image = await self._render_timeline_image_attempt(
-                event, request_id, prepared_timeline
+                event, request_id, prepared_timeline, endpoint.theme
             )
         except Exception as exc:
             failure_reason = _safe_failure_reason(exc, "timeline_render_failed")
@@ -972,13 +978,14 @@ class WebhookServer:
         event: NormalizedEvent,
         request_id: str,
         prepared_timeline: PreparedSubagentTimeline | None = None,
+        theme: str = DEFAULT_CARD_THEME,
     ) -> Any:
         """生成复杂时间线附图；失败由调用方安全降级为主卡。"""
         if not self._html_render:
             _raise_render_failure("html_render_not_available", "HTML 渲染不可用")
 
         try:
-            rendered_timeline = render_subagent_timeline(event, prepared_timeline)
+            rendered_timeline = render_subagent_timeline(event, prepared_timeline, theme)
         except Exception as exc:
             _raise_render_failure(
                 "timeline_template_render_failed", "时间线模板渲染失败", exc
@@ -1053,13 +1060,14 @@ class WebhookServer:
         template: ActiveTemplate,
         request_id: str,
         prepared_timeline: PreparedSubagentTimeline | None = None,
+        theme: str = DEFAULT_CARD_THEME,
     ) -> tuple[Any, dict[str, Any]]:
         """完成单个模板的生成、截图、校验与 trim，不发送。"""
         if not self._html_render:
             _raise_render_failure("html_render_not_available", "HTML 渲染不可用")
         try:
             event_data = render_html_data(
-                event, self._display_context, prepared_timeline
+                event, self._display_context, prepared_timeline, theme
             )["event"]
             rendered_html = render_html_template(template.content, event_data)
         except Exception as exc:

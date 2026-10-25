@@ -17,6 +17,9 @@ from typing import Any, Callable, TypeVar
 from astrbot.api import logger
 
 from .models import (
+    CARD_THEMES,
+    DEFAULT_CARD_THEME,
+    THEMED_PROVIDER,
     DeliveryAuthentication,
     EndpointRecord,
     EndpointStatus,
@@ -315,6 +318,8 @@ class EndpointRegistry:
             owner_platform_id=data.get("owner_platform_id", ""),
             management_state=data.get("management_state", MANAGED),
             legacy_record_key=data.get("legacy_record_key", legacy_key),
+            # 旧记录没有 theme，按浅色读取，无需迁移。
+            theme=data.get("theme", DEFAULT_CARD_THEME),
         )
 
     def _validate_snapshot(
@@ -476,6 +481,10 @@ class EndpointRegistry:
             or not record.legacy_record_key
         ):
             raise RegistryLoadError("record legacy_record_key 非法")
+        if record.theme not in CARD_THEMES:
+            raise RegistryLoadError("record theme 非法")
+        if record.provider != THEMED_PROVIDER and record.theme != DEFAULT_CARD_THEME:
+            raise RegistryLoadError("只有 OMP endpoint 可以设置非默认卡片主题")
 
         if expected_management_state == MANAGED:
             scope = (record.owner_platform_id, record.owner_user_id, record.name)
@@ -666,6 +675,7 @@ class EndpointRegistry:
         target_umo: str,
         description: str | None = None,
         provider: str = DEFAULT_PROVIDER,
+        theme: str = DEFAULT_CARD_THEME,
     ) -> tuple[EndpointRecord, str]:
         token_plain = generate_token()
         token_hash_value = hash_token(self._server_secret, token_plain)
@@ -694,6 +704,7 @@ class EndpointRegistry:
                 created_at=datetime.now(timezone.utc).isoformat(),
                 description=description or f"私聊 endpoint for {owner_user_id}",
                 owner_platform_id=owner_platform_id,
+                theme=theme,
             )
             records[key] = record
             return record
@@ -710,6 +721,7 @@ class EndpointRegistry:
         target_group_id: str | None,
         description: str | None = None,
         provider: str = DEFAULT_PROVIDER,
+        theme: str = DEFAULT_CARD_THEME,
     ) -> tuple[EndpointRecord, str, str]:
         request_id = generate_request_id()
         code = generate_verification_code()
@@ -743,6 +755,7 @@ class EndpointRegistry:
                 pending_expires_at=expires_at.isoformat(),
                 description=description or f"群聊 endpoint for {owner_user_id}",
                 owner_platform_id=owner_platform_id,
+                theme=theme,
             )
             records[key] = record
             pending[_pending_key(owner_platform_id, request_id)] = {
@@ -1037,6 +1050,18 @@ class EndpointRegistry:
                 for record in (*self._records.values(), *self._quarantine.values())
             )
 
+    def count_active_omp_by_theme(self) -> dict[str, int]:
+        """按卡片主题统计 active OMP endpoint，供全局状态展示，不含 owner 或名称。"""
+        counts = dict.fromkeys(CARD_THEMES, 0)
+        with self._lock:
+            for record in self._records.values():
+                if (
+                    record.provider == THEMED_PROVIDER
+                    and record.status == EndpointStatus.ACTIVE.value
+                ):
+                    counts[record.theme] += 1
+        return counts
+
     def rotate_token(
         self, owner_platform_id: str, owner_user_id: str, name: str
     ) -> tuple[bool, str]:
@@ -1053,6 +1078,30 @@ class EndpointRegistry:
             return (True, token_plain)
 
         return self._transaction(mutate)
+
+    def set_endpoint_theme(
+        self, owner_platform_id: str, owner_user_id: str, name: str, theme: str
+    ) -> tuple[bool, str]:
+        """切换当前 scope 中 OMP endpoint 的卡片主题；拒绝时不写 Registry。"""
+        if theme not in CARD_THEMES:
+            return (False, f"不支持的主题：{theme}，可选 {' / '.join(CARD_THEMES)}")
+        key = _record_key(owner_platform_id, owner_user_id, name)
+        with self._lock:
+            record = self._records.get(key)
+            if not record:
+                return (False, "endpoint 不存在")
+            if record.provider != THEMED_PROVIDER:
+                return (False, f"卡片主题只适用于 {THEMED_PROVIDER} endpoint")
+            if record.status not in VISIBLE_STATUSES:
+                return (False, "该 endpoint 已是终态，无法切换主题")
+            if record.theme == theme:
+                return (True, f"卡片主题已是 {theme}，无需修改")
+
+            def mutate(records, quarantine, pending):
+                records[key].theme = theme
+
+            self._transaction(mutate)
+        return (True, f"卡片主题已切换为 {theme}")
 
     def revoke_endpoint(
         self, owner_platform_id: str, owner_user_id: str, name: str
