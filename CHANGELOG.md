@@ -1,12 +1,12 @@
 # 更新日志
 
-## 未发布
+## v2.3.0 - 2026-10-26
 
-本版本为 OMP Endpoint 增加深色通知卡片（#36）。
+本版本为 OMP Endpoint 增加深色通知卡片（#36）。创建与切换命令见[命令参考 · 卡片主题](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/blob/v2.3.0/docs/command-reference.md#卡片主题)。
 
 ### 升级须知
 
-- **默认仍为浅色，已有 Endpoint 无需迁移。** Registry 记录新增可选字段 `theme`，旧记录缺少该字段时按浅色处理；浅色卡片与 v2.2.0 逐像素一致。OMP 客户端与 Webhook 协议不变，不需要升级客户端。
+- **默认仍为浅色，已有 Endpoint 无需迁移。** Registry 记录新增可选字段 `theme`，旧记录缺少该字段时按浅色处理；浅色卡片与 v2.2.0 逐像素一致。Webhook 协议不变；OMP 客户端代码与 v2.2.0 相同，marketplace 中的 2.3.0 只是随插件版本同步，升级与否不影响通知。
 - **回退到旧版本会丢失深色设置。** 旧服务端忽略 `theme`，下一次写回 Registry 时该字段被丢弃，卡片恢复浅色。
 
 ### 变更

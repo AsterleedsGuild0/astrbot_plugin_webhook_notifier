@@ -1,6 +1,6 @@
 {
   "name": "omp-webhook-notifier",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "把 OMP 运行收束与待处理交互以 V2 Webhook 发送到 AstrBot Webhook Notifier",
   "private": true,
   "type": "module",
