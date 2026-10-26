@@ -95,6 +95,42 @@ def test_compaction_without_success_and_goal_without_budget():
     assert shown["目标状态"] == "进行中 · 已用 5 · 用时 3 秒"
 
 
+def usage_card(**extra):
+    body = envelope()
+    body["signals"] = {"usage": {**SIGNALS["usage"], **extra}}
+    return labels(parse(body))["本次运行用量"]
+
+
+def test_usage_cost_and_speed_lines():
+    assert usage_card(costUsd=0.0320504, ttftMs=3531, outputTps=44.2) == (
+        "共 35k tokens（输入 2.6k · 输出 478 · 缓存读 31.9k）\n"
+        "费用约 $0.03（按官方价格估算，含子代理）\n"
+        "首字 3.5 s · 输出 44 tok/s（客户端测得）")
+
+
+@pytest.mark.parametrize("extra,lines", [
+    ({"costUsd": 0.0049}, ["费用约 <$0.01（按官方价格估算，含子代理）"]),
+    ({"costUsd": 0.005}, ["费用约 $0.01（按官方价格估算，含子代理）"]),
+    ({"costUsd": 12}, ["费用约 $12.00（按官方价格估算，含子代理）"]),
+    ({"ttftMs": 842}, ["首字 0.8 s（客户端测得）"]),
+    ({"outputTps": 9.94}, ["输出 9.9 tok/s（客户端测得）"]),
+])
+def test_usage_optional_lines_appear_independently(extra, lines):
+    assert usage_card(**extra).split("\n")[1:] == lines
+
+
+@pytest.mark.parametrize("key,value", [
+    ("costUsd", 0), ("costUsd", -0.01), ("costUsd", True), ("costUsd", "0.03"), ("costUsd", 100_001),
+    ("ttftMs", 0), ("ttftMs", 1.5), ("ttftMs", 3_600_001),
+    ("outputTps", 0), ("outputTps", -1), ("outputTps", None),
+])
+def test_usage_cost_and_speed_reject_invalid(key, value):
+    body = envelope()
+    body["signals"] = {"usage": {**SIGNALS["usage"], key: value}}
+    with pytest.raises(ProviderError):
+        parse(body)
+
+
 def _set(body, path, value):
     target = body
     for key in path[:-1]:

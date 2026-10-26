@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import unicodedata
@@ -30,6 +31,9 @@ _GOAL_STATUSES = {
     "complete": "已完成", "dropped": "已放弃",
 }
 _MAX_COUNT = 10**12
+_MAX_COST_USD = 100_000
+_MAX_TTFT_MS = 3_600_000
+_MAX_TPS = 1_000_000
 _RESULTS = {"completed", "failed", "aborted", "action_required", "unknown"}
 _REASONS = {
     "missing_start", "session_changed", "shutdown", "expired", "capacity",
@@ -50,6 +54,13 @@ def _int(value: Any, low: int, high: int) -> int:
     if type(value) is not int or not low <= value <= high:
         raise ValueError("integer")
     return value
+
+
+def _positive(value: Any, high: float) -> float:
+    """有限正数（不接受布尔与 0）：费用、速度这类缺失时由客户端省略、不以 0 表示的值。"""
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= high:
+        raise ValueError("number")
+    return float(value)
 
 
 def _compact(value: int) -> str:
@@ -99,13 +110,25 @@ def _signal_fields(signals: Any) -> list[dict]:
         outcome = "备用模型完成请求" if fallback["succeeded"] else "未确认备用模型成功"
         fields.append({"label": "模型降级", "value": f"{fallback['from']} → {fallback['to']}，{outcome}", "short": False})
     if "usage" in signals:
-        usage = _object(signals["usage"], {"input", "output", "cacheRead", "cacheWrite", "total"}, set())
-        values = {key: _int(usage[key], 0, _MAX_COUNT) for key in usage}
+        usage = _object(signals["usage"], {"input", "output", "cacheRead", "cacheWrite", "total"}, {"costUsd", "ttftMs", "outputTps"})
+        values = {key: _int(usage[key], 0, _MAX_COUNT) for key in ("input", "output", "cacheRead", "cacheWrite", "total")}
         if not values["total"]:
             raise ValueError("usage")
         parts = [f"输入 {_compact(values['input'])}", f"输出 {_compact(values['output'])}"]
         parts += [f"{label} {_compact(values[key])}" for key, label in (("cacheRead", "缓存读"), ("cacheWrite", "缓存写")) if values[key]]
-        fields.append({"label": "本次运行用量", "value": f"共 {_compact(values['total'])} tokens（{' · '.join(parts)}）", "short": False})
+        lines = [f"共 {_compact(values['total'])} tokens（{' · '.join(parts)}）"]
+        if "costUsd" in usage:
+            cost = _positive(usage["costUsd"], _MAX_COST_USD)
+            lines.append(f"费用约 {'<$0.01' if cost < 0.005 else f'${cost:.2f}'}（按官方价格估算，含子代理）")
+        speed = []
+        if "ttftMs" in usage:
+            speed.append(f"首字 {_int(usage['ttftMs'], 1, _MAX_TTFT_MS) / 1000:.1f} s")
+        if "outputTps" in usage:
+            tps = _positive(usage["outputTps"], _MAX_TPS)
+            speed.append(f"输出 {tps:.1f} tok/s" if tps < 10 else f"输出 {tps:.0f} tok/s")
+        if speed:
+            lines.append(" · ".join(speed) + "（客户端测得）")
+        fields.append({"label": "本次运行用量", "value": "\n".join(lines), "short": False})
     if "goal" in signals:
         goal = _object(signals["goal"], {"objective", "status", "tokensUsed", "timeUsedSeconds"}, {"tokenBudget"})
         _bounded_text(goal["objective"], 200)
