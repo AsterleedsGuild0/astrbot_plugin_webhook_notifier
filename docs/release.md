@@ -1,6 +1,6 @@
 # 发布流程
 
-本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.3.0`，发布 OMP Endpoint 深色卡片主题；仅服务端变化，OMP 客户端代码不变（见 CHANGELOG 升级须知）。本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
+本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.4.0`，为 OMP 本次运行用量补充估算费用与速度；服务端与 OMP 客户端都有变化，须先升级服务端（见 CHANGELOG 升级须知）。本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
 
 版本号与文档表示源码契约，远端发布完成状态以 [GitHub Releases](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) 及对应 Actions run 为准。已发布 tag/asset 不覆盖、不重写；线上部署另行验收。
 
@@ -91,13 +91,13 @@ uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --prob
 ## 发布前检查
 
 1. 确认目标版本号一致：
-   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.3.0`。
-   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.3.0`，`uv.lock` 根项目版本同步更新。
+   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.4.0`。
+   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.4.0`，`uv.lock` 根项目版本同步更新。
    - `integrations/omp/package.json` 的 `version` 与插件版本等价。OMP marketplace 的安装与升级都按这个版本判断，Release workflow 会校验它与 tag 一致；`.omp-plugin/marketplace.json` 不写版本。
    - marketplace 读取默认分支，客户端改动只在发版时推送到 `main`，避免用户装到尚未发布的客户端。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
-   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.3.0 - 2026-10-26`，包含升级须知（默认浅色无需迁移、回退旧版本会丢失深色设置）。
-   - 发布准备与 dry-run 不创建 `v2.3.0` tag；仅在门禁通过后推送 tag 触发正式 Release。
+   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.4.0 - 2026-10-26`，包含升级须知（先升级服务端，旧服务端拒绝新字段）。
+   - 发布准备与 dry-run 不创建 `v2.4.0` tag；仅在门禁通过后推送 tag 触发正式 Release。
    - 发布后用 Release 原件部署线上，并分别以浅色与深色测试 Endpoint 执行 `--verify`（见上文接收端验收）。
 2. 维护本地锁定验证依赖：
 

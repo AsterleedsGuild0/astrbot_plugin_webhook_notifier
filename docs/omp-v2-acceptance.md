@@ -306,6 +306,22 @@ local 来源每次直接读目录，`upgrade` 前无需 `update`；GitHub 来源
 
 文字与主卡同条，图片按 1.3 倍渲染，布局与私聊一致。首次尝试（2026-10-25）全部返回 QQ `40034105 主动消息失败, 无权限`：QQ 官方 Bot 的群主动消息需要群主在群设置中开启“机器人主动在群聊内发言”，开启后通过。此前提已写入接收端验收文档。
 
+## #39：本次运行估算费用与速度
+
+调查与 cpa-usage-keeper 逐请求对照见 [#39 评论](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/issues/39)。结论：消息 `usage.cost` 与 `getUsageStatistics()` 的 `cost`／`subagentCost` 是 OMP 模型目录价格的估算（USD），`openai-codex/gpt-6.1-sol` 13 个请求与 Keeper 逐条相等；`cpa/deepseek-flash` 由 OMP 按模型 id 匹配参考目录补价（含工作日高峰时段全价、其余半价），与 Keeper 的固定价相差恰为时段倍数。默认后台 task 的子代理不计入主会话 `cost`，同步 task 只把子代理助手消息计入 `subagentCost`，因此按会话分别取 `cost − subagentCost` 差值再合计。
+
+2026-10-26，OMP 18.12.6，隔离 HOME，显式加载仓库客户端包（`cd0b973`），服务端为测试包 `v2.3.0-test.20261026.1407.usage-cost`。
+
+| 场景 | 出站 `signals.usage` 新字段 | 核对 | 接收端 |
+| --- | --- | --- | --- |
+| S39-codex-s1（浅色） | `costUsd 0.016504`、`ttftMs 3567`、`outputTps 50.7` | — | 【已完成】卡“本次运行用量”三行 |
+| S39-codex-task（后台 task ×2，浅色） | `costUsd 0.066695`、`ttftMs 3487`、`outputTps 40.4` | 等于主会话与两个子代理全部助手消息费用加子代理开场请求 `0.0666948`。Keeper 同窗口另有一次子代理开场请求（0.001156 美元）不在任何 OMP 会话统计中，OMP 自身也不计入 | 费用约 $0.07（按官方价格估算，含子代理）· 首字 3.5 s · 输出 40 tok/s（客户端测得） |
+| S39-cpa-s1（深色） | `costUsd 0.000318`、`ttftMs 1043`，生成时长不足 1 秒，无 `outputTps` | 等于主会话消息费用 | 费用约 <$0.01 |
+| S39-cpa-eval（eval `agent()` ×2，深色） | `costUsd 0.002152`、`ttftMs 880`、`outputTps 208.6` | 等于主会话与 E1、E2 全部费用 `0.0021519` | 深色卡三行显示正常 |
+| S39-mkt-2.3.0（marketplace 安装的 2.3.0 客户端） | 无新字段 | 旧客户端经新服务端 delivered | 卡片与 v2.3.0 相同 |
+
+固定基准图不含 `signals`，浅色与深色两套 `--verify` 各 8 张图与基准一致；新增行的画面以上表读回为准。
+
 ## 原生验收工具
 
 `scripts/omp_native/` 提供隔离环境下的原生 OMP 验收，日志、隔离 HOME 与工作目录在被 Git 忽略的 `tmp/omp-native/`。
@@ -322,4 +338,5 @@ uv run --frozen python scripts/omp_native/scenarios.py plan S3-plan save     # �
 - 模型 provider 只把真实 `models.yml` 中一个 provider 的结构写入隔离 HOME，`apiKey` 写成环境变量名，值启动时从登录 shell 只读注入，不落盘。`OMP_NATIVE_PROVIDER`／`OMP_NATIVE_MODEL` 可改 provider 与模型。
 - `OMP_NATIVE_LOAD=package`（默认）只显式加载仓库客户端包；`installed` 不加 `--no-extensions`，使用隔离 HOME 中的扩展目录或已安装插件。
 - `OMP_NATIVE_ROOT` 可换一套隔离根（如 marketplace 验收用的 `tmp/omp-native-mkt`）。代理与场景必须使用同一个根，否则代理把请求记到另一个根的 `logs/webhook.jsonl`，场景读不到通知。
-- `event-recorder.ts` 只记录公开事件类型与结构字段，不记录正文、参数或输出；每个场景在 `logs/runs.jsonl` 记切片索引。
+- `event-recorder.ts` 只记录公开事件类型与结构字段，不记录正文、参数或输出；助手消息另记 token、估算费用、`ttft` 与 `duration`。每个场景在 `logs/runs.jsonl` 记切片索引。
+- 模型代理透传 WebSocket（OMP 的 `openai-codex` 传输优先使用），注入故障时拒绝升级并关闭已有隧道，使请求回退到可注入错误的 HTTP。
