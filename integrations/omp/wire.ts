@@ -18,8 +18,12 @@ export type Signals = {
   context?: { tokens: number; window: number };
   compaction?: { count: number; failed?: number };
   fallback?: { from: string; to: string; succeeded: boolean };
-  /** 本次运行用量：agent_start 与收束时两次会话累计快照之差。 */
-  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  /**
+   * 本次运行用量：agent_start 与收束时两次会话累计快照之差。
+   * costUsd：OMP 模型目录估算的美元费用，主会话与已关联子代理各自直接费用（cost − subagentCost）之差的合计，仅主会话附带；
+   * ttftMs／outputTps：本会话本次各请求首字延迟的中位数与首字后输出速度（Σoutput ÷ Σ(duration − ttft)）。取不到或不可信时省略。
+   */
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; costUsd?: number; ttftMs?: number; outputTps?: number };
   goal?: { objective: string; status: GoalStatus; tokensUsed: number; tokenBudget?: number; timeUsedSeconds: number };
   /** 最后一次 todo 提醒：第几次／上限与当时未完成的条目。 */
   todo?: { reminders: number; maxReminders: number; pendingCount: number; pending: string[] };

@@ -64,6 +64,43 @@ export function usageDelta(start: Usage | undefined, end: Usage | undefined): Us
   return delta;
 }
 
+/** 会话自身的估算费用（美元）：累计 cost 减去随同步 task 结果计入的 subagentCost，避免与子代理会话重复计算。 */
+export function directCost(value: unknown): number | undefined {
+  const cost = field(value, "cost"), sub = field(value, "subagentCost");
+  if (typeof cost !== "number" || typeof sub !== "number" || !Number.isFinite(cost) || !Number.isFinite(sub) || sub < 0 || cost < sub) return;
+  return cost - sub;
+}
+/** 两次直接费用快照之差；缺失或回退时返回 undefined。 */
+export function costDelta(start: number | undefined, end: number | undefined): number | undefined {
+  if (start === undefined || end === undefined || end < start) return;
+  return end - start;
+}
+
+/** 本会话本次运行各助手消息的计时：OMP 在消息上记录 ttft 与 duration（毫秒，含首字前等待）。 */
+export type Speed = { ttfts: number[]; output: number; generationMs: number };
+const MAX_SPEED_SAMPLES = 1024;
+const MIN_GENERATION_MS = 1000;
+/** 与服务端校验上限一致：超出即省略，避免整条通知被拒收。 */
+const MAX_TTFT_MS = 3_600_000, MAX_TPS = 1_000_000;
+export const MAX_COST_USD = 100_000;
+export function recordSpeed(speed: Speed, message: unknown): void {
+  if (field(message, "role") !== "assistant") return;
+  const ttft = field(message, "ttft"), duration = field(message, "duration"), output = count(field(field(message, "usage"), "output"));
+  if (typeof ttft !== "number" || !Number.isFinite(ttft) || ttft <= 0) return;
+  if (speed.ttfts.length < MAX_SPEED_SAMPLES) speed.ttfts.push(ttft);
+  if (typeof duration === "number" && Number.isFinite(duration) && duration > ttft && output) {
+    speed.output += output; speed.generationMs += duration - ttft;
+  }
+}
+/** 首字延迟取中位数；输出速度为首字后生成速度，生成时长合计不足 1 秒时省略（短回复不足以估算）。 */
+export function speedFields(speed: Speed): { ttftMs?: number; outputTps?: number } {
+  const sorted = [...speed.ttfts].sort((a, b) => a - b), mid = sorted.length >> 1;
+  const median = sorted.length ? (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2) : undefined;
+  const ttftMs = median === undefined || median > MAX_TTFT_MS ? undefined : Math.max(1, Math.round(median));
+  const tps = speed.generationMs >= MIN_GENERATION_MS && speed.output > 0 ? Math.round(speed.output / speed.generationMs * 10000) / 10 : undefined;
+  return { ...(ttftMs !== undefined ? { ttftMs } : {}), ...(tps && tps <= MAX_TPS ? { outputTps: tps } : {}) };
+}
+
 export function context(value: unknown): Signals["context"] {
   const tokens = count(field(value, "tokens")), window = count(field(value, "contextWindow"));
   if (tokens === undefined || !window) return;

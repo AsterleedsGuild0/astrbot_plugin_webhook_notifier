@@ -5,7 +5,7 @@
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ExtensionEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { anonymous, askDetail, ref, text } from "./sanitize.ts";
-import { assistant, context, errorCategory, goal, lastAssistant, todo, usage, usageDelta, type Goal } from "./signals.ts";
+import { MAX_COST_USD, assistant, context, costDelta, directCost, errorCategory, goal, lastAssistant, recordSpeed, speedFields, todo, usage, usageDelta, type Goal } from "./signals.ts";
 import { MAX_INTERACTIONS, MAX_SESSIONS, TTL, alertedProviders, bindings, linkRuns, snapshotJobs, type Binding, type Interaction, type Run, type Span } from "./state.ts";
 import { timelines } from "./timeline.ts";
 import { configuration, enqueue, schedulePump, type Log } from "./transport.ts";
@@ -70,16 +70,33 @@ export default (pi: ExtensionAPI): void => {
   function settleCompaction(run: Run): void {
     if (run.compactionPending) { run.compactionFailures = Math.min(999, run.compactionFailures + 1); run.compactionPending = false; }
   }
+  /**
+   * 本次运行估算费用：仅主会话附带，合计主会话与已关联子代理各自的直接费用差。
+   * 子代理关联不完整（加载缺口、截断、父子图无效）或任一会话缺少快照、尚未收束时整体省略，不发部分合计。
+   */
+  function runCost(run: Run): number | undefined {
+    if (run.root !== run || run.timelineReasons.has("loading_gap") || run.timelineReasons.has("truncated") || run.timelineReasons.has("invalid_parent_graph")) return;
+    let total = costDelta(run.costStart, run.costEnd);
+    for (const child of run.children ?? []) {
+      if (total === undefined) return;
+      const own = child.closed ? costDelta(child.costStart, child.costEnd) : undefined;
+      total = own === undefined ? undefined : total + own;
+    }
+    if (total === undefined || !Number.isFinite(total)) return;
+    const rounded = Math.round(total * 1e6) / 1e6;
+    return rounded > 0 && rounded <= MAX_COST_USD ? rounded : undefined;
+  }
   function signals(run: Run, current: Goal | undefined): Signals | undefined {
     settleCompaction(run);
     const delta = usageDelta(run.usageStart, run.usageEnd);
+    const cost = delta ? runCost(run) : undefined;
     // goal 在本次运行中更新过，或仍处于进行中／暂停／预算耗尽时附带。
     const relevant = current && (current.status === "active" || current.status === "paused" || current.status === "budget-limited" || (run.start !== undefined && current.updatedAt >= run.start));
     const value: Signals = {
       ...(run.context ? { context: run.context } : {}),
       ...(run.compactions || run.compactionFailures ? { compaction: { count: run.compactions, ...(run.compactionFailures ? { failed: run.compactionFailures } : {}) } } : {}),
       ...(run.fallback ? { fallback: { ...run.fallback } } : {}),
-      ...(delta ? { usage: delta } : {}),
+      ...(delta ? { usage: { ...delta, ...(cost ? { costUsd: cost } : {}), ...speedFields(run.speed) } } : {}),
       ...(relevant ? { goal: { objective: current.objective, status: current.status, tokensUsed: current.tokensUsed, ...(current.tokenBudget ? { tokenBudget: current.tokenBudget } : {}), timeUsedSeconds: current.timeUsedSeconds } } : {}),
       ...(run.todo ? { todo: { ...run.todo, pending: [...run.todo.pending] } } : {}),
     };
@@ -167,6 +184,9 @@ export default (pi: ExtensionAPI): void => {
     const monoNow = Math.floor(performance.now());
     const runRef = ref();
     const span: Span = { ref: runRef, started: observed ? monoNow : undefined, status: "running" };
+    // 子代理会话的首个请求早于 agent_start，起点取 session_start 快照；其余取当前累计值。
+    const stats = observed ? (binding.baseline ?? read(() => ctx.sessionManager.getUsageStatistics())) : undefined;
+    if (observed) binding.baseline = undefined;
     const run: Run = {
       ref: runRef, start: observed ? Date.now() : undefined, monoStart: observed ? monoNow : undefined, created: monoNow, closed: false,
       session: { ref: binding.key, scope: ctx.agent?.kind === "main" ? "root" : ctx.agent?.kind === "sub" ? "subagent" : "unknown", name: sessionName(ctx), cwdName: text(basename(ctx.cwd || ctx.sessionManager.getCwd())), agent: text(ctx.agent?.name) },
@@ -174,8 +194,8 @@ export default (pi: ExtensionAPI): void => {
       model, thinking, metadataChanged: false, metadataMissing: !model || !thinking,
       agentKey: ctx.agent?.id ? anonymous(ctx.agent.id) : undefined, parentKey: ctx.agent?.parentId ? anonymous(ctx.agent.parentId) : undefined,
       depth: ctx.agent?.depth ?? 0, spans: [span], span, spanCount: 1, initialJobs: new Set(), observedSegments: 0, timelineReasons: new Set(),
-      compactions: 0, compactionFailures: 0, compactionPending: false,
-      ...(observed ? { usageStart: usage(read(() => ctx.sessionManager.getUsageStatistics())) } : {}),
+      compactions: 0, compactionFailures: 0, compactionPending: false, speed: { ttfts: [], output: 0, generationMs: 0 },
+      ...(observed ? { usageStart: usage(stats), costStart: directCost(stats) } : {}),
     };
     const created = createdAt(ctx);
     if (created) run.session.createdAt = created;
@@ -269,7 +289,9 @@ export default (pi: ExtensionAPI): void => {
     metadata(run, ctx);
     // 收束时的上下文占用与会话累计用量；续跑时下一次 agent_end 覆盖。
     run.context = context(read(() => ctx.getContextUsage()));
-    run.usageEnd = usage(read(() => ctx.sessionManager.getUsageStatistics()));
+    const stats = read(() => ctx.sessionManager.getUsageStatistics());
+    run.usageEnd = usage(stats);
+    run.costEnd = directCost(stats);
     run.last = lastAssistant(event.messages);
     if (run.span && run.span.ended === undefined) run.span.ended = Math.floor(performance.now());
     if (event.awaitingAsyncWork === true && !run.background) {
@@ -334,6 +356,15 @@ export default (pi: ExtensionAPI): void => {
     const run = get(ctx)?.run;
     return run && !run.closed ? run : undefined;
   }
+  observe("session_start", (_, ctx) => {
+    if (ctx.agent?.kind !== "sub") return;
+    const binding = get(ctx);
+    if (binding && (!binding.run || binding.run.closed)) binding.baseline = read(() => ctx.sessionManager.getUsageStatistics());
+  });
+  observe("message_end", (event, ctx) => {
+    const run = open(ctx);
+    if (run) recordSpeed(run.speed, event.message);
+  });
   observe("auto_compaction_end", (event, ctx) => {
     const run = open(ctx);
     if (!run || event.skipped) return;

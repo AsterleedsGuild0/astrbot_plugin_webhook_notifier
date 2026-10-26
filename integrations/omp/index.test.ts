@@ -737,6 +737,53 @@ describe("运行健康与资源信号", () => {
   });
 });
 
+describe("本次运行估算费用与速度", () => {
+  type Stats = { cost: number; subagentCost: number; input: number };
+  function stats(ctx: ExtensionContext, rows: Stats[]) {
+    let index = 0;
+    ctx.sessionManager.getUsageStatistics = (() => {
+      const row = rows[Math.min(index++, rows.length - 1)];
+      return { output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: row.input + 1, ...row };
+    }) as never;
+  }
+  const reply = (ttft: number, duration: number, output: number) => ({ message: { role: "assistant", ttft, duration, usage: { output }, content: SENTINEL } });
+
+  it("主会话直接费用加已关联子代理的费用；子代理从 session_start 起算，同步 task 的 subagentCost 不重复计入", async () => {
+    const root = client(); stats(root.ctx, [{ cost: 0.5, subagentCost: 0.1, input: 10 }, { cost: 0.53, subagentCost: 0.11, input: 20 }]);
+    root.emit("agent_start");
+    const sub = child(root.ctx, "cost-child");
+    stats(sub.ctx, [{ cost: 0, subagentCost: 0, input: 0 }, { cost: 0.0115, subagentCost: 0, input: 5 }]);
+    sub.emit("session_start"); sub.emit("agent_start"); sub.emit("agent_end", end()); await advance();
+    root.emit("message_end", reply(800, 2800, 100));
+    root.emit("message_end", reply(1200, 2200, 50));
+    root.emit("message_end", reply(3000, 3100, 5));
+    root.emit("message_end", { message: { role: "user", ttft: 1 } });
+    root.emit("agent_end", end()); await advance();
+    const usage = requests.findLast(r => r.body.session.scope === "root")!.body.signals?.usage;
+    expect(usage).toMatchObject({ input: 10, costUsd: 0.0315, ttftMs: 1200, outputTps: 50 });
+  });
+  it("子代理未能关联、尚未收束或费用为 0 时整体省略费用，token 用量照常发送", async () => {
+    const root = client(); stats(root.ctx, [{ cost: 0, subagentCost: 0, input: 1 }, { cost: 0.2, subagentCost: 0, input: 9 }]);
+    root.emit("agent_start");
+    const running = child(root.ctx, "running-child"); stats(running.ctx, [{ cost: 0, subagentCost: 0, input: 0 }]);
+    running.emit("agent_start");
+    root.emit("agent_end", end()); await advance();
+    expect(requests[0].body.signals?.usage).toEqual({ input: 8, output: 0, cacheRead: 0, cacheWrite: 0, total: 8 });
+    const free = client(); stats(free.ctx, [{ cost: 0, subagentCost: 0, input: 1 }, { cost: 0, subagentCost: 0, input: 3 }]);
+    free.emit("agent_start"); free.emit("agent_end", end()); await advance();
+    expect(requests[1].body.signals?.usage).not.toHaveProperty("costUsd");
+  });
+  it("生成时长合计不足 1 秒时只报首字延迟；没有计时则都不报", async () => {
+    const c = client(); stats(c.ctx, [{ cost: 0, subagentCost: 0, input: 1 }, { cost: 0, subagentCost: 0, input: 3 }]);
+    c.emit("agent_start"); c.emit("message_end", reply(900, 920, 2)); c.emit("message_end", reply(800, 830, 3));
+    c.emit("agent_end", end()); await advance();
+    expect(requests[0].body.signals?.usage).toEqual({ input: 2, output: 0, cacheRead: 0, cacheWrite: 0, total: 2, ttftMs: 850 });
+    c.emit("agent_start"); c.emit("message_end", { message: { role: "assistant", stopReason: "error", duration: 6, usage: { output: 0 } } });
+    c.emit("agent_end", end()); await advance();
+    expect(requests[1]?.body.signals?.usage ?? {}).not.toHaveProperty("ttftMs");
+  });
+});
+
 describe("凭据停用告警", () => {
   it("独立事件只含 provider；原因、邮箱、账号、组织与凭据 ID 不进入出站或日志；同一 provider 去重", async () => {
     const c = client(); const other = client();

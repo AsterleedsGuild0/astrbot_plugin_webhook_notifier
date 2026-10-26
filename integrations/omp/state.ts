@@ -1,6 +1,6 @@
 /** 运行、交互与会话绑定状态：工厂间共享的有界 Map 和父子关联。 */
 import type { InteractionDetail, IntervalKind, Reason, Resolution, Session, Signals, Status, TimelineReason } from "./wire.ts";
-import type { Assistant, Goal, Todo, Usage } from "./signals.ts";
+import type { Assistant, Goal, Speed, Todo, Usage } from "./signals.ts";
 import { anonymous } from "./sanitize.ts";
 
 export type Interaction = { ref: string; kind: IntervalKind; open: boolean; started?: number; ended?: number; result?: Resolution; timer?: NodeJS.Timeout; detail?: InteractionDetail };
@@ -19,11 +19,13 @@ export type Run = {
   /** 最终 assistant 的结构化结束信息（每次 agent_end 覆盖），用于错误分类。 */
   last?: Assistant;
   usageStart?: Usage; usageEnd?: Usage; context?: Signals["context"];
+  /** 会话直接费用（cost − subagentCost）的起止快照与本次助手消息计时。 */
+  costStart?: number; costEnd?: number; speed: Speed;
   compactions: number; compactionFailures: number; compactionPending: boolean;
   fallback?: NonNullable<Signals["fallback"]>; todo?: Todo;
 };
-/** goal 绑定在会话上：创建或更新可能发生在两次运行之间。 */
-export type Binding = { owner: symbol; key: string; touched: number; run?: Run; snapshot?: () => Snapshot; goal?: Goal };
+/** goal 绑定在会话上：创建或更新可能发生在两次运行之间。baseline：子代理 session_start 时的累计快照（首个请求早于 agent_start）。 */
+export type Binding = { owner: symbol; key: string; touched: number; run?: Run; snapshot?: () => Snapshot; goal?: Goal; baseline?: unknown };
 
 export const TTL = 86_400_000;
 export const MAX_SESSIONS = 128;
