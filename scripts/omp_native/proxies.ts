@@ -4,6 +4,7 @@
  * - model：转发到本机 CPA（HTTP 与 WebSocket），可经 /__fault 注入 HTTP 错误以触发 OMP 原生重试。
  */
 import { appendFileSync } from "node:fs";
+import type { ServerWebSocket } from "bun";
 
 const webhookTarget = process.env.ACCEPT_WEBHOOK_TARGET!;
 const webhookLog = process.env.ACCEPT_WEBHOOK_LOG!;
@@ -36,13 +37,14 @@ const webhook = Bun.serve({
 });
 
 type Tunnel = { path: string; headers: Record<string, string>; upstream?: WebSocket; pending: (string | Buffer)[] };
+const tunnels = new Set<ServerWebSocket<Tunnel>>();
 
 const model = Bun.serve<Tunnel>({
   hostname: "127.0.0.1", port: Number(process.env.ACCEPT_MODEL_PORT ?? 0), idleTimeout: 255,
   async fetch(req, server) {
     const url = new URL(req.url);
     // OMP 的 Responses 传输优先走 WebSocket；原样转发升级请求，避免回退 HTTP 前的连接超时混入 TTFT。
-    // 注入故障期间拒绝升级，让 OMP 回退到可注入错误的 HTTP 请求。
+    // 注入故障期间拒绝升级并关闭已有隧道（含 OMP 启动时的预热连接），让 OMP 回退到可注入错误的 HTTP 请求。
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
       if (fault && fault.remaining !== 0) return new Response("websocket disabled while fault injected", { status: 426 });
       const headers: Record<string, string> = {};
@@ -54,6 +56,7 @@ const model = Bun.serve<Tunnel>({
     if (url.pathname === "/__fault") {
       const value = await req.json() as Partial<Fault> | null;
       fault = value && value.status ? { status: value.status, remaining: value.remaining ?? 1, body: value.body ?? "injected" } : undefined;
+      if (fault) for (const ws of tunnels) ws.close(1011, "fault injected");
       return Response.json({ fault: fault ?? null });
     }
     const entry = { t: new Date().toISOString(), method: req.method, path: url.pathname, injected: undefined as number | undefined };
@@ -71,6 +74,7 @@ const model = Bun.serve<Tunnel>({
   websocket: {
     idleTimeout: 255,
     open(ws) {
+      tunnels.add(ws);
       const upstream = new WebSocket(modelTarget.replace(/^http/, "ws") + ws.data.path, { headers: ws.data.headers });
       upstream.binaryType = "nodebuffer" as BinaryType;
       ws.data.upstream = upstream;
@@ -84,7 +88,7 @@ const model = Bun.serve<Tunnel>({
       if (upstream?.readyState === WebSocket.OPEN) upstream.send(message);
       else ws.data.pending.push(message);
     },
-    close(ws) { ws.data.upstream?.close(); },
+    close(ws) { tunnels.delete(ws); ws.data.upstream?.close(); },
   },
 });
 
