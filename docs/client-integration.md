@@ -212,7 +212,12 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='30000'
 
 只发送有界实例／会话／代理名称、cwd basename、匿名引用、结构化状态、时间及公开模型／实际 thinking。名称不从 prompt、问题或回答截取；路径形态名称舍弃。名称本身仍可能包含业务信息。
 
-v2.2.0 起另外发送（全部可选，取不到时省略）：子代理所属主会话名称、会话创建时间、按 HTTP 状态码／`stopReason`／自动重试结果得出的错误类型、上下文占用、自动压缩次数、模型降级的源与备用模型、本次运行用量（不含费用）、Goal 目标与状态、最后一次 todo 提醒时未完成的条目，以及凭据被自动停用时只含 provider 的告警。Goal 目标与 todo 条目是用户为自己的任务写的内容，清洗 URL 与绝对路径后发送；对隐私敏感的场景使用私聊 Endpoint。字段与上限见[公共契约](public-contract.md)。
+v2.2.0 起另外发送（全部可选，取不到时省略）：子代理所属主会话名称、会话创建时间、按 HTTP 状态码／`stopReason`／自动重试结果得出的错误类型、上下文占用、自动压缩次数、模型降级的源与备用模型、本次运行用量、Goal 目标与状态、最后一次 todo 提醒时未完成的条目，以及凭据被自动停用时只含 provider 的告警。Goal 目标与 todo 条目是用户为自己的任务写的内容，清洗 URL 与绝对路径后发送；对隐私敏感的场景使用私聊 Endpoint。字段与上限见[公共契约](public-contract.md)。
+
+v2.4.0 起本次运行用量另带估算费用与速度，默认发送、没有开关：
+
+- 费用只读 OMP 自己的估算值（`sessionManager.getUsageStatistics()` 的 `cost`／`subagentCost`，与 OMP 界面 `$… this turn` 同源，按模型目录价格计算），插件不维护价格表，也不读取 CPA 或 Keeper 的价格。主会话通知合计主会话与已关联子代理（task、eval `agent()`、workpool）的费用；关联不完整时整体不发，不发部分合计。目录没有定价的模型费用为 0，不发送。
+- 速度来自 OMP 在每条助手消息上记录的 `ttft`、`duration` 与输出 token：首字延迟取中位数，输出速度按首字之后的生成时间计算。首字延迟是客户端测得的时间，含到 CPA 等代理的连接开销；OpenAI Codex 传输优先走 WebSocket，回退 HTTP 前的握手超时也会计入。
 
 禁止出站或日志出现正文、完整路径、原始 ID、工具参数、计划、原始错误、凭据身份（邮箱、账号、组织、凭据行 ID）和原始对象。OMP Sender 只记录固定失败分类，不保留异常正文与 traceback。V1 继续接收，但标准化不再透出旧完整路径、raw 元数据或原始 ID；`error`／`aborted` 纠正，普通 `stop` 缺最终证据时为 `unknown`。
 

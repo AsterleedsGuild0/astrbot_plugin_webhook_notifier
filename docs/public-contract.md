@@ -34,7 +34,7 @@
 
 ### 信封与隐私
 
-必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`、`subagentTimeline`、`userWaitTimeline`、`error`、`signals`。各层未知字段拒绝，整个 JSON 至多 64 KiB。`error`、`signals`、`session.rootName`、`session.createdAt` 与凭据告警事件自 v2.2.0 起提供，全部可选：不带这些字段的旧 V2 客户端照常被接收；v2.1.0 及更早的服务端会拒绝带有这些字段的请求，必须先升级服务端。
+必填：`event`、`version`、`id`、`emittedAt`、`session`、`cycle`、`status`。可选：`instance`、`interaction`、`target_alias`、`subagentTimeline`、`userWaitTimeline`、`error`、`signals`。各层未知字段拒绝，整个 JSON 至多 64 KiB。`error`、`signals`、`session.rootName`、`session.createdAt` 与凭据告警事件自 v2.2.0 起提供，全部可选：不带这些字段的旧 V2 客户端照常被接收；v2.1.0 及更早的服务端会拒绝带有这些字段的请求，必须先升级服务端。`signals.usage` 的 `costUsd`、`ttftMs`、`outputTps` 自 v2.4.0 起提供，v2.3.0 及更早的服务端会拒绝带有它们的请求。
 
 - `id` 是每条通知生成一次的随机 32 位小写十六进制标识；重试不得更换。
 - `session` 必须有 `ref`（32 位匿名引用）、`scope`（`root|subagent|unknown`），可选 `name`、`cwdName`、`agent`、`rootName`、`createdAt`。名称不超过 96 个 Unicode 字符；子代理会话没有标题时，客户端用 OMP 展示的任务名（`ctx.agent.id`，如 `ReleaseManagementSmoke`）作为名称；仍缺失时显示 `OMP Session <ref前12位>`。`rootName` 是子代理所属主会话的名称，只在 `scope=subagent` 且父子关联已由公开身份与快照证明时发送，无法关联时省略，卡片显示“所属主会话”。`createdAt` 是会话创建时间（OMP 会话头的 `timestamp`，恢复旧会话时保留原值），不晚于 `emittedAt` 与 `cycle.startedAt`；卡片显示“会话开始时间”，并由服务端派生“会话已持续”（创建至今的时间，不是活跃运行时长），缺失时两者都省略。
@@ -47,7 +47,10 @@
   - `context`：`tokens` 与 `window`（整数，`tokens ≤ window`），收束时 `ctx.getContextUsage()` 的当前窗口占用，不是累计用量；
   - `compaction`：`count`（0–999）与可选 `failed`（1–999）。一次压缩可能依次尝试多种方法，链条中有一种成功即计一次成功，整条链失败或被中止计一次失败；两者不能同时为 0；
   - `fallback`：`from`、`to`（按模型名规则校验）与 `succeeded`（之后是否收到 `retry_fallback_succeeded`）；`reason` 不发送；
-  - `usage`：`input`、`output`、`cacheRead`、`cacheWrite`、`total`，为本次运行开始与收束时会话累计用量之差（恢复旧会话从非零基数起算，压缩不重置累计值）；`total` 为 0 或任一项回退时省略；不发送费用；
+  - `usage`：`input`、`output`、`cacheRead`、`cacheWrite`、`total`，为本次运行开始与收束时会话累计用量之差（恢复旧会话从非零基数起算，压缩不重置累计值）；`total` 为 0 或任一项回退时省略。v2.4.0 起另有三项可选字段，取不到或不可信时省略，从不以 0 表示：
+    - `costUsd`：按 OMP 模型目录价格（即官方价格，含时段定价）估算的美元费用，有限正数，至多 100000。只在主会话通知中出现：主会话与已关联子代理各自 `cost − subagentCost` 的差值之和（子代理从 `session_start` 起算，同步 task 的 `subagentCost` 不重复计入）。子代理关联不完整（加载缺口、截断、父子图无效）、任一会话缺少快照或未收束、合计不大于 0 时整体省略；目录没有定价的模型合计为 0，因此省略。卡片显示“费用约 $…（按官方价格估算，含子代理）”，不足 0.01 美元显示 `<$0.01`；它不是代理商或订阅的实际扣费；
+    - `ttftMs`：本会话本次各请求首字延迟（OMP 消息上的 `ttft`，从发出请求到首个流式事件，含连接开销）的中位数，整数 1–3600000；
+    - `outputTps`：首字后输出速度 `Σoutput ÷ Σ(duration − ttft)`（tokens/s，输出含推理 token），有限正数，至多 1000000；生成时长合计不足 1 秒时省略。卡片显示“首字 … s · 输出 … tok/s（客户端测得）”。
   - `goal`：`objective`（至多 200 字符）、`status`（`active|paused|budget-limited|complete|dropped`）、`tokensUsed`、`timeUsedSeconds`，可选 `tokenBudget`；仅在 Goal 处于进行中／暂停／预算耗尽或本次运行中更新过时发送；
   - `todo`：最后一次 `todo_reminder` 的 `reminders`／`maxReminders`（1–99）、未完成条数 `pendingCount` 与至多 8 条未完成条目文字 `pending`（每条至多 120 字符）。提醒达到上限后 OMP 静默放行结束，卡片只写“结束时可能仍未完成”。
   Goal 目标与 todo 条目是用户为自己的任务编写的内容，按名称规则清洗（URL 与绝对／用户目录路径替换为 `…`，相对路径保留）；todo 的详情、备注与阻塞原因不读取。

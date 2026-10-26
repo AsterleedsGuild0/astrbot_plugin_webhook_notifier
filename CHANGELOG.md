@@ -1,5 +1,19 @@
 # 更新日志
 
+## v2.4.0 - 2026-10-26
+
+本版本为 OMP 通知的“本次运行用量”补充估算费用与响应速度（#39）。调查与对照结果见 [#39](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/issues/39)。
+
+### 升级须知
+
+- **先升级服务端，再升级客户端。** v2.4.0 客户端在 `signals.usage` 中新增 `costUsd`、`ttftMs`、`outputTps`，v2.3.0 及更早的服务端按字段白名单以 HTTP 400 拒绝这类请求（客户端视为永久错误、不重试，通知丢失）。新服务端继续接收不带这些字段的旧客户端，卡片与 v2.3.0 相同。
+- 客户端通过 OMP marketplace 升级到 2.4.0 后需重启 OMP。
+
+### 变更
+
+- #39 OMP 本次运行用量另起两行显示“费用约 $…（按官方价格估算，含子代理）”与“首字 … s · 输出 … tok/s（客户端测得）”，纯文本同步。费用取 OMP 模型目录的估算值，合计主会话与已关联子代理，关联不完整、目录无定价或取不到时不显示；速度取本会话各请求首字延迟中位数与首字后输出速度，生成时长不足 1 秒时不显示输出速度。不维护价格表，也不显示 0。
+- 原生验收工具（`scripts/omp_native/`）支持 `openai-codex` provider 的 `/backend-api` 路径，模型代理透传 WebSocket（此前每个会话首个请求要等两次约 10 秒的升级超时），注入故障时关闭已建立的隧道；事件记录增加每条助手消息的用量、估算费用与计时。
+
 ## v2.3.0 - 2026-10-26
 
 本版本为 OMP Endpoint 增加深色通知卡片（#36）。创建与切换命令见[命令参考 · 卡片主题](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/blob/v2.3.0/docs/command-reference.md#卡片主题)。
