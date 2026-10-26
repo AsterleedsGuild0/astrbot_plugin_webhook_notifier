@@ -59,6 +59,17 @@ export default (pi: ExtensionAPI): void => {
     return { willContinue: e.willContinue, awaitingAsyncWork: e.awaitingAsyncWork, messageCount: messages.length, lastStop: [...messages].reverse().map(stop).find(Boolean), ...probes(ctx) };
   });
   on("turn_start");
+  // 助手消息的用量、估算费用与计时（OMP 自身每条消息末尾的 ttft／tok/s 来源），只记数值。
+  on("message_end", e => {
+    const m = bag(e.message);
+    if (m.role !== "assistant") return { role: m.role };
+    const u = bag(m.usage);
+    return {
+      role: m.role, provider: m.provider, modelId: m.model, api: m.api, stopReason: m.stopReason, timestamp: m.timestamp, duration: m.duration, ttft: m.ttft,
+      usage: { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, totalTokens: u.totalTokens, reasoning: u.reasoningTokens ?? u.reasoning, cost: u.cost },
+      messageKeys: Object.keys(m), usageKeys: Object.keys(u),
+    };
+  });
   on("session_stop", e => ({ lastStop: stop(e.last_assistant_message), errorStatus: bag(e.last_assistant_message).errorStatus }));
   on("after_provider_response", e => ({ status: e.status, requestId: Boolean(e.requestId), headerCount: Object.keys(bag(e.headers)).length, metadata: shape(e.metadata) }));
   on("auto_retry_start", e => ({ attempt: e.attempt, maxAttempts: e.maxAttempts, delayMs: e.delayMs }));

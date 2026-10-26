@@ -126,6 +126,37 @@ async def s1(o):
     return strip(await o.prompt("Run the bash command `sleep 16` exactly once, then reply with exactly: done"))
 
 
+# 费用与计时取样（#39）：尽量短的提示；短运行通常不发通知，expect=0。
+def speed_state(data: Any) -> dict[str, Any]:
+    """RPC get_state 中与用量、费用、速度相关的字段（只取数值与结构）。"""
+    keep = ("token", "cost", "second", "ttft", "usage", "stats")
+    return {k: v for k, v in (data or {}).items() if any(s in k.lower() for s in keep)}
+
+
+@scenario("S17-short", YOLO, 0, settle=5, cwd="s17")
+async def s17_short(o):
+    result = strip(await o.prompt("Reply with exactly: ok"))
+    return {**result, "state": speed_state((await o.call({"type": "get_state"})).get("data"))}
+
+
+@scenario("S17-resume", [*YOLO, "--continue"], 0, settle=5, cwd="s17")
+async def s17_resume(o):
+    """恢复 S17-short 的会话，核对会话累计值包含旧消息、本次差值只含新请求。"""
+    return strip(await o.prompt("Reply with exactly: again"))
+
+
+@scenario("S17-task", YOLO, 0, settle=5)
+async def s17_task(o):
+    return strip(await o.prompt("Use the task tool exactly once with context \"usage sample\" and a single task (agent type: default task) whose instructions are: "
+                                "reply with exactly: child ok. Do not run any other tool. After the result, reply with exactly: parent ok", timeout=600))
+
+
+@scenario("S17-task-sync", YOLO, 0, settle=5, config="async:\n  enabled: false\n")
+async def s17_task_sync(o):
+    """关闭 async 后 task 阻塞到合并结果，子代理用量随 toolResult 计入主会话 subagentCost。"""
+    return await s17_task(o)
+
+
 @scenario("S2-failed", YOLO, 1)
 async def s2_failed(o):
     fault(400, -1, "injected permanent failure")

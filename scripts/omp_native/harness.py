@@ -21,6 +21,7 @@ import subprocess
 import termios
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Awaitable, Callable
 
 import yaml
@@ -65,9 +66,9 @@ def real_provider() -> dict[str, Any]:
 
 
 def setup() -> None:
-    """只写 provider 结构；``baseUrl`` 指向本机模型代理，``apiKey`` 为环境变量名。"""
+    """只写 provider 结构；``baseUrl`` 改为本机模型代理（保留原路径，如 ``/v1``、``/backend-api``），``apiKey`` 为环境变量名。"""
     provider = real_provider()
-    provider["baseUrl"] = f"http://127.0.0.1:{MODEL_PORT}/v1"
+    provider["baseUrl"] = f"http://127.0.0.1:{MODEL_PORT}{urlsplit(str(provider['baseUrl'])).path}"
     provider["apiKey"] = KEY_VARIABLE
     AGENT.mkdir(parents=True, exist_ok=True)
     (AGENT / "models.yml").write_text(yaml.safe_dump({"providers": {PROVIDER: provider}}, allow_unicode=True, sort_keys=False))
@@ -124,7 +125,7 @@ def proxies() -> None:
     env = dict(os.environ)
     env.update(ACCEPT_WEBHOOK_TARGET=secret_value("WEBHOOK_NOTIFIER_URL"), ACCEPT_WEBHOOK_LOG=str(LOGS / "webhook.jsonl"),
                ACCEPT_MODEL_LOG=str(LOGS / "model.jsonl"), ACCEPT_WEBHOOK_PORT=str(WEBHOOK_PORT), ACCEPT_MODEL_PORT=str(MODEL_PORT),
-               ACCEPT_MODEL_TARGET=str(real_provider()["baseUrl"]).removesuffix("/v1"))
+               ACCEPT_MODEL_TARGET="{0.scheme}://{0.netloc}".format(urlsplit(str(real_provider()["baseUrl"]))))
     os.execvpe("bun", ["bun", str(HERE / "proxies.ts")], env)
 
 
