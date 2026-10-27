@@ -95,33 +95,43 @@ async def test_super_admin_help_includes_private_admin_tools():
     yielded = [item async for item in plugin.status_short(event)]
 
     assert isinstance(yielded[0], MessageChain)
-    assert "/whn admin token list" in captured["html"]
-    assert "/whn admin token revoke-path &lt;endpoint-path&gt;" in captured["html"]
-    assert (
-        "/whn admin token revoke-owner &lt;platform_id&gt; &lt;owner_user_id&gt; &lt;名称&gt;"
-        in captured["html"]
-    )
-    assert "/whn admin config min-duration" in captured["html"]
+    text = unescape(re.sub(r"<[^>]+>", "", captured["html"]))
+    assert "/whn admin token list" in text
+    assert "/whn admin token revoke-path <endpoint-path>" in text
+    assert "/whn admin token revoke-owner <platform_id> <owner_user_id> <名称>" in text
+    assert "/whn admin config min-duration" in text
 
 
 @pytest.mark.asyncio
-async def test_help_render_failure_falls_back_to_plain_text():
+@pytest.mark.parametrize("super_admin", [False, True])
+@pytest.mark.parametrize("config_error", [False, True])
+@pytest.mark.parametrize("failure", ["exception", "invalid_image"])
+async def test_help_render_failure_falls_back_to_plain_text(
+    super_admin, config_error, failure
+):
     plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
 
     async def failing_html_render(*_args, **_kwargs):
-        raise RuntimeError("T2I unavailable")
+        if failure == "exception":
+            raise RuntimeError("T2I unavailable")
+        return b"not an image"
 
     plugin.html_render = failing_html_render  # type: ignore[method-assign]
-    event = HelpEventStub("whn 帮助")
+    event = HelpEventStub("whn 帮助", super_admin=super_admin)
 
-    yielded = [item async for item in plugin.status_short(event)]
-
-    assert len(yielded) == 1
-    result = yielded[0]
+    command_root = "<AstrBot唤醒词>whn" if config_error else "/whn"
+    result = await plugin._build_help_result(
+        event, SimpleNamespace(short=command_root, config_error=config_error)
+    )
     assert isinstance(result, PlainResultStub)
     assert result.t2i is False
-    assert "/whn token new private [名称]" in result.text
-    assert "/whn token delete <名称>" in result.text
+    assert f"{command_root} token new private [名称]" in result.text
+    assert f"{command_root} token delete <名称>" in result.text
+    assert result.text == build_help_text(
+        super_admin, command_root, config_error,
+        providers=plugin._ensure_provider_registry().providers,
+    )
+    assert ("【管理员工具】" in result.text) is super_admin
 
 
 @pytest.mark.asyncio
@@ -193,7 +203,9 @@ def test_provider_help_options_follow_registered_set(adapters, render):
         registry.register(adapter())
     registry.freeze()
 
-    rendered = unescape(render(False, "/whn", providers=registry.providers))
+    rendered = render(False, "/whn", providers=registry.providers)
+    if render is render_help_card_html:
+        rendered = unescape(re.sub(r"<[^>]+>", "", rendered))
     options = re.findall(r"--provider <([^<>]+)>", rendered)
 
     assert options

@@ -7,8 +7,8 @@ from typing import Any
 from .providers import DEFAULT_PROVIDER
 from .renderer import render_html_template
 
-HELP_CARD_CANVAS_WIDTH = 900
-HELP_CARD_WIDTH = 868
+HELP_CARD_CANVAS_WIDTH = 812
+HELP_CARD_WIDTH = 780
 HELP_CARD_BODY_PADDING = 16
 HELP_CARD_RENDER_OPTIONS: dict[str, Any] = {
     "full_page": True,
@@ -24,7 +24,6 @@ HELP_CARD_RENDER_OPTIONS: dict[str, Any] = {
 PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
     {
         "number": "01",
-        "tone": "mint",
         "title": "快速开始与状态",
         "description": "先确认插件状态，再进入创建或管理流程。",
         "commands": (
@@ -40,7 +39,6 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
     },
     {
         "number": "02",
-        "tone": "blue",
         "title": "创建与验证",
         "description": "创建操作从私聊发起；群聊 Endpoint 需要在目标群完成验证。",
         "commands": (
@@ -68,7 +66,6 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
     },
     {
         "number": "03",
-        "tone": "violet",
         "title": "管理自己的 Endpoint",
         "description": "列表、轮换、切换主题、撤销和永久删除均按当前平台与用户隔离，并在私聊中操作。",
         "commands": (
@@ -98,7 +95,6 @@ PUBLIC_HELP_SECTIONS: tuple[dict[str, Any], ...] = (
 
 ADMIN_HELP_SECTION: dict[str, Any] = {
     "number": "04",
-    "tone": "amber",
     "title": "管理员工具",
     "description": "仅 AstrBot 超级管理员 · 仅私聊",
     "commands": (
