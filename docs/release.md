@@ -1,6 +1,6 @@
 # 发布流程
 
-本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.4.0`，为 OMP 本次运行用量补充估算费用与速度；服务端与 OMP 客户端都有变化，须先升级服务端（见 CHANGELOG 升级须知）。本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
+本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.4.1`，发布 #38 的 C2 帮助卡外观；命令、权限、纯文本回退与接口行为不变，OMP 客户端仅同步版本号（见 CHANGELOG 升级须知）。本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
 
 版本号与文档表示源码契约，远端发布完成状态以 [GitHub Releases](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) 及对应 Actions run 为准。已发布 tag/asset 不覆盖、不重写；线上部署另行验收。
 
@@ -30,7 +30,7 @@ uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --dry-run
 ```
 
 - 凭据文件为 `KEY=VALUE`：`ASTRBOT_DASHBOARD_URL`、`ASTRBOT_API_KEY`（Dashboard 中创建、仅需 `plugin` scope）、`WEBHOOK_NOTIFIER_URL`、`WEBHOOK_NOTIFIER_TOKEN`。放在 Git 忽略的私有位置，不进入仓库。
-- 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上传或加载失败时，自动回装 `tmp/deploy-dev/last-deployed.json` 记录的上次成功包并以非零退出。
+- 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上传或加载失败时，默认自动回装 `tmp/deploy-dev/last-deployed.json` 记录的上次成功包并以非零退出；本次 v2.4.1 发布部署必须加 `--no-rollback`，失败即停止，不自动回装其他版本。
 - 冒烟卡片发送到凭据中的 Endpoint 目标；默认冒烟只验证 HTTP 与业务结果，卡片显示效果仍需在目标聊天中查看。AstrBot 升级后先用 `--dry-run` 和接口源码核对路由是否变化。
 
 #### 接收端验收（`--verify`）
@@ -91,13 +91,13 @@ uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --prob
 ## 发布前检查
 
 1. 确认目标版本号一致：
-   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.4.0`。
-   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.4.0`，`uv.lock` 根项目版本同步更新。
+   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.4.1`。
+   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.4.1`，`uv.lock` 根项目版本同步更新。
    - `integrations/omp/package.json` 的 `version` 与插件版本等价。OMP marketplace 的安装与升级都按这个版本判断，Release workflow 会校验它与 tag 一致；`.omp-plugin/marketplace.json` 不写版本。
    - marketplace 读取默认分支，客户端改动只在发版时推送到 `main`，避免用户装到尚未发布的客户端。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
-   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.4.0 - 2026-10-26`，包含升级须知（先升级服务端，旧服务端拒绝新字段）。
-   - 发布准备与 dry-run 不创建 `v2.4.0` tag；仅在门禁通过后推送 tag 触发正式 Release。
+   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.4.1 - 2026-10-27`，包含升级须知（仅帮助卡外观变化，配置与数据无需迁移，客户端仅同步版本号）。
+   - 发布准备与 dry-run 不创建 `v2.4.1` tag；仅在门禁通过后推送 tag 触发正式 Release。
    - 发布后用 Release 原件部署线上，并分别以浅色与深色测试 Endpoint 执行 `--verify`（见上文接收端验收）。
 2. 维护本地锁定验证依赖：
 

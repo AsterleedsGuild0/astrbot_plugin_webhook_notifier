@@ -127,7 +127,7 @@ class Dashboard:
                   content_type=f"multipart/form-data; boundary={boundary}", timeout=300)
 
 
-def deploy(dashboard: Dashboard, zip_path: Path) -> dict:
+def deploy(dashboard: Dashboard, zip_path: Path, *, rollback_on_failure: bool = True) -> dict:
     plugin_id, version = zip_identity(zip_path)
     before = dashboard.plugin(plugin_id)
     failed = dashboard.failed()
@@ -147,7 +147,7 @@ def deploy(dashboard: Dashboard, zip_path: Path) -> dict:
                 raise DeployError("上传后 60 秒内未加载目标版本")
             time.sleep(2)
     except DeployError:
-        rollback = _last_deployed()
+        rollback = _last_deployed() if rollback_on_failure else None
         if rollback and rollback != zip_path and rollback.is_file():
             print(f"安装失败，回装上次部署包：{rollback.name}")
             if dashboard.plugin(plugin_id) is None and plugin_id not in dashboard.failed():
@@ -416,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--label", default="dev", help="新建测试包的标签，默认 dev")
     parser.add_argument("--env-file", type=Path, help="KEY=VALUE 格式的凭据文件；已有环境变量优先")
     parser.add_argument("--skip-smoke", action="store_true", help="只部署，不发送冒烟通知")
+    parser.add_argument("--no-rollback", action="store_true", help="安装失败时停止，不自动回装上次部署包")
     parser.add_argument("--dry-run", action="store_true", help="只核对包与线上版本，不卸载、不上传")
     parser.add_argument("--verify", type=Path, metavar="ENV_FILE",
                         help="接收端验收：向该文件中的测试 Endpoint 发送固定内容冒烟，读回核对文字、顺序、图片数量并与基准图比较；"
@@ -451,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
                 current = dashboard.plugin(plugin_id)
                 print(f"包：{zip_path.name}（{version}）；线上：{current.get('version') if current else '未加载'}")
                 return 0
-            deploy(dashboard, zip_path)
+            deploy(dashboard, zip_path, rollback_on_failure=not args.no_rollback)
             if smoke_env:
                 results = smoke(smoke_env["WEBHOOK_NOTIFIER_URL"], smoke_env["WEBHOOK_NOTIFIER_TOKEN"], f"[部署验收 {version}]")
                 if not all(item["ok"] for item in results):

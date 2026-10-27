@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import logging
+from html.parser import HTMLParser
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -121,6 +122,20 @@ def test_runtime_resolver_handles_get_config_exception_without_sensitive_log(cap
     assert "secret-config-value" not in caplog.text
     assert UMO not in caplog.text
 
+class HelpHTML(HTMLParser):
+    def __init__(self, html: str) -> None:
+        super().__init__()
+        self.text = ""
+        self.tags: list[str] = []
+        self.feed(html)
+
+    def handle_data(self, data: str) -> None:
+        self.text += data
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        self.tags.append(tag)
+
+
 
 @pytest.mark.asyncio
 async def test_help_html_uses_complete_escaped_commands_and_reads_config_once():
@@ -137,10 +152,10 @@ async def test_help_html_uses_complete_escaped_commands_and_reads_config_once():
     results = [item async for item in plugin.status_short(WakeEventStub())]
 
     assert isinstance(results[0], MessageChain)
-    assert "&lt;script&gt;whn token list" in captured["html"]
-    assert "&lt;script&gt;whn token delete &lt;名称&gt;" in captured["html"]
-    assert "<script>whn" not in captured["html"]
-    assert "当前命令根" in captured["html"]
+    rendered = HelpHTML(captured["html"])
+    assert "<script>whn token list" in rendered.text
+    assert "<script>whn token delete <名称>" in rendered.text
+    assert "script" not in rendered.tags
     assert context.get_config_calls == [UMO]
 
 
@@ -178,8 +193,9 @@ async def test_help_html_keeps_placeholder_and_diagnostic_on_config_error():
     results = [item async for item in plugin.status_short(WakeEventStub())]
 
     assert isinstance(results[0], MessageChain)
-    assert "&lt;AstrBot唤醒词&gt;whn token list" in captured["html"]
-    assert "无法读取当前会话唤醒词，请检查 AstrBot 配置和插件日志" in captured["html"]
+    rendered = HelpHTML(captured["html"])
+    assert "<AstrBot唤醒词>whn token list" in rendered.text
+    assert "无法读取当前会话唤醒词，请检查 AstrBot 配置和插件日志" in rendered.text
 
 
 @pytest.mark.asyncio
