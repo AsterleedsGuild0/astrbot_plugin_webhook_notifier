@@ -21,22 +21,25 @@ uv run --frozen python scripts/package_plugin.py --dev-version --test-label omp-
 
 ### 脚本部署到线上 AstrBot
 
-`scripts/deploy_dev.py` 通过 Dashboard Open API（`/api/v1/plugins*`，依据 AstrBot v4.27.2）执行与 WebUI 相同的步骤：卸载现有插件 → 上传 ZIP → 轮询确认线上版本 → 向 OMP Endpoint 发送 4 条合成 V2 事件（简单完成、多代理时间线、失败、待处理 ask）并检查 `delivered=true`。
+`scripts/deploy_dev.py` 保留测试包构建和 Webhook 验收，通过显式配置的外部 Python 部署器完成 Dashboard 操作。外部部署器负责 ZIP 身份校验、保留数据的卸载／上传、加载确认和回滚；本仓库不内置部署目标、凭据或部署状态。部署成功后，本脚本向 OMP Endpoint 发送 4 条合成 V2 事件（简单完成、多代理时间线、失败、待处理 ask），使用部署器确认的版本标记卡片并检查 `delivered=true`。
 
 ```bash
-uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --label omp-concise   # 新建测试包并部署
-uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --zip dist/<包>.zip   # 部署已有包
-uv run --frozen python scripts/deploy_dev.py --env-file <凭据文件> --dry-run              # 只核对线上版本
+uv run --frozen python scripts/deploy_dev.py --deployer <外部部署器> --environment <环境标识> --env-file <凭据文件> --label omp-concise
+uv run --frozen python scripts/deploy_dev.py --deployer <外部部署器> --environment <环境标识> --env-file <凭据文件> --zip dist/<包>.zip
+uv run --frozen python scripts/deploy_dev.py --env-file <含部署器与环境配置的文件> --zip dist/<包>.zip --dry-run
 ```
 
-- 凭据文件为 `KEY=VALUE`：`ASTRBOT_DASHBOARD_URL`、`ASTRBOT_API_KEY`（Dashboard 中创建、仅需 `plugin` scope）、`WEBHOOK_NOTIFIER_URL`、`WEBHOOK_NOTIFIER_TOKEN`。放在 Git 忽略的私有位置，不进入仓库。
-- 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上传或加载失败时，默认自动回装 `tmp/deploy-dev/last-deployed.json` 记录的上次成功包并以非零退出；本次 v2.4.2 发布部署必须加 `--no-rollback`，失败即停止，不自动回装其他版本。
-- 冒烟卡片发送到凭据中的 Endpoint 目标；默认冒烟只验证 HTTP 与业务结果，卡片显示效果仍需在目标聊天中查看。AstrBot 升级后先用 `--dry-run` 和接口源码核对路由是否变化。
+- 部署器由 `--deployer` 或 `ASTRBOT_PLUGIN_DEPLOYER` 指定，环境由 `--environment` 或 `ASTRBOT_DEPLOY_ENVIRONMENT` 指定；没有默认环境或默认部署器。显式参数优先于环境变量，环境变量优先于 `--env-file`。仅在部署或 `--dry-run` 查询时要求这些配置；导入脚本、本地 `package_plugin.py` 打包、`--skip-deploy --verify` 无需部署器或 Dashboard 凭据。
+- 文件使用 `KEY=VALUE`，可同时包含上述部署器／环境配置和凭据：`ASTRBOT_DASHBOARD_URL`、`ASTRBOT_API_KEY`（Dashboard 中创建、仅需 `plugin` scope）、`WEBHOOK_NOTIFIER_URL`、`WEBHOOK_NOTIFIER_TOKEN`。凭据仅通过环境或文件传递，没有 Dashboard URL／API Key 命令行参数；文件放在 Git 忽略的私有位置，不进入仓库。
+- 外部部署器由运行本脚本的同一 Python 解释器调用，接口为 `<deployer> query|deploy --plugin astrbot_plugin_webhook_notifier --environment <环境标识> --zip <包> [--env-file <文件>]`；`--no-rollback` 仅传给 `deploy`。成功时 stdout 必须只有一个 JSON 对象，包含 `plugin_id`、`version`、`activated`，部署结果另含 `previous`。未安装的查询结果为 `version=null`、`activated=false`；部署成功必须返回已加载的版本和 `activated=true`。失败返回非零；本脚本不原样显示子进程输出，避免泄露凭据或服务端响应。
+- `--dry-run` 调用只读 `query`，校验包并查询线上版本，不安装、回滚或发送通知；省略 `--zip` 时仍按 `--label` 构建测试包。`--skip-smoke` 只跳过默认通知；`--verify` 则用下述接收端验收取代默认冒烟。
+- 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上次成功包及状态由外部部署器按环境、Dashboard 地址与插件隔离管理，不再读写本仓库的旧部署状态，也不自动迁移旧记录。上传／加载失败时，只有存在不同的已校验成功包且目标既未加载、也不在失败插件列表中，才默认尝试回装；回装后仍以原部署失败非零退出。冒烟／接收端验收失败不触发回滚。`--no-rollback` 禁止自动回装；本次 v2.4.2 发布部署必须加此参数。
+- 冒烟卡片发送到凭据中的 Endpoint 目标；默认冒烟只验证 HTTP 与业务结果，卡片显示效果仍需在目标聊天中查看。AstrBot 升级后先用 `--dry-run` 并核对外部部署器对 Dashboard 接口的兼容性。查询、部署失败或成功响应无效时，不发送通知也不执行接收端验收。
 
 #### 接收端验收（`--verify`）
 
 ```bash
-uv run --frozen python scripts/deploy_dev.py --env-file <Dashboard 凭据> --label <标签> \
+uv run --frozen python scripts/deploy_dev.py --deployer <外部部署器> --environment <环境标识> --env-file <Dashboard 凭据> --label <标签> \
   --verify <测试 Endpoint 凭据> --probe <接收端探测命令>       # 部署后验收
 uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --probe <…>   # 只验收线上现有版本
 uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <深色测试 Endpoint 凭据> --probe <…> --theme dark  # 深色卡片验收

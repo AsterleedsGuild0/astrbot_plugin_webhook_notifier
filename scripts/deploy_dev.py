@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""经 AstrBot Dashboard Open API 部署插件测试包并做 Webhook 冒烟验收。
+"""构建插件测试包，调用外部部署器并做 Webhook 冒烟验收。
 
-步骤与 WebUI 手工流程一致：卸载现有插件（固定保留配置和数据）→ 上传 ZIP →
-核对线上加载的版本 → 向 OMP Endpoint 发送合成 V2 事件并检查业务结果。
+外部部署器负责 Dashboard、ZIP 身份校验、保留数据的安装与回滚；
+本脚本只在部署成功后向 OMP Endpoint 发送合成 V2 事件并检查业务结果。
 
-凭据只从环境变量或 --env-file 读取，不写入日志：
-  ASTRBOT_DASHBOARD_URL   Dashboard 根地址，例如 https://host:6185
-  ASTRBOT_API_KEY         具备 plugin scope 的 Open API Key
+配置从显式参数、环境变量或 --env-file 读取（环境变量优先于文件）：
+  ASTRBOT_PLUGIN_DEPLOYER  外部 Python 部署器路径，也可用 --deployer 指定
+  ASTRBOT_DEPLOY_ENVIRONMENT  显式环境标识，也可用 --environment 指定
+  ASTRBOT_DASHBOARD_URL / ASTRBOT_API_KEY  仅通过环境或文件交给部署器
   WEBHOOK_NOTIFIER_URL    OMP Endpoint 完整 URL（冒烟用，可用 --skip-smoke 跳过）
   WEBHOOK_NOTIFIER_TOKEN  对应 Bearer Token
 
@@ -15,7 +16,7 @@
 tests/visual/baselines/ 中的基准图逐像素比较；--theme dark 时测试 Endpoint 须为深色，比较
 tests/visual/baselines/dark/。首次或有意改版时加 --update-baselines。
 
-接口依据 AstrBot v4.27.2 的 /api/v1/plugins*；其他版本使用前先核对。
+导入、本地打包和 --skip-deploy --verify 不依赖外部部署器或 Dashboard 配置。
 """
 from __future__ import annotations
 
@@ -28,15 +29,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
-STATE_FILE = ROOT / "tmp" / "deploy-dev" / "last-deployed.json"
-REQUIRED_ENV = ("ASTRBOT_DASHBOARD_URL", "ASTRBOT_API_KEY")
+PLUGIN_ID = "astrbot_plugin_webhook_notifier"
 SMOKE_ENV = ("WEBHOOK_NOTIFIER_URL", "WEBHOOK_NOTIFIER_TOKEN")
 
 
@@ -60,13 +57,6 @@ def require_env(names: tuple[str, ...]) -> dict[str, str]:
     return {name: os.environ[name] for name in names}
 
 
-def zip_identity(path: Path) -> tuple[str, str]:
-    with zipfile.ZipFile(path) as archive:
-        root = archive.namelist()[0]
-        metadata = yaml.safe_load(archive.read(f"{root}metadata.yaml"))
-    return str(metadata["name"]), str(metadata["version"])
-
-
 def build_package(label: str) -> Path:
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "package_plugin.py"), "--dev-version", "--test-label", label],
@@ -75,95 +65,50 @@ def build_package(label: str) -> Path:
     return Path(result.stdout.strip().splitlines()[-1])
 
 
-class Dashboard:
-    def __init__(self, base_url: str, api_key: str) -> None:
-        self.base = base_url.rstrip("/") + "/api/v1"
-        self.api_key = api_key
-
-    def call(self, method: str, path: str, *, body: bytes | None = None,
-             content_type: str = "application/json", timeout: float = 120) -> dict:
-        request = urllib.request.Request(self.base + path, data=body, method=method)
-        request.add_header("X-API-Key", self.api_key)
-        if body is not None:
-            request.add_header("Content-Type", content_type)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                payload = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            raise DeployError(f"{method} {path} 返回 HTTP {exc.code}") from None
-        if not isinstance(payload, dict) or payload.get("status") != "ok":
-            message = payload.get("message") if isinstance(payload, dict) else None
-            raise DeployError(f"{method} {path} 失败：{message or '响应无效'}")
-        return payload
-
-    def plugin(self, plugin_id: str) -> dict | None:
-        try:
-            data = self.call("GET", f"/plugins/by-id?plugin_id={plugin_id}")["data"]
-        except DeployError:
-            return None
-        return data if isinstance(data, dict) and data.get("name") == plugin_id else None
-
-    def failed(self) -> dict:
-        data = self.call("GET", "/plugins/failed")["data"]
-        return data if isinstance(data, dict) else {}
-
-    def uninstall(self, plugin_id: str) -> None:
-        # 固定不删除配置与持久化数据：Registry 保存全部 Endpoint 与 Token 哈希。
-        body = json.dumps({"delete_config": False, "delete_data": False}).encode()
-        self.call("DELETE", f"/plugins/by-id?plugin_id={plugin_id}", body=body)
-
-    def uninstall_failed(self, dir_name: str) -> None:
-        body = json.dumps({"delete_config": False, "delete_data": False}).encode()
-        self.call("DELETE", f"/plugins/failed/{dir_name}", body=body)
-
-    def upload(self, path: Path) -> None:
-        boundary = "----deploy-dev-" + secrets.token_hex(12)
-        head = (
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
-            f"filename=\"{path.name}\"\r\nContent-Type: application/zip\r\n\r\n"
-        ).encode()
-        tail = f"\r\n--{boundary}--\r\n".encode()
-        self.call("POST", "/plugins/install/upload", body=head + path.read_bytes() + tail,
-                  content_type=f"multipart/form-data; boundary={boundary}", timeout=300)
+def deployment_target(deployer: Path | None, environment: str | None) -> tuple[Path, str]:
+    configured = deployer or os.environ.get("ASTRBOT_PLUGIN_DEPLOYER")
+    if not configured:
+        raise DeployError("请用 --deployer 或 ASTRBOT_PLUGIN_DEPLOYER 指定外部部署器")
+    path = Path(configured).expanduser().resolve()
+    if not path.is_file():
+        raise DeployError("外部部署器不可用；请检查 --deployer 或 ASTRBOT_PLUGIN_DEPLOYER")
+    environment = environment or os.environ.get("ASTRBOT_DEPLOY_ENVIRONMENT")
+    if not environment or not environment.strip():
+        raise DeployError("请用 --environment 或 ASTRBOT_DEPLOY_ENVIRONMENT 显式指定部署环境")
+    return path, environment
 
 
-def deploy(dashboard: Dashboard, zip_path: Path, *, rollback_on_failure: bool = True) -> dict:
-    plugin_id, version = zip_identity(zip_path)
-    before = dashboard.plugin(plugin_id)
-    failed = dashboard.failed()
-    print(f"线上当前：{before.get('version') if before else '未加载'}；目标：{version}")
-    if before:
-        dashboard.uninstall(plugin_id)
-    elif plugin_id in failed:
-        dashboard.uninstall_failed(plugin_id)
+def run_deployer(deployer: Path, environment: str, action: str, zip_path: Path,
+                 env_file: Path | None, no_rollback: bool) -> dict:
+    command = [
+        sys.executable, str(deployer), action, "--plugin", PLUGIN_ID,
+        "--environment", environment, "--zip", str(zip_path),
+    ]
+    if env_file:
+        command.extend(("--env-file", str(env_file.resolve())))
+    if no_rollback and action == "deploy":
+        command.append("--no-rollback")
     try:
-        dashboard.upload(zip_path)
-        deadline = time.monotonic() + 60
-        while True:
-            current = dashboard.plugin(plugin_id)
-            if current and current.get("version") == version and current.get("activated", True):
-                break
-            if time.monotonic() > deadline:
-                raise DeployError("上传后 60 秒内未加载目标版本")
-            time.sleep(2)
-    except DeployError:
-        rollback = _last_deployed() if rollback_on_failure else None
-        if rollback and rollback != zip_path and rollback.is_file():
-            print(f"安装失败，回装上次部署包：{rollback.name}")
-            if dashboard.plugin(plugin_id) is None and plugin_id not in dashboard.failed():
-                dashboard.upload(rollback)
-        raise
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps({"zip": str(zip_path), "version": version}, ensure_ascii=False) + "\n")
-    print(f"已加载：{plugin_id} {version}")
-    return {"plugin_id": plugin_id, "version": version, "previous": before.get("version") if before else None}
-
-
-def _last_deployed() -> Path | None:
+        result = subprocess.run(command, capture_output=True, text=True)
+    except (OSError, UnicodeError):
+        raise DeployError("无法运行外部部署器") from None
+    # 子进程可能把凭据或服务端响应写入任一输出流；失败时只报告退出码。
+    if result.returncode:
+        raise DeployError(f"外部部署器 {action} 失败（exit {result.returncode}）")
     try:
-        return Path(json.loads(STATE_FILE.read_text())["zip"])
-    except (OSError, ValueError, KeyError):
-        return None
+        payload = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        raise DeployError("外部部署器未返回有效 JSON") from None
+    if not isinstance(payload, dict) or payload.get("plugin_id") != PLUGIN_ID:
+        raise DeployError("外部部署器返回的插件身份无效")
+    version = payload.get("version")
+    if ("version" not in payload or type(payload.get("activated")) is not bool
+            or (version is not None and (not isinstance(version, str) or not version.strip()))
+            or (version is None and payload["activated"])):
+        raise DeployError("外部部署器返回的插件状态无效")
+    if action == "deploy" and (not version or not payload["activated"] or "previous" not in payload):
+        raise DeployError("外部部署器未确认目标版本已加载")
+    return payload
 
 
 def _ref() -> str:
@@ -415,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--zip", type=Path, help="部署已有 ZIP；省略时按 --label 新建测试包")
     source.add_argument("--label", default="dev", help="新建测试包的标签，默认 dev")
     parser.add_argument("--env-file", type=Path, help="KEY=VALUE 格式的凭据文件；已有环境变量优先")
+    parser.add_argument("--deployer", type=Path, help="外部 Python 部署器；也可用 ASTRBOT_PLUGIN_DEPLOYER 配置")
+    parser.add_argument("--environment", help="显式部署环境；也可用 ASTRBOT_DEPLOY_ENVIRONMENT 配置，无默认目标")
     parser.add_argument("--skip-smoke", action="store_true", help="只部署，不发送冒烟通知")
     parser.add_argument("--no-rollback", action="store_true", help="安装失败时停止，不自动回装上次部署包")
     parser.add_argument("--dry-run", action="store_true", help="只核对包与线上版本，不卸载、不上传")
@@ -443,16 +390,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise DeployError(f"{args.verify} 缺少 {', '.join(missing)}")
             verify_env = values
         if not args.skip_deploy:
-            env = require_env(REQUIRED_ENV)
+            deployer, environment = deployment_target(args.deployer, args.environment)
             smoke_env = None if args.skip_smoke or args.dry_run or verify_env else require_env(SMOKE_ENV)
             zip_path = (args.zip or build_package(args.label)).resolve()
-            plugin_id, version = zip_identity(zip_path)
-            dashboard = Dashboard(env["ASTRBOT_DASHBOARD_URL"], env["ASTRBOT_API_KEY"])
+            result = run_deployer(deployer, environment, "query" if args.dry_run else "deploy",
+                                  zip_path, args.env_file, args.no_rollback)
+            version = result["version"]
             if args.dry_run:
-                current = dashboard.plugin(plugin_id)
-                print(f"包：{zip_path.name}（{version}）；线上：{current.get('version') if current else '未加载'}")
+                print(f"包：{zip_path.name}；线上：{version or '未加载'}，activated={result['activated']}")
                 return 0
-            deploy(dashboard, zip_path, rollback_on_failure=not args.no_rollback)
+            print(f"已加载：{PLUGIN_ID} {version}")
             if smoke_env:
                 results = smoke(smoke_env["WEBHOOK_NOTIFIER_URL"], smoke_env["WEBHOOK_NOTIFIER_TOKEN"], f"[部署验收 {version}]")
                 if not all(item["ok"] for item in results):
@@ -465,8 +412,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise DeployError("接收端验收未通过：\n- " + "\n- ".join(problems))
             print("接收端验收通过" + ("；基准图已更新" if args.update_baselines else "；与基准图一致"))
         return 0
-    except (DeployError, subprocess.CalledProcessError) as exc:
+    except DeployError as exc:
         print(f"部署失败：{exc}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError:
+        print("部署失败：测试包构建失败", file=sys.stderr)
+        return 1
+    except (OSError, UnicodeError):
+        print("部署失败：无法读取配置、部署器或本地文件", file=sys.stderr)
         return 1
 
 
