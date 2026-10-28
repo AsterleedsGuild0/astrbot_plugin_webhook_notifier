@@ -1,6 +1,6 @@
 [project]
 name = "astrbot-plugin-webhook-notifier"
-version = "2.4.1"
+version = "2.4.2"
 description = "AstrBot Webhook Notifier plugin"
 readme = "README.md"
 requires-python = ">=3.10"

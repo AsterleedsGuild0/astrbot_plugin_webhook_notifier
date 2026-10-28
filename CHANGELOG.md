@@ -1,11 +1,19 @@
 # 更新日志
 
-## 未发布
+## v2.4.2 - 2026-10-28
 
 - 获取 AstrBot 插件数据目录失败时，插件初始化直接报错、不启动 HTTP 服务；不再退回插件安装目录下的 `data/`，避免更新或重装插件时丢失 Endpoint。
 - `requirements.txt` 只保留运行时依赖，pytest 与 pytest-asyncio 不再随插件安装；开发依赖仍由 `pyproject.toml` 的 `dev` 组管理。
 - `metadata.yaml` 声明 `astrbot_version: ">=4.26.0"`：插件依赖 v4.26.0 引入的 `astrbot.api.web`，更早版本导入即失败；支持该字段的 AstrBot 会在加载前给出明确的版本不满足提示。
 - 文档：公开首页按新结构重写；公共契约更新版本状态，平台投递策略移除指向仓库外的失效链接。
+- 插件市场元数据补齐 Coding Agent／Markdown 推送说明、短描述与检索标签。
+
+### 升级须知
+
+- 数据目录获取失败时插件改为拒绝加载，不再回退到插件安装目录；正常使用 AstrBot `plugin_data` 的 Endpoint 与配置无需迁移。
+- `requirements.txt` 不再包含 pytest／pytest-asyncio；本地测试请使用 `pyproject.toml` 的 `dev` 依赖组。
+- 声明 AstrBot 兼容下限 `astrbot_version: ">=4.26.0"`，更早版本须先升级 AstrBot。
+- 本版本无接口或卡片设计变化；OMP 客户端仅同步版本号到 2.4.2，升级与否不影响通知。
 
 ## v2.4.1 - 2026-10-27
 

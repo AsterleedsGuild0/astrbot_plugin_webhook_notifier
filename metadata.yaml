@@ -1,7 +1,14 @@
 name: astrbot_plugin_webhook_notifier
 display_name: Webhook Notifier
-desc: 接收外部 Webhook 事件，并以文本或 HTML 卡片图片形式推送到指定 AstrBot 会话。
-version: v2.4.1
+desc: 将 Oh My Pi、OpenCode 等 Coding Agent 的任务完成／待处理事件及通用 Markdown 消息，以文本或 HTML 卡片推送到 QQ 私聊或普通 QQ 群。
+short_desc: Coding Agent 与 Markdown 消息推送到 QQ
+tags:
+  - webhook
+  - notification
+  - coding-agent
+  - oh-my-pi
+  - opencode
+version: v2.4.2
 author: AsterleedsGuild0
 repo: https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier
 astrbot_version: ">=4.26.0"
