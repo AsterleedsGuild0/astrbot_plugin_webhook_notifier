@@ -1,178 +1,111 @@
 # AstrBot Webhook Notifier
 
-通过受 Bearer Token 保护的 Webhook，把通用 Markdown 信息、OMP 会话结束事件或 OpenCode 通知发送到 AstrBot 私聊或普通 QQ 群，支持纯文本与 HTML 图片卡片。
+AstrBot Webhook 通知插件：将 Oh My Pi（OMP）、OpenCode 的任务完成／待处理事件及通用 Markdown 消息，以文本或 HTML 卡片推送到 QQ 私聊或普通 QQ 群。
 
 [![Release](https://img.shields.io/github/v/release/AsterleedsGuild0/astrbot_plugin_webhook_notifier?display_name=tag&sort=semver)](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) [![License](https://img.shields.io/github/license/AsterleedsGuild0/astrbot_plugin_webhook_notifier)](LICENSE) [![Python](https://img.shields.io/badge/Python-%3E%3D3.10-3776AB?logo=python&logoColor=white)](pyproject.toml) [![AstrBot Plugin](https://img.shields.io/badge/AstrBot-Plugin-6C5CE7)](https://docs.astrbot.app/)
 
-本插件提供 `markdown`、`omp` 和 `opencode` 三种 Provider，复用 Endpoint 鉴权、目标白名单、渲染与投递链路。当前源码默认使用 `markdown`；OMP 和 OpenCode 接入须在创建 Endpoint 时显式指定 Provider。
+支持 `aiocqhttp` 与 QQ 官方 WebSocket；文本模式无需图片渲染服务，HTML 卡片依赖 AstrBot `html_render` / T2I。
+**[快速开始](#快速开始) · [支持范围](#支持范围) · [提交问题](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/issues)**
 
-**版本与升级：** 本文对应 `v2.0.0`，默认 Provider 已从 OMP 改为 Markdown。显式 Provider 不变；缺少 `provider` 的旧 OMP Endpoint 需要新建 `--provider omp` Endpoint 并更新调用方 URL/Token，不能仅轮换 Token。升级前阅读[公共契约](docs/public-contract.md)与[发布流程](docs/release.md)。正式版本和资产以 GitHub Releases 为准，测试包验收不代表插件市场安装/更新已验证。
+## 效果图
 
-<!-- 脱敏截图待补充：![Webhook通知效果](docs/assets/webhook-notification-preview.png)。需隐藏 Token、完整 Webhook URL、Endpoint Path 随机段、账号、群号、服务器地址与消息隐私。 -->
+<p><img src="tests/visual/baselines/simple-1.png" width="420" alt="OMP 浅色完成卡：状态、会话、模型与耗时"> <img src="tests/visual/baselines/dark/simple-1.png" width="420" alt="OMP 深色完成卡"></p>
 
-<!-- 脱敏截图待补充：![Plugin Page模板管理](docs/assets/plugin-page-preview.png)。需隐藏 Base URL、部署地址、账号信息与模板中的业务敏感数据。 -->
+<details>
+<summary>展开查看多代理与等待时间线</summary>
 
----
+![OMP 多代理与交互观察时间线](tests/visual/baselines/timeline-2.png)
 
-## 功能亮点
+</details>
 
-- OMP 客户端只发送 V2 运行收束／待处理通知，区分正常、失败、中止和未知；匿名白名单、有界重试，服务端保留 V1 接收。客户端是 extension 包 `integrations/omp/`，安装、迁移与证据见[接入指南](docs/client-integration.md)。
-- `v1.2.0` 支持 OpenCode V1 file Plugin，将 `session_idle`、`session_error`、`permission_asked` 与 `question_asked` 转换为匿名、白名单 envelope。
-- 支持通用 `markdown.message`：复用 Endpoint Bearer、目标别名白名单、幂等、文本/HTML 图片与自动降级链路，不新增公开路由。
-- root `session_idle` 可选汇总匿名 subagent timeline：简单流程显示阶段卡，复杂流程可附同一消息链的横向时间线；不显示原始 Session ID。顶部提供覆盖统计（总任务时长、子任务覆盖时长与覆盖率），不完整数据标为“已观测”。
-- `v1.2.0` 统一用户等待时间线：OpenCode Question/Permission 的等待区间与 subagent 在同一张完整 root-cycle 甘特图中对齐展示，顶部固定“等待用户”轨道并给出未分类时间/占比；等待区间是匿名、有界的，原始 ID、正文与答案不出站。
-- `metadataDiagnostics=anomaly` 提供有界/匿名/fail-closed 的元数据诊断，用于捕获 root/unknown fallback 取证信号；不承诺定位根因。
-- 支持纯文本与 HTML 图片卡片两种全局渲染模式。
-- HTML 渲染或图片发送异常时，可自动降级为纯文本通知。
-- 通过聊天命令为个人私聊或普通 QQ 群创建、轮换、撤销和删除 endpoint。
-- Endpoint Path 与 Token 分开交付，聊天消息不会返回完整 Webhook URL。
-- 在认证后的 Plugin Page 中预览、复制、编辑、保存、应用和删除自定义 HTML 模板。
-- 为每次请求返回可观察的投递、跳过、降级与重试信息，便于调用方判断结果。
-- #24：全局最短完成通知时长阈值：成功完成的 Webhook 事件耗时低于阈值时跳过通知（默认 15 秒），减少短任务噪音。0 关闭过滤恢复旧行为。可靠耗时仅来自 Provider 特定字段，不对外暴露 task_duration_ms。通过 `admin config min-duration` 命令查询/设置/reset。
+以上为合成数据的实际渲染基准图，不含真实会话或凭据。Release ZIP 不含视觉测试图片，可在[仓库首页](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier#效果图)查看。
 
-## 完整使用流程
+## 能做什么
 
-```mermaid
-flowchart LR
-    A["Markdown 调用方 / OMP Hook / OpenCode V1 Plugin"] --> C["直连或 HTTPS 反向代理<br/>Caddy 等方案（非强依赖）"]
-    C --> D["Webhook Notifier<br/>HTTP Server"] --> E["Token 鉴权<br/>Endpoint Provider 标准化"]
-    E --> F["文本或 HTML 卡片"] --> G["AstrBot adapter"] --> H["私聊或普通 QQ 群"]
-```
+| 场景 | 用法 |
+| --- | --- |
+| Coding Agent 通知 | OMP 运行收束时区分正常、失败、中止和未知，并提醒待处理交互；OpenCode 支持完成、失败、权限与问题通知 |
+| 通用 Markdown 推送 | 从脚本或服务发送构建结果、运维摘要等受限 Markdown 消息 |
+| HTML 卡片 | 展示任务与多代理时间线；OMP 可选深色主题，图片链路异常时可降级为文本 |
 
-1. 安装并重载 Webhook Notifier 插件。
-2. 配置 HTTP 监听地址、端口与 `public_base_url`；同机或可信内网可直接访问。
-3. 跨主机或公网接入时，按需部署 HTTPS 反向代理；Caddy 是推荐参考，也可使用其他方案。
-4. 按来源创建私聊或普通 QQ 群 Endpoint：通用信息默认 `markdown`，OMP 使用 `--provider omp`，OpenCode 使用 `--provider opencode`；分别保存 Base URL、Endpoint Path 与 Token。
-5. 使用与 Endpoint Provider 匹配的 `curl` 请求验证 URL、Token 鉴权和实际投递或跳过结果。
-6. 将 URL 与 Token 配置给 Markdown 调用方、OMP Hook 或 OpenCode V1 Plugin。
-7. 触发真实通知，确认目标私聊或普通 QQ 群收到文本或图片。
-
-**完整教程：** 通用默认请求见下方快速开始；OMP 专题见[端到端部署](docs/end-to-end-setup.md)与[Hook 接入](docs/client-integration.md)，OpenCode 见[集成指南](docs/opencode-integration.md)。
-
----
+- 不必一直盯着终端，在 QQ 中查看结果或等待处理的事项。
+- 按 Endpoint 绑定推送目标，Token 可独立轮换、撤销，不允许调用方任意指定收件人。
+- 过滤短时成功任务与成功子任务通知，减少打扰；失败和待处理事件不按时长过滤。
+- 在认证后的 Plugin Page 复制、编辑、预览、保存、应用或删除自定义 HTML 模板。
+- HTTP 响应区分送达、跳过、降级与可重试结果，便于调用方排障。
 
 ## 快速开始
 
-### 1. 安装插件
+### 1. 安装
 
-> 以下默认 Markdown 流程适用于 `v2.0.0`，不适用于历史 `v1.3.0` ZIP。插件市场搜索、安装和更新仍未完成验证；测试包的线上验证范围与限制见[发布流程](docs/release.md)。
+需要已运行的 AstrBot、上述受支持平台及 Python >= 3.10。依赖见 [pyproject.toml](pyproject.toml)；插件市场搜索、安装和更新尚未验证。
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（推荐） | 从 [`v2.0.0 Release`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/tag/v2.0.0) 下载 [`astrbot_plugin_webhook_notifier-v2.0.0.zip`](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/download/v2.0.0/astrbot_plugin_webhook_notifier-v2.0.0.zip)，在 WebUI 选择“从文件安装”；仅在 Release 与资产可用后安装 |
-| RC 验收包 | `v1.1.0-rc.1` 与带 `rc-smoke` 标识的本地测试包仅用于稳定版发布前验收，不作为后续常规安装入口 |
-| 资产核对 | 安装前核对 Release 版本、ZIP 校验和与单一插件根目录；插件市场安装/更新和生产正式资产验收需单独留证 |
+| Release ZIP（推荐） | 从 [最新 Release](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/latest) 下载插件 ZIP，在 WebUI 选择“从文件安装” |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
-| 源码安装 | 将仓库克隆到 `AstrBot/data/plugins`，见下方命令 |
-
-后两种方式同样不是官方插件市场搜索安装。源码安装命令：
+| 源码安装 | 执行下方命令，将插件放入 `AstrBot/data/plugins` |
 
 ```bash
 git clone https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier.git \
   AstrBot/data/plugins/astrbot_plugin_webhook_notifier
 ```
 
-安装后在 WebUI 中加载或重载插件。运行环境需要 Python >= 3.10。
+安装后在 WebUI 加载或重载插件，确认插件列表显示已加载。升级前查看[公共契约](docs/public-contract.md)与[发布说明](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/blob/main/CHANGELOG.md)。
 
-### 2. 完成最小配置
+### 2. 最小配置与 Endpoint
 
-进入 **AstrBot WebUI → 插件管理 → Webhook Notifier → 配置**：
+- 进入 **AstrBot WebUI → 插件管理 → Webhook Notifier → 配置**，保持 `enabled: true`、`render_mode: text`。
+- `server` 默认监听 `127.0.0.1:18080`，`base_path` 为 `/webhook`。按部署方式设置 `host`、`port` 与含 base path 的 `public_base_url`；同机可直连，跨主机或公网建议 HTTPS 反向代理。步骤见[端到端部署](docs/end-to-end-setup.md)。
+- 私聊主动通知默认关闭。首次可保留此安全默认值验证 `skipped`；确认平台规则和风险后，才设 `enable_private_notifications: true` 并重载，以验证实际送达。
 
-- 保持 `enabled: true`；默认文本模式无需额外配置。
-- 按部署方式配置 `server.host`、`server.port` 和包含 Webhook base path 的 `server.public_base_url`：同机或可信内网可直连，跨主机或公网建议通过 Caddy 等反向代理提供 HTTPS；不要公开真实值。
-- 本节使用私聊 endpoint 验证。只有在确认平台主动消息规则和风险后，才将 `enable_private_notifications` 设为 `true`，然后重载插件。
-- `provider=markdown` 决定请求协议（`event=markdown.message`）；`render_mode=text` 或 `html_image` 决定通知展示方式，两者独立，Markdown 也可以渲染为图片。
-
-### 3. 创建第一个私聊 endpoint
+在与 Bot 的私聊中执行（`<唤醒词>` 默认是 `/`）：
 
 ```text
 <唤醒词>whn token new private demo
 ```
 
-AstrBot 默认唤醒词为 `/`，因此默认命令是 `/whn token new private demo`。未提供 `--provider` 时使用 `markdown`；仅成功创建私聊 Endpoint 或群待验证申请后，公开说明会提醒默认 Provider、`event=markdown.message` 以及 OMP/OpenCode 需显式指定 `--provider`，不会把提醒放进独立 Token 消息。创建失败不提示成功；错误、缺值或重复的 flag 不会回退到默认值。
+省略 `--provider` 时创建 `markdown` Endpoint。成功后聊天返回 `Endpoint Path`，Token 通过独立消息交付；Base URL 从认证后的 **Plugin Page** 复制，三者分别保存。Coding Agent 使用下一节的专用 Endpoint。
 
-创建成功后，聊天返回 `Endpoint Path`，并在独立消息中交付一次 Token；不会返回完整 URL。请在认证后的插件详情 **Plugin Page** 复制 Base URL。
+### 3. 发送第一条消息
 
-### 4. 发送通用 Markdown 请求
-
-先把三个值分别写入环境变量，不要把 Token 放进 URL：
+将以下占位值替换为自己的配置；Token 只放 Header，不拼入 URL：
 
 ```bash
-export WHN_BASE_URL='<从认证 Plugin Page 复制>'
-export WHN_ENDPOINT_PATH='<聊天返回的 Endpoint Path>'
-export WHN_TOKEN='<聊天单独返回的 Token>'
-
+export WHN_BASE_URL='https://example.invalid/webhook'
+export WHN_ENDPOINT_PATH='<endpoint-path>'
+export WHN_TOKEN='<token>'
 curl --fail-with-body --silent --show-error \
   -X POST "${WHN_BASE_URL}/${WHN_ENDPOINT_PATH}" \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer ${WHN_TOKEN}" \
   --data-binary @- <<'JSON'
-{
-  "event": "markdown.message",
-  "id": "readme-demo-1",
-  "title": "Webhook 通知",
-  "markdown": "## 接入完成\n\n这是一条 **Markdown** 通知。"
-}
+{"event":"markdown.message","id":"readme-demo-1","title":"Webhook 通知","markdown":"## 接入完成\n\n这是一条 **Markdown** 通知。"}
 JSON
 ```
 
-预期结果：
+预期：私聊开关开启时返回 HTTP 200、`code: 0`、`message: "ok"`，Bot 私聊收到通知；默认关闭时返回 HTTP 200、`message: "skipped"`，不投递、不应重试。每条新消息使用不同 `id`，同一消息重试保持 `id` 不变。异常见 [FAQ](#faq)。
 
-- 私聊通知已开启时，HTTP 返回 200、`code: 0`、`message: "ok"`，Bot 私聊收到一条文本或图片通知。
-- 私聊通知保持默认关闭时，HTTP 仍返回 200，但 `message: "skipped"`，聊天不会收到通知；这是安全策略结果，不应重试。
-- 使用 `html_image` 且发生渲染问题时，默认会回退为文本，并在 HTTP 响应中给出降级原因。
+## 接入 Coding Agent
 
-### OMP 快速接入
+先升级并重载 AstrBot 服务端，再更新客户端；旧服务端可能拒绝新客户端字段。
 
-先创建 OMP 专用 Endpoint：`<唤醒词>whn token new private my-omp --provider omp`，不要使用默认创建的 Markdown Endpoint 发送 OMP payload。在 OMP 中执行 `/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier` 和 `/marketplace install omp-webhook-notifier@astrbot-webhook-notifier` 安装客户端（也可把 Release ZIP 中完整的 [`integrations/omp/`](integrations/omp/) 目录复制为 `~/.omp/agent/extensions/webhook-notifier/`），在启动 OMP 的环境中配置 `OMP_SESSION_WEBHOOK_URL` 和 `OMP_SESSION_WEBHOOK_TOKEN`，然后重启 OMP。项目级安装、从单文件 Hook 迁移和 macOS 开发同步见[客户端接入文档](docs/client-integration.md)；服务端部署见[专题教程](docs/end-to-end-setup.md)。
+### Oh My Pi（OMP）
 
-通知卡片默认浅色；使用深色聊天界面时可创建深色 Endpoint（`… --provider omp --theme dark`），或对已有 Endpoint 执行 `<唤醒词>whn token theme my-omp dark`，规则见[命令参考](docs/command-reference.md#卡片主题)。
+1. 在 Bot 私聊执行 `<唤醒词>whn token new private my-omp --provider omp`；要深色卡片可追加 `--theme dark`。
+2. 在 OMP 依次执行 `/marketplace add AsterleedsGuild0/astrbot_plugin_webhook_notifier`、`/marketplace install omp-webhook-notifier@astrbot-webhook-notifier`。
+3. 在启动 OMP 的环境中分别设置 `OMP_SESSION_WEBHOOK_URL`（Base URL 与 Endpoint Path 组合）和 `OMP_SESSION_WEBHOOK_TOKEN`，然后重启 OMP。
+4. 在允许通知的目标上运行超过默认 15 秒阈值的任务，确认收到结果。整包手动安装、旧 Hook 迁移、历史环境变量和排障见[客户端接入](docs/client-integration.md)；服务端设置见[端到端部署](docs/end-to-end-setup.md)。
 
-OMP 原生只提供扩展加载和生命周期事件，HTTP POST 由客户端实现；`ONEBOT_*` 环境变量作为历史回退仍可使用。
+### OpenCode
 
-### OpenCode 快速接入
-
-1. 安装支持 OpenCode 的 Webhook Notifier 并重载插件；使用当前源码新增字段时，应先完成对应服务端升级，不能仅更新客户端。
-2. 在 AstrBot 私聊创建 OpenCode Endpoint：`<唤醒词>whn token new private <名称> --provider opencode`。
-3. 分别保存 Plugin Page 的 Base URL、聊天返回的 Endpoint Path 和单独交付的 Bearer Token，并在受控环境中组成客户端所需的完整 Endpoint URL。
-4. 将 `integrations/opencode/webhook-notifier.ts` 放到运行 OpenCode 的机器，复制 `integrations/opencode/opencode.jsonc` 的 V1 `plugin` tuple，并用 `{env:...}` 或 `{file:...}` 提供 URL/Token。可选配置 `instanceDisplayName` 作为 OpenCode 实例标识；`projectName` 由客户端自动推导 worktree basename，不需要用户配置。`actionContentMode` 默认 `strict`；只有明确接受业务文本/目标路径泄露风险时才设置为 `summary` 或 `full`。
-5. 服务端升级并重载后再部署新版 Client；完全重启 OpenCode Desktop 或 CLI 进程，再触发完成、失败和权限请求事件并核对 Bot 通知。旧服务端严格 allowlist 不接受新 `session.scope`。
-
-`python scripts/smoke_opencode_plugin.py --cli` 只验证 OpenCode CLI 会实际调用 V1 Plugin server，不能替代 AstrBot 测试包部署、Endpoint 创建和 Bot 端到端通知验收。完整流程见[OpenCode 集成指南](docs/opencode-integration.md)。
-
-### Markdown 信息推送
-
-先创建独立的 Markdown Endpoint：`<唤醒词>whn token new private ops --provider markdown`。调用仍使用现有 `POST {base_path}/{endpoint}` 与 Endpoint Bearer Token：
-
-```bash
-curl --fail-with-body --silent --show-error \
-  -X POST "${WHN_BASE_URL}/${WHN_ENDPOINT_PATH}" \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer ${WHN_TOKEN}" \
-  --data-binary @- <<'JSON'
-{
-  "event": "markdown.message",
-  "id": "cpa-update-stable-id",
-  "title": "CPA 自动更新",
-  "markdown": "## 更新完成\n\n- CPA：`x → y`\n- 状态：**成功**",
-  "target_alias": "default"
-}
-JSON
-```
-
-仅支持标题、段落、有序/无序列表、粗体/斜体、行内代码、fenced code 与普通 `http(s)` 链接。Raw HTML、图片语法、Jinja/模板语法与外部资源不会执行；不安全或不支持的语法按文本显示。`target_alias` 只能选择当前 Endpoint 已绑定的别名，调用方不能传入 UMO。
-
-### 旧 Endpoint 与默认值迁移
-
-旧持久化记录只有在 **`provider` key 缺失**时才按 `markdown` 读取；显式空字符串或 `null` 仍非法。显式写有 `omp`、`opencode` 或 `markdown` 的历史记录保持原协议，不自动覆盖，也不根据 payload 猜协议。曾依赖缺失字段的 OMP 调用会受此次切换影响，需创建显式 `--provider omp` 的新 Endpoint，并更新调用方 URL/Token；不能靠轮换 Token 或原位修改 Provider 切换协议。运行时支持集合以 `ProviderRegistry` 为权威，当前注册三种 Provider。
-
-加载缺失 `provider` 的旧记录时会写入不含 Endpoint/Token 私密值的 warning，提醒核对调用方协议；这不是按 payload 自动修复或切换 Provider。
-
----
+1. 在 Bot 私聊执行 `<唤醒词>whn token new private my-opencode --provider opencode`，分别保存 Base URL、Endpoint Path 与 Token。
+2. 将 [`webhook-notifier.ts`](integrations/opencode/webhook-notifier.ts) 放到 OpenCode 所在机器，合并 [`opencode.jsonc`](integrations/opencode/opencode.jsonc) 的 `plugin` tuple，用 `{env:...}` 或 `{file:...}` 分别提供 URL 与 Token。
+3. 完全重启 OpenCode Desktop 或 CLI，触发完成、失败和权限请求，核对目标通知。默认 `actionContentMode: strict` 只发送交互类别／计数；内容模式、实例名、时间线、版本前提及排障见 [OpenCode 集成](docs/opencode-integration.md)。
 
 ## 支持范围
 
-平台声明表示对应路径已验证，不代表平台允许无限制主动发送消息。
+以下为已有验证范围，不表示允许无限制主动发送；其他 adapter 未验证，不承诺支持。
 
 | 平台 / 场景 | 状态 | 当前边界 |
 | --- | --- | --- |
@@ -180,112 +113,62 @@ JSON
 | `qq_official` WebSocket 私聊 | 已验证 | 私聊命令、Webhook 鉴权、主动通知与 OMP 图片卡片 |
 | `qq_official` WebSocket 普通 QQ 群 | 已验证 | 群验证、主动 Webhook 与 OMP HTML 图片卡片 |
 | `qq_official` WebSocket QQ 频道（Guild） | 不支持，无计划 | 当前身份与群验证流程不覆盖 QQ 频道 |
-| `qq_official_webhook` | 不支持，无计划 | 未在插件元数据中声明，也未适配该接入方式 |
+| `qq_official_webhook` | 不支持，无计划 | 未声明、未适配该接入方式 |
 
-Webhook 私聊主动通知默认关闭；开启前请阅读[平台投递策略](docs/platform-delivery-policy.md)，群聊通知不受此开关影响。
-
----
+私聊开关不影响群通知；主动消息规则与多 Bot 边界见[平台投递策略](docs/platform-delivery-policy.md)。
 
 ## 常用命令
 
-文档统一使用 `<唤醒词>`；默认值为 `/`。完整说明见[命令参考](docs/command-reference.md)，管理员命令不在首页展开。
-
-以下省略 Provider 参数的通用创建命令默认 Markdown；OMP/OpenCode 分别追加 `--provider omp` / `--provider opencode`。
+除帮助外，下表命令均在私聊执行，仅管理当前平台中自己的 Endpoint；群申请还需群主／管理员验证。完整流程和管理员命令见[命令参考](docs/command-reference.md)。
 
 | 场景 | 命令 |
 | --- | --- |
 | 查看帮助 | `<唤醒词>whn help` |
-| 创建私聊 endpoint | `<唤醒词>whn token new private [名称]` |
-| 申请群聊 endpoint | `aiocqhttp: <唤醒词>whn token new group <数字群号> [名称]`；`qq_official: <唤醒词>whn token new group current [名称]` |
-| 查看自己的 endpoint | `<唤醒词>whn token list` |
+| 创建私聊 Endpoint | `<唤醒词>whn token new private [名称]` |
+| 申请群聊 Endpoint | `aiocqhttp: <唤醒词>whn token new group <数字群号> [名称]`；`qq_official: <唤醒词>whn token new group current [名称]` |
+| 查看自己的 Endpoint | `<唤醒词>whn token list` |
 | 轮换 Token | `<唤醒词>whn token rotate <名称>` |
-| 切换 OMP 卡片主题 | `<唤醒词>whn token theme <名称> <light|dark>`（创建时也可加 `--theme dark`） |
-| 撤销 endpoint | `<唤醒词>whn token revoke <名称>` |
-| 永久删除终态 endpoint | `<唤醒词>whn token delete <名称>` |
-
----
+| 切换 OMP 卡片主题 | `<唤醒词>whn token theme <名称> <light或dark>` |
+| 撤销 Endpoint | `<唤醒词>whn token revoke <名称>` |
+| 永久删除终态 Endpoint | `<唤醒词>whn token delete <名称>` |
 
 ## 配置摘要
 
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
-| `enabled` | `true` | 启用插件；创建可投递 endpoint 后自动启动 HTTP 服务 |
-| `render_mode` | `text` | 选择 `text` 或 `html_image` 以使用纯文本或是HTML渲染模式 |
-| `notification_mode` | `focused` | `focused` 仅抑制成功完成的 subagent/auxiliary；`all` 发送全部通知 |
-| `min_completion_duration_seconds` | `15` | 最短完成通知时长（秒）：成功完成的任务耗时低于此值跳过通知；`0` 关闭过滤恢复旧行为 |
+| `enabled` | `true` | 启用插件；创建可投递 Endpoint 后自动启动 HTTP 服务 |
+| `render_mode` | `text` | 选择 `text` 或 `html_image`，使用纯文本或 HTML 图片 |
+| `notification_mode` | `focused` | 仅抑制成功完成的子代理／辅助会话；`all` 发送全部通知 |
+| `min_completion_duration_seconds` | `15` | 可靠耗时低于阈值的成功任务不通知；`0` 关闭过滤 |
 | `enable_private_notifications` | `false` | 是否允许 Webhook 主动投递到私聊目标 |
-| `fallback_to_text` | `true` | HTML 图片链路失败时是否降级为文本 |
-| `server` | 本地监听 | 配置 `host`、`port`、`base_path`、`public_base_url` 与请求体上限 |
+| `fallback_to_text` | `true` | HTML 图片链路失败时降级为文本 |
+| `server` | 本地监听 | 配置监听地址、端口、base path、公开 Base URL 与请求体上限 |
 
-全量字段、默认值和编辑格式以 [`_conf_schema.json`](_conf_schema.json) 为准；部署与运维说明见[安全与运维](docs/security-and-operations.md)。
-
-### HTML 模板与 Base URL
-
-在 AstrBot 插件详情页打开 Plugin Page，可以查看只读内置模板，或创建副本后编辑、预览、保存、应用和删除自定义模板。模板变量与示例见 [HTML 模板变量](docs/template-variables.md)。
-
-同一页面提供认证后的 Base URL 复制入口。调用方应将它与聊天返回的 `Endpoint Path` 组合；Base URL、Endpoint Path 和 Token 应分别保存，避免凭据随完整 URL 泄露。
-
----
+以上均有默认值；外部接入须按网络环境调整 `server`。全量配置以 [`_conf_schema.json`](_conf_schema.json) 为准；HTML 模板与 Plugin Page 操作见[模板变量](docs/template-variables.md)。
 
 ## 安全提示
 
-- 公网接收 Webhook 时使用 HTTPS，并优先让 HTTP 服务监听本地地址、由反向代理转发。
-- Token 只放在 `Authorization` Header 的 `Bearer <token>` 中；泄露后立即执行 `token rotate`。
-- 私聊主动通知默认关闭；开启前核对 QQ 官方规则或 OneBot 实现的风控边界。
-- OMP Hook 可能发送截断 prompt、cwd、session 文件、模型和消息计数等元数据；网络失败日志还包含目标 URL。部署前评估数据外发边界，提交 Issue、日志或截图时一并脱敏。
-- OpenCode 通知默认只发送 action 类别/计数；`full` 内容模式是显式 opt-in，虽有字段白名单和大小上限，仍可能外发问题、权限描述或目标路径。
-- Subagent timeline 只在 root `session_idle` 中可选发送，时间是相对 root busy→idle cycle 的观测偏移；卡片不展示匿名图引用、原始 Session ID、路径或工具参数，部分数据不会伪装成精确耗时。
-- `actionContentMode` 只控制 OpenCode Question/Permission 内容隐私，与服务端 `notification_mode` 正交；`focused` 只抑制成功完成的 subagent/auxiliary，unknown 会 fail-open 放行。
-- OpenCode Client 的会话上下文只按白名单发送匿名 `session.ref`、`session.scope`、会话名及（子会话可解析时）安全清洗的 `session.rootName`；父链只使用匿名 `parentRef`，不发送 raw `parentID`、ID、路径或原始对象，缺失/环路/超深时省略；部署必须服务端先升级、再部署并完全重启 OpenCode Client。
-- Markdown provider 不执行 raw HTML 或模板语法，不加载远程图片、字体、样式或其他外部资源；链接只允许 `http://` 与 `https://`。
-- adapter 实例的 `platform_id` 发生变化时，不要直接编辑数据文件，按 [rebind runbook](docs/platform-id-rebind-runbook.md) 离线处理。
+- 公网入口使用 HTTPS，优先由反向代理转发到本地监听；URL 与 Token 分开保存，泄露后立即 `token rotate`。
+- 开启私聊前核对 QQ 官方主动消息规则或 OneBot 风控边界；Token 只授权 Endpoint 已绑定的目标，不能传入任意收件人。
+- OMP 名称和默认待处理摘要仍可能含业务信息；OpenCode 的 `summary`／`full` 模式可能外发业务文本或目标路径，启用前评估。
+- Markdown 不执行原始 HTML、模板语法或外部资源，仅允许普通 HTTP(S) 链接；自定义 HTML 模板需另行审查。
+- 公开 Issue、日志和截图须清理凭据、完整 Webhook URL、Endpoint Path、账号、群标识、消息正文及部署拓扑。更换平台实例标识须按 [rebind runbook](docs/platform-id-rebind-runbook.md) 操作，不直接编辑数据文件。
 
-更多说明见[安全与运维](docs/security-and-operations.md)和[平台投递策略](docs/platform-delivery-policy.md)。
-
----
+字段白名单、匿名关联、投递与重试边界见[安全与运维](docs/security-and-operations.md)。
 
 ## 文档索引
 
-- [公共契约与 1.x 兼容政策](docs/public-contract.md)
-- [命令参考](docs/command-reference.md)
-- [端到端部署](docs/end-to-end-setup.md)
-- [客户端接入](docs/client-integration.md)
-- [OpenCode 集成](docs/opencode-integration.md)
-- [安全与运维](docs/security-and-operations.md)
-- [平台投递策略](docs/platform-delivery-policy.md)
-- [HTML 模板变量](docs/template-variables.md)
-- [`platform_id` rebind runbook](docs/platform-id-rebind-runbook.md)
-- [发布流程](docs/release.md)
-- [CHANGELOG](CHANGELOG.md)
-- [PRD](docs/PRD.md)（面向贡献者）
-- [FSD](docs/FSD.md)（面向贡献者）
-
----
+- 使用与配置：[命令参考](docs/command-reference.md) · [端到端部署](docs/end-to-end-setup.md) · [配置 schema](_conf_schema.json) · [HTML 模板](docs/template-variables.md)
+- 客户端：[OMP 接入](docs/client-integration.md) · [OpenCode 接入](docs/opencode-integration.md)
+- 安全与迁移：[安全与运维](docs/security-and-operations.md) · [平台投递策略](docs/platform-delivery-policy.md) · [公共契约与升级兼容](docs/public-contract.md) · [平台 ID rebind](docs/platform-id-rebind-runbook.md)
+- 开发与发布：[发布流程](docs/release.md) · [CHANGELOG](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/blob/main/CHANGELOG.md) · [PRD](docs/PRD.md) · [FSD](docs/FSD.md)
 
 ## FAQ
 
-### 这是 OMP 原生 Webhook 吗？
-
-不是。OMP 提供公开事件与 Hook 加载机制；HTTP POST 和 V2 协议由本仓库维护。最终状态依据 `agent_end` 的续跑与结构化结果，不能把 `session_stop` 直接当成功。服务端保留 V1 接收，但会纠正失败／中止与缺证据状态。
-
-### OpenCode provider 如何启用？
-
-创建 Endpoint 时追加 `--provider opencode`；当前源码省略时默认 `markdown` 并提醒使用 Markdown 协议。Provider 在创建后不可变，OpenCode Plugin 配置和排障见[OpenCode 集成指南](docs/opencode-integration.md)。
-
-### Markdown provider 如何启用？
-
-当前源码省略 `--provider` 即创建 Markdown Endpoint 并显示默认协议提醒，也可显式指定 `--provider markdown`。该 Endpoint 只接受 `event=markdown.message` 的受限 Markdown payload，继续复用原有 Bearer 鉴权、目标白名单与投递策略。
-
-### 私聊 endpoint 创建成功，为什么没有通知？
-
-`enable_private_notifications` 默认是 `false`。此时请求会返回 HTTP 200 和 `message: "skipped"`；确认平台规则与风险后开启配置并重载插件。
-
-### HTML 图片失败后怎么办？
-
-保持 `fallback_to_text: true`，插件会尝试回退文本。再检查 AstrBot `html_render` / T2I 服务、模板内容和响应中的 `fallback_reason`；截图裁剪与渲染排查见 [`docs/t2i-rendering-notes.md`](docs/t2i-rendering-notes.md)。
-
----
+- **Endpoint 创建成功却没通知？** 先检查私聊开关与响应的 `message` / `skip_reason`；成功短任务、成功子任务和重复请求也可能被跳过，规则见[安全与运维](docs/security-and-operations.md)。
+- **HTML 图片失败怎么办？** 保持 `fallback_to_text: true`，检查响应中的 `fallback_reason`、AstrBot `html_render` / T2I 服务和模板；见[渲染排障](docs/t2i-rendering-notes.md)。
+- **选错 Provider 能只轮换 Token 吗？** 不能。Provider 创建后不可变，须新建正确类型的 Endpoint 并更新调用方 URL／Token；旧默认值迁移见[公共契约](docs/public-contract.md)。
 
 ## 反馈与 License
 
-发现缺陷或文档问题，请提交 [GitHub Issue](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/issues)。公开反馈中请勿附带真实 Token、完整 Webhook URL 或未经脱敏的日志与截图。本项目采用 [MIT License](LICENSE)。
+缺陷、使用问题与贡献建议请提交 [GitHub Issue](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/issues)，附脱敏后的复现步骤与版本。本项目采用 [MIT License](LICENSE)。
