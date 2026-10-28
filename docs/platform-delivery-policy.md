@@ -7,7 +7,7 @@
 - 最后更新：2026-07-20
 - 主题：Webhook 状态通知在 QQ 平台上的私聊安全默认值与架构边界
 
-工作区通用原则见 [`AstrBot 跨平台主动投递策略`](../../../.opencode/astrbot-platform-delivery-policy.md)；多 Bot 实例下 endpoint、Token、owner 与目标 UMO 的归属规则见 [`AstrBot 跨插件多 Bot 实例数据隔离`](../../../.opencode/astrbot-multi-bot-data-isolation.md)。Registry v2 已实现，本文承载 Webhook Notifier 的具体配置、响应与迁移契约。
+本文承载 Webhook Notifier 的平台投递配置、响应与迁移契约。多 Bot 实例下 Endpoint、Token、owner 与目标 UMO 按 `platform_id` 隔离；`platform_id` 变化时的离线处理见 [`platform_id` rebind runbook](platform-id-rebind-runbook.md)。
 
 ---
 

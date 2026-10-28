@@ -197,7 +197,7 @@ export OMP_SESSION_WEBHOOK_TIMEOUT_MS='30000'
 
 ## 生命周期与 HTTP 契约
 
-完整字段、状态、大小、匿名引用、运行／交互边界和重试语义以[OMP V2 公共契约](public-contract.md#omp-v2运行收束与交互观察未发布)为准。
+完整字段、状态、大小、匿名引用、运行／交互边界和重试语义以[OMP V2 公共契约](public-contract.md#v210omp-v2-运行收束与交互观察)为准。
 
 - 新客户端只发送 `omp.run_finished`、`omp.action_required`，整数 `version=2`，Header 与 body 事件一致。
 - `completed` 是运行正常结束，不证明业务验收成功；最终失败、中止、待处理和未知分别表达。

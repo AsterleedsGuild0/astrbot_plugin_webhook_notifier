@@ -2,12 +2,11 @@
 
 ## 文档状态
 
-- 本文契约与源码版本：`v2.0.0`
-- 状态：2.0 默认 Provider 兼容性变更，保留 1.x 历史契约。
-- 2.0 契约定稿日期：2026-10-22
+- 本文描述默认分支的当前契约；各章节标题标注引入该契约的版本。
+- 状态：2.x 契约，保留 1.x 历史契约。
 - 正式版本与资产以 [GitHub Releases](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) 为准；源码版本号不单独证明远端发布或生产部署已完成。
 
-`v1.3.0` 历史发布范围与证据保留在对应章节，不将 2.0 新默认倒灌为历史 ZIP 的行为。测试包已完成默认 Markdown 私聊路径的线上验证；既有 OMP/OpenCode 线上通知、生产缺字段记录迁移及插件市场安装/更新尚未验证，详见[发布流程](release.md)。
+`v1.3.0` 历史发布范围与证据保留在对应章节，不将 2.0 新默认倒灌为历史 ZIP 的行为。各版本的验收范围见 [CHANGELOG](../CHANGELOG.md) 与[发布流程](release.md)；插件市场安装／更新尚未验证。
 
 ## v2.0.0：默认 Provider 与通用定位
 
@@ -28,7 +27,7 @@
 - 模板上下文新增 `event.theme`（`light` 或 `dark`），内置模板和自定义模板都能读取；不使用该变量的自定义模板输出不变。WebUI 预览不自动注入，需要时在预览 JSON 中提供 `theme`。
 - Webhook 请求、响应与 OMP 客户端协议不变；主题只由服务端 Registry 决定，调用方无法在请求中指定。
 
-## OMP V2：运行收束与交互观察（未发布）
+## v2.1.0：OMP V2 运行收束与交互观察
 
 新客户端只发送 `omp.run_finished`、`omp.action_required` 和凭据告警 `omp.credential_disabled`，`version` 必须是整数 `2`；`X-OMP-Event` 如提供，必须与 body 完全相同。旧服务端不识别这两个事件，不得自动降级为 `omp.session_stop`。仍使用显式 `provider=omp` Endpoint、Bearer 和既有目标别名白名单。
 

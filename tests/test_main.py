@@ -748,6 +748,30 @@ async def test_initialize_registry_load_error_never_starts_server(
     assert plugin._server is None
 
 
+@pytest.mark.asyncio
+async def test_initialize_data_dir_error_fails_without_local_fallback(
+    tmp_path, monkeypatch
+):
+    def unavailable(plugin_name):
+        raise RuntimeError("data dir unavailable")
+
+    monkeypatch.setattr(
+        "astrbot_plugin_webhook_notifier.main.StarTools.get_data_dir", unavailable
+    )
+    created = []
+    monkeypatch.setattr(
+        "astrbot_plugin_webhook_notifier.main.EndpointRegistry",
+        lambda data_dir: created.append(data_dir),
+    )
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+
+    with pytest.raises(RuntimeError, match="data dir unavailable"):
+        await plugin.initialize()
+    assert created == []
+    assert plugin._registry is None
+    assert plugin._server is None
+
+
 def test_status_shows_private_notification_state():
     disabled = WebhookNotifierPlugin(Context(), AstrBotConfig())
     enabled = WebhookNotifierPlugin(

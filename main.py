@@ -199,18 +199,8 @@ class WebhookNotifierPlugin(Star):
             logger.info("[WebhookNotifier] 插件已禁用，跳过初始化")
             return
 
-        # 初始化插件数据目录
-        data_dir_available = True
-        try:
-            data_dir = StarTools.get_data_dir(
-                plugin_name="astrbot_plugin_webhook_notifier"
-            )
-        except (ValueError, RuntimeError) as e:
-            data_dir_available = False
-            logger.error(
-                f"[WebhookNotifier] 无法获取插件数据目录: {e}，将使用 fallback 路径"
-            )
-            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        # 数据目录不可用时直接失败：退回插件目录会在更新或重装时丢失 Endpoint。
+        data_dir = StarTools.get_data_dir(plugin_name="astrbot_plugin_webhook_notifier")
         os.makedirs(data_dir, exist_ok=True)
         logger.info(f"[WebhookNotifier] 插件数据目录: {data_dir}")
 
@@ -221,15 +211,10 @@ class WebhookNotifierPlugin(Star):
 
         self._registry = EndpointRegistry(data_dir)
         self._registry.expire_stale_pending()
-        if data_dir_available:
-            try:
-                self._template_registry = TemplateRegistry(data_dir)
-            except Exception as e:
-                logger.error(f"[WebhookNotifier] 模板 Registry 初始化失败: {e}")
-        else:
-            logger.error(
-                "[WebhookNotifier] StarTools 数据目录不可用，模板 Registry 已禁用"
-            )
+        try:
+            self._template_registry = TemplateRegistry(data_dir)
+        except Exception as e:
+            logger.error(f"[WebhookNotifier] 模板 Registry 初始化失败: {e}")
 
         # 初始化 Sender
         self._sender = Sender(
