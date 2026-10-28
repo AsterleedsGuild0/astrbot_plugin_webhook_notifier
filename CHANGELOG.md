@@ -4,6 +4,7 @@
 
 - 开发部署脚本改为调用显式配置的外部部署器，移除公共仓库中的 Dashboard、ZIP 身份校验和回滚状态实现；使用 `--deployer`／`ASTRBOT_PLUGIN_DEPLOYER` 与 `--environment`／`ASTRBOT_DEPLOY_ENVIRONMENT`，也可由 `--env-file` 提供。没有默认部署目标；旧的本仓库部署状态不自动迁移。
 - 保留本地打包、`--zip`／`--label`、`--dry-run`、`--no-rollback` 与冒烟／接收端验收；只在部署器确认加载成功后发送通知，冒烟标记使用返回版本。导入、本地打包和 `--skip-deploy --verify` 不需要外部部署器。部署器错误只报告安全摘要，不原样显示子进程输出。
+- `scripts/sync_omp_hook.py` 新增 `install --git-commit`：客户端 `package.json` 版本号变化的那次同步，在目标所在 Git 仓库只提交目标目录，提交信息为 `config🔧: <目录名> update <旧版本> -> <新版本>`；其他已暂存内容不受影响，不推送。默认关闭。
 
 ## v2.4.2 - 2026-10-28
 

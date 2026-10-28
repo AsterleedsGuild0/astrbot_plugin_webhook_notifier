@@ -279,7 +279,7 @@ Token 必须放在独立环境变量中。轮换后旧 Token 立即失效；不�
 
 ## 本地开发同步
 
-`scripts/sync_omp_hook.py` 是 macOS 开发工具，不属于 AstrBot 运行插件，不进入插件 ZIP。它用 Python 标准库把客户端包目录单向复制到 OMP 扩展目录，不执行客户端、不修改 Git index、不提交或推送、不重启 OMP。复制的副本不引用源路径，仓库所在外置盘未挂载时 OMP 仍按最后一次同步的版本加载。
+`scripts/sync_omp_hook.py` 是 macOS 开发工具，不属于 AstrBot 运行插件，不进入插件 ZIP。它用 Python 标准库把客户端包目录单向复制到 OMP 扩展目录，不执行客户端、不推送、不重启 OMP；默认不操作 Git，安装时加 `--git-commit` 才会在版本号变化时提交（见[版本变更自动提交](#版本变更自动提交)）。复制的副本不引用源路径，仓库所在外置盘未挂载时 OMP 仍按最后一次同步的版本加载。
 
 ### 前提与首次安装
 
@@ -331,6 +331,23 @@ python3 "$SYNC" uninstall
 默认 LaunchAgent 为 `~/Library/LaunchAgents/io.github.asterleedsguild0.webhook-notifier.omp-hook-sync.plist`。`--instance <小写字母数字连字符名称>` 放在子命令之前，可创建隔离验收实例；非默认实例在 LaunchAgent label 后追加实例名。不要让多个实例管理同一目标。
 
 更新同步器本身需停止后，从插件仓库重新运行相同绑定的 `install`，再 `start`。它不会自行更新运行脚本。卸载后配置与冲突标记仍保留，相同绑定重新安装不会清除冲突；卸载后如需重新安装，应使用仓库脚本入口。
+
+### 版本变更自动提交
+
+目标目录位于 Git 仓库中（例如 `~/.omp` 本身是配置仓库）时，可在 `install` 时加 `--git-commit`：
+
+```bash
+python3 scripts/sync_omp_hook.py install \
+  --source "$PWD/integrations/omp" \
+  --target "$HOME/.omp/agent/extensions/webhook-notifier" \
+  --git-commit
+```
+
+- 只有同步后 `package.json` 的 `version` 与部署前不同时才提交；版本号不变的同步只更新文件，不提交。
+- 只提交目标目录：`git add -A` 限定在目标目录，再以 `git commit --only` 提交，仓库中其他已暂存内容保持暂存，不进入该提交。不推送。
+- 提交信息格式固定为 `config🔧: <目标目录名> update <旧版本> -> <新版本>`；首次部署（目标原先没有版本号）为 `config🔧: <目标目录名> install <新版本>`。
+- 目标不在 Git 仓库、被 `.gitignore` 忽略、Git 失败或没有可提交内容时，部署照常完成，结果以固定状态码记入 `state.json` 的 `commit_status`（`committed`、`commit_not_repository`、`commit_target_ignored`、`commit_nothing`、`commit_failed`），`status` 可查看。
+- 该选项保存在实例 `config.json` 中；重新 `install` 时不带 `--git-commit` 即关闭。
 
 ### 同步与故障语义
 

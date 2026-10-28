@@ -384,3 +384,76 @@ def test_status_reports_conflict_without_failing_query(manager, deployment, monk
     assert report["status"] == "target_conflict"
     assert report["target_changed"] is True
     assert report["contents_equal"] is False
+
+
+def git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+
+
+def set_version(source: Path, version: str) -> None:
+    (source / "package.json").write_text(json.dumps({"version": version, "omp": {"extensions": ["./index.ts"]}}))
+
+
+@pytest.fixture
+def committing(deployment):
+    """目标父目录是 Git 仓库（模拟 ~/.omp），仓库里另有一个已暂存的无关文件。"""
+    root, source, target = deployment
+    repo = target.parent
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "test")
+    git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "unrelated.yml").write_text("staged by the user\n")
+    git(repo, "add", "unrelated.yml")
+    config = sync.load_json(root / "config.json")
+    sync.save_json(root / "config.json", {**config, "git_commit": True})
+    set_version(source, "1.0.0")
+    return root, source, target, repo
+
+
+def sync_once(engine) -> str:
+    assert engine.step() == "settling"
+    return engine.step()
+
+
+def test_version_change_commits_only_target_with_formatted_message(committing):
+    root, source, target, repo = committing
+    engine = sync.Synchronizer(root)
+    assert sync_once(engine) == "synced"
+    assert git(repo, "log", "--format=%s") == "config🔧: webhook-notifier install 1.0.0\n"
+
+    put(source, b"export const version = 2;\n")
+    set_version(source, "1.1.0")
+    assert sync_once(engine) == "synced"
+    assert git(repo, "log", "-1", "--format=%s") == "config🔧: webhook-notifier update 1.0.0 -> 1.1.0\n"
+    assert sorted(git(repo, "show", "--name-only", "--format=", "HEAD").split()) == [
+        "webhook-notifier/index.ts", "webhook-notifier/package.json",
+    ]
+    # 用户原本暂存的无关文件仍在暂存区，未被带入提交。
+    assert git(repo, "diff", "--cached", "--name-only") == "unrelated.yml\n"
+    assert sync.load_json(root / "state.json")["commit_status"] == "committed"
+
+
+def test_sync_without_version_change_leaves_target_uncommitted(committing):
+    root, source, target, repo = committing
+    engine = sync.Synchronizer(root)
+    sync_once(engine)
+    put(source, b"export const version = 2;\n")
+    assert sync_once(engine) == "synced"
+    assert git(repo, "rev-list", "--count", "HEAD") == "1\n"
+    assert "webhook-notifier/index.ts" in git(repo, "status", "--porcelain")
+
+
+def test_commit_is_opt_in(committing):
+    root, source, target, repo = committing
+    config = sync.load_json(root / "config.json")
+    sync.save_json(root / "config.json", {**config, "git_commit": False})
+    assert sync_once(sync.Synchronizer(root)) == "synced"
+    assert subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True).returncode != 0
+
+
+def test_commit_failure_keeps_deployment(committing):
+    root, source, target, repo = committing
+    shutil.rmtree(repo / ".git")
+    assert sync_once(sync.Synchronizer(root)) == "synced"
+    assert entry(target) == entry(source)
+    assert sync.load_json(root / "state.json")["commit_status"] == "commit_not_repository"

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """macOS OMP 客户端包开发同步：把扁平 extension 包目录单向复制到 OMP 扩展目录。
 
-不执行客户端，不操作 Git；仅依赖 Python 标准库。目标是独立副本，源所在磁盘未挂载时 OMP 仍可正常加载。
+不执行客户端；仅依赖 Python 标准库。目标是独立副本，源所在磁盘未挂载时 OMP 仍可正常加载。
+安装时指定 ``--git-commit`` 后，客户端 ``package.json`` 版本号变化的那次同步会在目标所在 Git 仓库提交目标目录；不推送。
 """
 from __future__ import annotations
 
@@ -114,6 +115,15 @@ def package_digest(files: dict[str, bytes] | None) -> str | None:
     return value.hexdigest()
 
 
+def manifest_version(files: dict[str, bytes] | None) -> str | None:
+    """读取包内 ``package.json`` 的版本号；缺失或不可解析时返回 None。"""
+    try:
+        value = json.loads(files["package.json"]).get("version") if files else None
+    except (KeyError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
 def write_files(directory: Path, files: dict[str, bytes]) -> None:
     for name, data in files.items():
         fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -198,6 +208,30 @@ class Synchronizer:
         if not self.source.is_absolute() or not self.target.is_absolute():
             raise SyncError("invalid_config")
         self.candidate: str | None = None
+        self.git_commit = config.get("git_commit") is True
+
+    def commit_target(self, old_version: str | None, new_version: str) -> str:
+        """在目标所在仓库只提交目标目录；其他已暂存内容保持暂存且不进入该提交。返回固定状态码。"""
+        git = shutil.which("git") or "/usr/bin/git"
+
+        def run(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run([git, "-C", str(self.target), *args], capture_output=True, text=True, timeout=30)
+
+        action = f"update {old_version} -> {new_version}" if old_version else f"install {new_version}"
+        try:
+            if run("rev-parse", "--is-inside-work-tree").returncode:
+                return "commit_not_repository"
+            if run("check-ignore", "-q", ".").returncode == 0:
+                return "commit_target_ignored"
+            if run("add", "-A", "--", ".").returncode:
+                return "commit_failed"
+            if run("diff", "--cached", "--quiet", "--", ".").returncode == 0:
+                return "commit_nothing"
+            if run("commit", "--only", "-q", "-m", f"config🔧: {self.target.name} {action}", "--", ".").returncode:
+                return "commit_failed"
+        except (OSError, subprocess.SubprocessError):
+            return "commit_failed"
+        return "committed"
 
     def state(self) -> dict:
         value = load_json(self.root / "state.json")
@@ -268,6 +302,12 @@ class Synchronizer:
             save_json(self.root / "state.json", state)
             return self.record(state, "target_conflict")
         state.update(deployed_hash=source_hash, conflict=False, last_sync_at=now())
+        new_version = manifest_version(source)
+        old_version = manifest_version(target)
+        if self.git_commit and new_version and new_version != old_version:
+            # 提交失败不影响已完成的部署，只记录固定状态码。
+            state.update(commit_status=self.commit_target(old_version, new_version), commit_version=new_version,
+                         commit_at=now())
         state["status"] = "synced"
         state["status_at"] = now()
         save_json(self.root / "state.json", state)
@@ -314,7 +354,7 @@ class Manager:
         if plistlib.loads(data) != self.expected_plist(config["python"]):
             raise SyncError("unmanaged_launchagent")
 
-    def install(self, source: Path, target: Path) -> dict:
+    def install(self, source: Path, target: Path, git_commit: bool = False) -> dict:
         safe_path(self.root)
         safe_path(source)
         safe_path(target)
@@ -358,7 +398,7 @@ class Manager:
                     "status": "installed", "status_at": now(),
                 })
             save_json(self.root / "config.json", {
-                "source": str(source), "target": str(target), "python": python,
+                "source": str(source), "target": str(target), "python": python, "git_commit": git_commit,
             })
             atomic_write(self.script, Path(__file__).read_bytes())
             safe_path(self.plist.parent)
@@ -439,6 +479,8 @@ def main(argv: list[str] | None = None) -> int:
     install = sub.add_parser("install", help="安装或更新；不自动启动，不覆盖不同的已有目标")
     install.add_argument("--source", required=True, help="含 package.json 的客户端包目录")
     install.add_argument("--target", required=True, help="OMP 扩展目录下的包目录，如 ~/.omp/agent/extensions/webhook-notifier")
+    install.add_argument("--git-commit", action="store_true",
+                         help="版本号变化时在目标所在 Git 仓库提交目标目录；重新安装时不带此参数即关闭")
     for command in ("start", "stop", "status", "uninstall", "watch"):
         sub.add_parser(command)
     sync = sub.add_parser("sync", help="立即同步；稳定观察间隔 2 秒")
@@ -449,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SyncError("macos_required")
         manager = Manager(args.instance)
         if args.command == "install":
-            result = manager.install(absolute(args.source), absolute(args.target))
+            result = manager.install(absolute(args.source), absolute(args.target), args.git_commit)
         elif args.command == "sync":
             result = manager.sync(args.overwrite_target)
         else:
