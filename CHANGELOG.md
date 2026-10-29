@@ -1,10 +1,18 @@
 # 更新日志
 
-## 未发布
+## v2.5.0 - 2026-10-29
 
 - 开发部署脚本改为调用显式配置的外部部署器，移除公共仓库中的 Dashboard、ZIP 身份校验和回滚状态实现；使用 `--deployer`／`ASTRBOT_PLUGIN_DEPLOYER` 与 `--environment`／`ASTRBOT_DEPLOY_ENVIRONMENT`，也可由 `--env-file` 提供。没有默认部署目标；旧的本仓库部署状态不自动迁移。
 - 保留本地打包、`--zip`／`--label`、`--dry-run`、`--no-rollback` 与冒烟／接收端验收；只在部署器确认加载成功后发送通知，冒烟标记使用返回版本。导入、本地打包和 `--skip-deploy --verify` 不需要外部部署器。部署器错误只报告安全摘要，不原样显示子进程输出。
 - `scripts/sync_omp_hook.py` 新增 `install --git-commit`：客户端 `package.json` 版本号变化的那次同步，在目标所在 Git 仓库只提交目标目录，提交信息为 `config🔧: <目录名> update <旧版本> -> <新版本>`；其他已暂存内容不受影响，不推送。默认关闭。
+- #40 移除插件运行时代码对 Python 标准 `logging` 的使用及 Token direct send 临时日志过滤器，统一使用 AstrBot logger；插件自身日志不输出 Token，Token 发送失败只记录异常类型。adapter／core 的标准日志不在插件保证范围内。
+- 补充 AstrBot >= 4.29.2 的 Trace 风险：`trace_enable` 默认关闭，开启后 Token 会明文进入 Trace SQLite／Dashboard；该链路不经过标准 `logging`，旧过滤器同样无法保护。插件不检查或阻止 Trace。
+
+### 升级须知
+
+- AstrBot 最低版本提高至 `>=4.26.8`；使用 4.26.0–4.26.7 的用户必须先升级 AstrBot。
+- Trace 排障结束后关闭 `trace_enable`，并轮换开启期间交付的所有 Token；关闭 Trace 不会清除已有明文记录。
+- 本版本无接口或卡片设计变化；Endpoint、配置与数据无需迁移。OMP 客户端包仅同步版本号到 2.5.0，升级与否不影响通知。
 
 ## v2.4.2 - 2026-10-28
 

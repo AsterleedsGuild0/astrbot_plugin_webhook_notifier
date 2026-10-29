@@ -39,7 +39,7 @@ Plugin Page 的 Base URL 接口只返回 Base URL 与是否已配置，不返回
 1. 插件先产生不含 Token 的正常安全摘要。
 2. 随后通过当前事件的 `event.send()` 直接发送恰好一个关闭 T2I 与 Markdown 的 Plain，内容仅为 `Bearer Token: <TOKEN>`。
 3. Token 不进入 `MessageEventResult` 或 RespondStage。
-4. direct send 期间临时日志过滤器只匹配当前 Token 的精确值，并在发送结束后移除。
+4. 插件不安装临时日志过滤器；插件自身日志不输出 Token，direct send 失败只记录异常类型，不记录异常正文或 traceback。
 
 插件只承诺对 adapter 发起一次 direct send，不承诺网络 exactly-once。若发送抛出异常或送达状态不确定：
 
@@ -49,6 +49,14 @@ Plugin Page 的 Base URL 接口只返回 Base URL 与是否已配置，不返回
 - 用户应在同一平台私聊执行 `token rotate <名称>` 生成新凭据。
 
 普通命令、异常和兼容文本若意外包含插件 Token 格式，会被替换为 `[Token 已隐藏]`。
+
+上述保证仅覆盖插件自身的日志与回复处理；adapter／AstrBot core 的标准日志不在插件保证范围内。
+
+### AstrBot Trace 风险
+
+AstrBot >= 4.29.2 提供 `trace_enable`（默认 `false`）。开启后，`event.send()` 交付的 Token 会以明文写入 Trace SQLite，并可在 Dashboard Trace 中查看。Trace 写入不经过 Python 标准 `logging`，旧版 direct send 临时日志过滤器也无法保护这条链路。
+
+插件代码既不检查 `trace_enable`，也不会因 Trace 开启而阻止 Token 交付。需要排障时应限制 Trace 数据与 Dashboard 的访问范围；排障结束后关闭 Trace，并轮换开启期间交付的所有 Token。关闭 Trace 不会自动删除已经记录的明文，历史 Trace 数据及其备份仍须按敏感凭据材料管理。
 
 ---
 

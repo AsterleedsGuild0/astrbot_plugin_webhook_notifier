@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import importlib.util
 import re
@@ -167,6 +168,38 @@ def test_rebind_cli_is_explicitly_in_package_file_list() -> None:
         path.startswith("scripts/") and path != "scripts/rebind_platform_id.py"
         for path in package_files
     )
+
+
+def test_packaged_python_does_not_use_stdlib_logging() -> None:
+    package_plugin = load_package_module()
+    python_files = [
+        path for path in package_plugin.iter_package_files() if path.endswith(".py")
+    ]
+    assert "main.py" in python_files
+    assert any(path.startswith("core/") for path in python_files)
+    assert "scripts/rebind_platform_id.py" in python_files
+    violations = []
+    for relative_path in python_files:
+        tree = ast.parse(
+            (ROOT / relative_path).read_text(encoding="utf-8"),
+            filename=relative_path,
+        )
+        for node in ast.walk(tree):
+            imports_logging = (
+                isinstance(node, ast.Import)
+                and any(alias.name.split(".")[0] == "logging" for alias in node.names)
+            ) or (
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").split(".")[0] == "logging"
+            )
+            calls_logging = isinstance(node, ast.Call) and any(
+                isinstance(part, ast.Name) and part.id == "logging"
+                for part in ast.walk(node.func)
+            )
+            if imports_logging or calls_logging:
+                violations.append(f"{relative_path}:{node.lineno}")
+
+    assert not violations, "Runtime logging usage: " + ", ".join(violations)
 
 
 def test_opencode_runtime_and_config_are_in_package_file_list() -> None:

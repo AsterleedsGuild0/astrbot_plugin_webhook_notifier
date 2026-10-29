@@ -1,6 +1,6 @@
 # 发布流程
 
-本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.4.2`，包含数据目录初始化修复、运行依赖精简与插件市场元数据；接口和卡片设计不变，OMP 客户端仅同步版本号（见 CHANGELOG 升级须知）。本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
+本项目通过 GitHub Actions 构建插件 ZIP 并发布到 GitHub Release。当前发布目标为 `v2.5.0`，包含 #40 运行时日志整改、Trace 风险说明、外部部署器接入及 OMP 同步器的可选版本提交；AstrBot 最低版本为 `>=4.26.8`，4.26.0–4.26.7 用户须先升级。接口和卡片设计不变，OMP 客户端包仅同步版本号到 2.5.0（见 CHANGELOG 升级须知）。本地准备与 `workflow_dispatch` dry-run 均不创建 tag 或 Release，只有推送 `v*` tag 才触发正式发布。
 
 版本号与文档表示源码契约，远端发布完成状态以 [GitHub Releases](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases) 及对应 Actions run 为准。已发布 tag/asset 不覆盖、不重写；线上部署另行验收。
 
@@ -17,7 +17,7 @@ uv run --frozen python scripts/package_plugin.py --dev-version --test-label omp-
 - 产物沿用 `dist/`，为单一 `astrbot_plugin_webhook_notifier/` 根目录；不改工作区正式版本号。
 - 检查 ZIP 内 `metadata.yaml`、`main.py` 与 `pyproject.toml` 的规范版本等价；OMP／OpenCode 客户端、core、静态资源、模板、接入与公共契约齐全。测试、缓存、临时 HOME、凭据和同步器不进入安装包。
 - 将 ZIP 解压到仓库既有 `tmp/` 下，再执行 `uv run --frozen python scripts/smoke_omp_hook.py --package <解压后的integrations/omp>`。这证明打包入口经真实回环 HTTP 可用，不证明 AstrBot WebUI 安装、原生 OMP 事件或线上目标消息。
-- 当前构建版本、ZIP／运行文件哈希和提取 smoke 回执单独保存在 `tmp/omp-upgrade/31-package.json` 与 `31-package-http.json`；分层证据见 [OMP V2 验收记录](omp-v2-acceptance.md)。这些本地验收产物不随插件 ZIP 分发。
+- 构建版本、ZIP／运行文件哈希和提取 smoke 回执应随每次验收单独留存，不随插件 ZIP 分发。历史分层证据见 [OMP V2 验收记录](omp-v2-acceptance.md)，不代表当前版本已通过验收。
 
 ### 脚本部署到线上 AstrBot
 
@@ -33,7 +33,7 @@ uv run --frozen python scripts/deploy_dev.py --env-file <含部署器与环境�
 - 文件使用 `KEY=VALUE`，可同时包含上述部署器／环境配置和凭据：`ASTRBOT_DASHBOARD_URL`、`ASTRBOT_API_KEY`（Dashboard 中创建、仅需 `plugin` scope）、`WEBHOOK_NOTIFIER_URL`、`WEBHOOK_NOTIFIER_TOKEN`。凭据仅通过环境或文件传递，没有 Dashboard URL／API Key 命令行参数；文件放在 Git 忽略的私有位置，不进入仓库。
 - 外部部署器由运行本脚本的同一 Python 解释器调用，接口为 `<deployer> query|deploy --plugin astrbot_plugin_webhook_notifier --environment <环境标识> --zip <包> [--env-file <文件>]`；`--no-rollback` 仅传给 `deploy`。成功时 stdout 必须只有一个 JSON 对象，包含 `plugin_id`、`version`、`activated`，部署结果另含 `previous`。未安装的查询结果为 `version=null`、`activated=false`；部署成功必须返回已加载的版本和 `activated=true`。失败返回非零；本脚本不原样显示子进程输出，避免泄露凭据或服务端响应。
 - `--dry-run` 调用只读 `query`，校验包并查询线上版本，不安装、回滚或发送通知；省略 `--zip` 时仍按 `--label` 构建测试包。`--skip-smoke` 只跳过默认通知；`--verify` 则用下述接收端验收取代默认冒烟。
-- 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上次成功包及状态由外部部署器按环境、Dashboard 地址与插件隔离管理，不再读写本仓库的旧部署状态，也不自动迁移旧记录。上传／加载失败时，只有存在不同的已校验成功包且目标既未加载、也不在失败插件列表中，才默认尝试回装；回装后仍以原部署失败非零退出。冒烟／接收端验收失败不触发回滚。`--no-rollback` 禁止自动回装；本次 v2.4.2 发布部署必须加此参数。
+- 卸载固定 `delete_config=false`、`delete_data=false`，Endpoint Registry 与插件配置保留。上次成功包及状态由外部部署器按环境、Dashboard 地址与插件隔离管理，不再读写本仓库的旧部署状态，也不自动迁移旧记录。上传／加载失败时，只有存在不同的已校验成功包且目标既未加载、也不在失败插件列表中，才默认尝试回装；回装后仍以原部署失败非零退出。冒烟／接收端验收失败不触发回滚。`--no-rollback` 禁止自动回装；本次 v2.5.0 发布部署必须加此参数。
 - 冒烟卡片发送到凭据中的 Endpoint 目标；默认冒烟只验证 HTTP 与业务结果，卡片显示效果仍需在目标聊天中查看。AstrBot 升级后先用 `--dry-run` 并核对外部部署器对 Dashboard 接口的兼容性。查询、部署失败或成功响应无效时，不发送通知也不执行接收端验收。
 
 #### 接收端验收（`--verify`）
@@ -87,20 +87,24 @@ uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --prob
 - 2026-10-22 一次真实 Markdown 请求返回 HTTP 200、`code=0`、`delivered=true`、`rendered=true`、`render_mode=html_image`、`fallback_reason=null`；临时 Endpoint 已撤销并删除。此证据只覆盖测试包，不替代正式 ZIP 安装验收。
 - 线上 OMP/OpenCode 真实通知、群创建、缺字段旧记录迁移和通知图片接收端视觉确认尚未验证；插件市场安装/更新也未验证，不将本地回归写成这些线上路径通过。
 
-正式发布顺序：同步版本与更新日志 → 本地门禁和 ZIP 检查 → 提交并推送准备提交 → Actions dry-run 成功 → 将 `v2.0.0` tag 指向该提交并推送 → 核对正式 workflow、Release 标志及远端 ZIP。dry-run 后若修改源码，必须验证新提交后再打 tag。
+以上为 v2.0.0 的历史升级与验收记录，不作为 v2.5.0 的发布证据。
 
 ---
 
 ## 发布前检查
 
+本轮发布顺序：同步版本与更新日志 → 本地门禁和 ZIP 检查 → 提交并推送准备提交 → Actions dry-run 成功 → 将 `v2.5.0` tag 指向该提交并推送 → 核对正式 workflow、Release 标志及远端 ZIP。dry-run 后若修改源码，必须验证新提交后再打 tag。这里列出的是待执行门禁，不表示本轮已通过。
+
+升级前确认 AstrBot >= 4.26.8。AstrBot >= 4.29.2 的 `trace_enable` 默认关闭；开启时 Token 会明文进入 Trace SQLite／Dashboard，插件不会检查或阻止。排障后关闭 Trace 并轮换开启期间交付的 Token，详见[安全与运维](security-and-operations.md#astrbot-trace-风险)。
+
 1. 确认目标版本号一致：
-   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.4.2`。
-   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.4.2`，`uv.lock` 根项目版本同步更新。
+   - `metadata.yaml` 和 `main.py @register` 使用 SemVer 风格插件版本；本轮为 `v2.5.0`。
+   - `pyproject.toml` 使用规范 PEP 440 版本；本轮为 `2.5.0`，`uv.lock` 根项目版本同步更新。
    - `integrations/omp/package.json` 的 `version` 与插件版本等价。OMP marketplace 的安装与升级都按这个版本判断，Release workflow 会校验它与 tag 一致；`.omp-plugin/marketplace.json` 不写版本。
    - marketplace 读取默认分支，客户端改动只在发版时推送到 `main`，避免用户装到尚未发布的客户端。
    - 三者通过 PEP 440 规范化后必须等价，不要求 tag 去除 `v` 后与项目版本逐字相等。
-   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.4.2 - 2026-10-28`，包含升级须知（数据目录获取失败时拒绝加载、运行安装不包含测试依赖、AstrBot 下限为 4.26.0，客户端仅同步版本号）。
-   - 发布准备与 dry-run 不创建 `v2.4.2` tag；仅在门禁通过后推送 tag 触发正式 Release。
+   - `CHANGELOG.md` 顶部存在对应版本小节；本轮为 `## v2.5.0 - 2026-10-29`，包含升级须知（AstrBot 下限为 4.26.8、4.26.0–4.26.7 必须升级、Trace 明文风险及轮换要求，无接口或卡片设计变化，OMP 客户端包仅同步版本号）。
+   - 发布准备与 dry-run 不创建 `v2.5.0` tag；仅在门禁通过后推送 tag 触发正式 Release。
    - 发布后用 Release 原件部署线上，并分别以浅色与深色测试 Endpoint 执行 `--verify`（见上文接收端验收）。
 2. 维护本地锁定验证依赖：
 
@@ -137,7 +141,7 @@ uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --prob
    ```
 
    测试包版本和文件名使用本地时间后缀 `-test.YYYYMMDD.HHMM`，例如
-   `v1.1.0-rc.1-test.20260723.0905`。同一天多次打包时可直接按小时和分钟区分。ZIP 内 `pyproject.toml` 会使用等价的合法 PEP 440 dev 版本。该开发包与下面的固定 `v1.1.0-rc.1` RC ZIP 不同，不应混称。
+   `v2.5.0-test.20261029.0905`。同一天多次打包时可直接按小时和分钟区分。ZIP 内 `pyproject.toml` 会使用等价的合法 PEP 440 dev 版本。该开发包不等于正式 `v2.5.0` Release ZIP。
 
    建议再添加本次测试用途标签，便于同时区分功能和生成时间：
 
@@ -146,7 +150,7 @@ uv run --frozen python scripts/deploy_dev.py --skip-deploy --verify <…> --prob
    ```
 
    生成格式为 `-test.YYYYMMDD.HHMM.<label>`，例如
-   `v1.1.0-rc.1-test.20260723.0905.template-manager`。标签仅允许英文字母、数字和连字符。
+   `v2.5.0-test.20261029.0905.template-manager`。标签仅允许英文字母、数字和连字符。
 
 6. 本地验证正式发布包：
 
@@ -243,7 +247,7 @@ git push origin v1.0.0
 
 ## 手动触发
 
-如果需要在 CI 中演练完整工作流而不发布，在 GitHub Actions 页面手动运行 `Release` workflow，填写目标版本 tag。手动触发始终为 dry-run，不会创建 Release。Artifact 名称会包含目标 tag，例如 `plugin-release-v2.0.0`。下载后可用于安装测试，不能据此宣称正式 Release 已发布。
+如果需要在 CI 中演练完整工作流而不发布，在 GitHub Actions 页面手动运行 `Release` workflow，填写目标版本 tag。手动触发始终为 dry-run，不会创建 Release。Artifact 名称会包含目标 tag，例如 `plugin-release-v2.5.0`。下载后可用于安装测试，不能据此宣称正式 Release 已发布。
 
 ---
 
@@ -282,7 +286,7 @@ git push origin v1.0.0
 如果 Actions 不可用，且已经获得明确的远端发布授权，可以使用 GitHub CLI 手动发布目标版本。以下仅为流程示意；优先修复并使用现有 Actions 流程，不自动切换兜底：
 
 ```bash
-TARGET_TAG=v2.0.0
+TARGET_TAG=v2.5.0
 uv sync --frozen --group dev
 uv run --frozen ruff check .
 uv run --frozen pytest

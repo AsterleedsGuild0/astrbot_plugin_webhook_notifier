@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E402
 
 import logging
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,9 +19,15 @@ from astrbot.api.message_components import Plain
 from astrbot.api.star import Context
 from astrbot_plugin_webhook_notifier.core.registry import EndpointRegistry
 from astrbot_plugin_webhook_notifier.main import (
-    _ExactSecretFilter,
     _TokenDeliveryText,
     WebhookNotifierPlugin,
+)
+
+from .test_command_security import (
+    CommandEvent,
+    QQOfficialCommandEvent,
+    collect,
+    sent_credential,
 )
 
 
@@ -46,54 +53,40 @@ def assert_direct_chain(event: SensitiveEvent, expected: str) -> None:
     assert chain.get_use_markdown() is False
 
 
-def assert_filter_removed() -> None:
-    loggers = [logging.getLogger()]
-    loggers.extend(
-        candidate
-        for candidate in logging.Logger.manager.loggerDict.values()
-        if isinstance(candidate, logging.Logger)
-    )
-    for logger in loggers:
-        assert not any(isinstance(item, _ExactSecretFilter) for item in logger.filters)
-        for handler in logger.handlers:
-            assert not any(
-                isinstance(item, _ExactSecretFilter) for item in handler.filters
-            )
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["success", "logged-success", "logged-error"])
-async def test_sensitive_direct_send_redacts_all_relevant_logs_and_cleans_filter(
-    caplog, mode
+@pytest.mark.parametrize("fails", [False, True], ids=["success", "send-error"])
+async def test_sensitive_direct_send_logs_no_credential_or_exception_details(
+    caplog, fails
 ):
     secret = "whn_TEST_ONLY_EXACT_SECRET_123456789012345678901"
+    exception_text = f"adapter exception contains {secret}"
     delivery = _TokenDeliveryText(f"Bearer Token: {secret}", "recover-me")
-    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="astrbot")
 
     async def send_impl(_chain):
-        if mode != "success":
-            for name in ("", "astrbot.respond.stage", "botpy.client", "aiocqhttp.api"):
-                logging.getLogger(name).debug("adapter payload=%s", secret)
-        if mode == "logged-error":
-            try:
-                raise RuntimeError(f"adapter exception contains {secret}")
-            except RuntimeError:
-                logging.getLogger("astrbot.adapter").exception("adapter failed")
-            raise RuntimeError(f"send failed with {secret}")
-        return None
+        if fails:
+            raise RuntimeError(exception_text)
 
     event = SensitiveEvent(send_impl)
     plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
 
     sent = await plugin._send_sensitive_plain(event, delivery)
 
-    assert sent is (mode != "logged-error")
+    assert sent is not fails
     assert_direct_chain(event, f"Bearer Token: {secret}")
     assert secret not in caplog.text
-    for record in caplog.records:
-        assert secret not in record.getMessage()
-        assert secret not in (record.exc_text or "")
-    assert_filter_removed()
+    assert exception_text not in caplog.text
+    records = [record for record in caplog.records if record.name == "astrbot"]
+    assert len(records) == int(fails)
+    if fails:
+        record = records[0]
+        assert record.levelno == logging.ERROR
+        assert record.getMessage() == (
+            "[WebhookNotifier] 敏感凭据 direct send 失败 error=RuntimeError"
+        )
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert record.stack_info is None
 
 
 class RespondStageLikeEvent:
@@ -116,7 +109,6 @@ class RespondStageLikeEvent:
         return StageResult(text)
 
     async def send(self, chain):
-        logging.getLogger("aiocqhttp").debug("direct chain=%r", chain)
         self.sent.append(chain)
 
 
@@ -151,7 +143,6 @@ async def test_respond_stage_like_prepare_to_send_contains_summary_only(
     assert len(yielded) == 1
     assert "Endpoint Path" in yielded[0].text
     assert "Bearer Token" not in yielded[0].text
-    assert "markdown.message" in yielded[0].text
     assert "--provider omp" in yielded[0].text
     assert "--provider opencode" in yielded[0].text
     prepare_records = [
@@ -167,3 +158,73 @@ async def test_respond_stage_like_prepare_to_send_contains_summary_only(
     record = saved.get_scoped("aiocqhttp", "owner", "respond-stage")
     assert record is not None and record.provider == "markdown"
     assert saved.authenticate_delivery(record.path, f"Bearer {secret}").authorized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "rotate", "qq_official-confirm"])
+async def test_token_commands_direct_send_each_credential_once(
+    tmp_path, caplog, operation
+):
+    plugin = WebhookNotifierPlugin(Context(), AstrBotConfig())
+    plugin._registry = EndpointRegistry(tmp_path)
+
+    async def no_start():
+        return None
+
+    plugin._ensure_server_running = no_start  # type: ignore[method-assign]
+    caplog.set_level(logging.DEBUG, logger="astrbot")
+    previous_token = None
+    if operation == "qq_official-confirm":
+        event = QQOfficialCommandEvent(
+            "whn token new group current once", private=True
+        )
+        pending = await collect(plugin, event)
+        request_match = re.search(r"请求 ID: ([^\n]+)", pending[0].text)
+        code_match = re.search(r"验证码: ([^\n]+)", pending[0].text)
+        assert request_match is not None and code_match is not None
+        request_id = request_match.group(1)
+        group = QQOfficialCommandEvent(
+            f"whn token verify {request_id} {code_match.group(1)}",
+            private=False,
+            sender_id="group-admin",
+            raw_data={
+                "group_openid": "verified-group",
+                "author": {"member_openid": "group-admin", "member_role": "admin"},
+            },
+        )
+        verified = await collect(plugin, group)
+        assert "token confirm" in verified[0].text
+        assert not event.sent_chains
+        assert not group.sent_chains
+        event.message_str = f"whn token confirm {request_id}"
+    else:
+        event = CommandEvent("whn token new private once", private=True)
+        if operation == "rotate":
+            created = await collect(plugin, event)
+            previous_token = sent_credential(event).removeprefix("Bearer Token: ")
+            assert all(previous_token not in result.text for result in created)
+            event = CommandEvent("whn token rotate once", private=True)
+
+    results = await collect(plugin, event)
+
+    credential = sent_credential(event)
+    assert re.fullmatch(r"Bearer Token: whn_[A-Za-z0-9_-]+", credential)
+    token = credential.removeprefix("Bearer Token: ")
+    assert credential.count(token) == 1
+    assert len(results) == 1
+    assert all(token not in result.text for result in results)
+    assert token not in caplog.text
+    if previous_token is not None:
+        assert token != previous_token
+        assert previous_token not in caplog.text
+    record = plugin._registry.get_scoped(
+        event.get_platform_id(), event.get_sender_id(), "once"
+    )
+    assert record is not None
+    assert plugin._registry.authenticate_delivery(
+        record.path, f"Bearer {token}"
+    ).authorized
+    if previous_token is not None:
+        assert not plugin._registry.authenticate_delivery(
+            record.path, f"Bearer {previous_token}"
+        ).authorized

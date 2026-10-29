@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import os
 import re
-import traceback
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -110,39 +108,6 @@ class _TokenDeliveryText(str):
         return instance
 
 
-class _ExactSecretFilter(logging.Filter):
-    """仅清洗当前 direct-send Token 精确值。"""
-
-    def __init__(self, secret: str) -> None:
-        super().__init__()
-        self.secret = secret
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            rendered = record.getMessage()
-        except Exception:
-            rendered = str(record.msg)
-        if self.secret in rendered:
-            record.msg = rendered.replace(self.secret, "[REDACTED]")
-            record.args = ()
-        for key, value in tuple(record.__dict__.items()):
-            if isinstance(value, str) and self.secret in value:
-                record.__dict__[key] = value.replace(self.secret, "[REDACTED]")
-        if record.exc_info:
-            try:
-                formatted_exc = "".join(traceback.format_exception(*record.exc_info))
-            except Exception:
-                formatted_exc = ""
-            if self.secret in formatted_exc:
-                record.exc_info = None
-                record.exc_text = "[REDACTED]"
-        if isinstance(record.exc_text, str) and self.secret in record.exc_text:
-            record.exc_text = record.exc_text.replace(self.secret, "[REDACTED]")
-        if isinstance(record.stack_info, str) and self.secret in record.stack_info:
-            record.stack_info = record.stack_info.replace(self.secret, "[REDACTED]")
-        return True
-
-
 TOKEN_PLAINTEXT_PATTERN = re.compile(
     rf"\b{re.escape(TOKEN_PREFIX)}[A-Za-z0-9_-]{{43}}\b"
 )
@@ -169,7 +134,7 @@ def _command_positional_args_compat(handler: Any) -> Any:
     "astrbot_plugin_webhook_notifier",
     "AsterleedsGuild0",
     "接收外部 Webhook 事件并推送到指定 AstrBot 会话",
-    "v2.4.2",
+    "v2.5.0",
 )
 class WebhookNotifierPlugin(Star):
     """接收 Webhook 事件并安全投递到 AstrBot 会话。"""
@@ -542,15 +507,12 @@ class WebhookNotifierPlugin(Star):
     async def _send_sensitive_plain(
         self, event: AstrMessageEvent, delivery: _TokenDeliveryText
     ) -> bool:
-        """绕过 RespondStage 单次发送敏感 Plain，并精确清洗当前 Token 日志。"""
+        """绕过 RespondStage 单次发送敏感 Plain；失败只记录异常类型。"""
         text = str(delivery)
         prefix = "Bearer Token: "
         if not text.startswith(prefix):
             raise ValueError("敏感凭据消息格式非法")
-        secret = text.removeprefix(prefix)
         chain = MessageChain([Plain(text)]).use_t2i(False).use_markdown(False)
-        secret_filter = _ExactSecretFilter(secret)
-        targets = self._install_sensitive_log_filter(secret_filter)
         try:
             await event.send(chain)
             return True
@@ -560,50 +522,6 @@ class WebhookNotifierPlugin(Star):
                 f"error={type(exc).__name__}"
             )
             return False
-        finally:
-            self._remove_sensitive_log_filter(secret_filter, targets)
-
-    @staticmethod
-    def _install_sensitive_log_filter(
-        secret_filter: logging.Filter,
-    ) -> list[logging.Filterer]:
-        targets: list[logging.Filterer] = []
-        seen: set[int] = set()
-
-        def attach(target: logging.Filterer) -> None:
-            identity = id(target)
-            if identity in seen:
-                return
-            seen.add(identity)
-            target.addFilter(secret_filter)
-            targets.append(target)
-
-        root = logging.getLogger()
-        attach(root)
-        for handler in root.handlers:
-            attach(handler)
-
-        prefixes = ("astrbot", "botpy", "aiocqhttp")
-        for name in prefixes:
-            attach(logging.getLogger(name))
-        for name, candidate in logging.Logger.manager.loggerDict.items():
-            if not isinstance(candidate, logging.Logger):
-                continue
-            if not any(
-                name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes
-            ):
-                continue
-            attach(candidate)
-            for handler in candidate.handlers:
-                attach(handler)
-        return targets
-
-    @staticmethod
-    def _remove_sensitive_log_filter(
-        secret_filter: logging.Filter, targets: list[logging.Filterer]
-    ) -> None:
-        for target in reversed(targets):
-            target.removeFilter(secret_filter)
 
     def _sanitize_chat_text(self, text: str) -> str:
         """对所有文本命令回复执行 URL 与配置值的最终防泄漏处理。"""

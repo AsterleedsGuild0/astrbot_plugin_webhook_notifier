@@ -98,6 +98,40 @@ class TestNormalizeMinCompletionDuration:
         assert normalize_min_completion_duration(True) == 0
         assert normalize_min_completion_duration(False) == 0
 
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            (
+                True,
+                "min_completion_duration_seconds: bool 值不被接受，"
+                "已归一化为 0（安全打开）",
+            ),
+            (
+                3601,
+                "min_completion_duration_seconds: 值 3601 超出有效范围 "
+                "[0, 3600]，已归一化为 0（安全打开）",
+            ),
+            (
+                "abc",
+                "min_completion_duration_seconds: 非整数类型 str，"
+                "已归一化为 0（安全打开）",
+            ),
+        ],
+        ids=["bool", "out-of-range-int", "non-int"],
+    )
+    def test_invalid_value_emits_one_astrbot_warning(
+        self, caplog, value, message
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="astrbot")
+
+        assert normalize_min_completion_duration(value) == 0
+
+        assert len(caplog.records) == 1
+        record = caplog.records[0]
+        assert record.name == "astrbot"
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == message
+
 
 class TestShouldFilterByDuration:
     def test_threshold_0_disables_filter(self) -> None:

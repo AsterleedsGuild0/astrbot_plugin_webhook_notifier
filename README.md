@@ -44,7 +44,7 @@ AstrBot Webhook 通知插件：将 Oh My Pi（OMP）、OpenCode 的任务完成�
 
 ### 1. 安装
 
-需要已运行的 AstrBot、上述受支持平台及 Python >= 3.10。依赖见 [pyproject.toml](pyproject.toml)。
+需要已运行的 AstrBot >= 4.26.8、上述受支持平台及 Python >= 3.10。AstrBot 4.26.0–4.26.7 用户须先升级 AstrBot。依赖见 [pyproject.toml](pyproject.toml)。
 
 | 方式 | 操作 |
 | --- | --- |
@@ -167,6 +167,7 @@ JSON
 ## 安全提示
 
 - 公网入口使用 HTTPS，优先由反向代理转发到本地监听；URL 与 Token 分开保存，泄露后立即 `token rotate`。
+- AstrBot >= 4.29.2 的 `trace_enable` 默认关闭；开启后，独立交付的 Token 会明文进入 Trace SQLite／Dashboard，插件不会检查或阻止。排障后关闭 Trace，并轮换开启期间交付的 Token；完整边界见[安全与运维](docs/security-and-operations.md#astrbot-trace-风险)。
 - 开启私聊前核对 QQ 官方主动消息规则或 OneBot 风控边界；Token 只授权 Endpoint 已绑定的目标，不能传入任意收件人。
 - OMP 名称和默认待处理摘要仍可能含业务信息；OpenCode 的 `summary`／`full` 模式可能外发业务文本或目标路径，启用前评估。
 - `html_image` 模式会把通知内容（含会话名与待处理摘要）发给 AstrBot 配置的 T2I 服务渲染；使用非自建 T2I 时内容会离开本机，隐私敏感场景改用 `text` 或自建 T2I。

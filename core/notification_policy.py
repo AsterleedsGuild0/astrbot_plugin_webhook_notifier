@@ -8,10 +8,9 @@ delivery pipeline.
 from __future__ import annotations
 
 import enum
-import logging
 from typing import Any, Final
 
-_logger = logging.getLogger("astrbot.webhook_notifier.policy")
+from astrbot.api import logger
 
 # ─── 最短完成通知时长阈值 ─────────────────────────────────
 
@@ -45,20 +44,20 @@ def normalize_min_completion_duration(value: Any = _MISSING_DURATION) -> int:
         return MIN_COMPLETION_DURATION_DEFAULT
     if isinstance(value, bool):
         # bool is a subclass of int but must not be accepted
-        _logger.warning(
+        logger.warning(
             "min_completion_duration_seconds: bool 值不被接受，已归一化为 0（安全打开）"
         )
         return 0
     if isinstance(value, int):
         if MIN_COMPLETION_DURATION_MIN <= value <= MIN_COMPLETION_DURATION_MAX:
             return value
-        _logger.warning(
+        logger.warning(
             f"min_completion_duration_seconds: 值 {value} 超出有效范围 "
             f"[{MIN_COMPLETION_DURATION_MIN}, {MIN_COMPLETION_DURATION_MAX}]，"
             "已归一化为 0（安全打开）"
         )
         return 0
-    _logger.warning(
+    logger.warning(
         f"min_completion_duration_seconds: 非整数类型 {type(value).__name__}，"
         "已归一化为 0（安全打开）"
     )
