@@ -1,5 +1,9 @@
 # 更新日志
 
+## 未发布
+
+- README 效果图改用 `raw.githubusercontent.com` 绝对地址：AstrBot Cloud 插件详情页不解析 README 中的仓库相对路径，原先的图片无法显示。同时删除“Release ZIP 不含视觉测试图片”的提示。
+
 ## v2.5.0 - 2026-10-29
 
 - 开发部署脚本改为调用显式配置的外部部署器，移除公共仓库中的 Dashboard、ZIP 身份校验和回滚状态实现；使用 `--deployer`／`ASTRBOT_PLUGIN_DEPLOYER` 与 `--environment`／`ASTRBOT_DEPLOY_ENVIRONMENT`，也可由 `--env-file` 提供。没有默认部署目标；旧的本仓库部署状态不自动迁移。

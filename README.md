@@ -12,16 +12,16 @@ AstrBot Webhook 通知插件：将 Oh My Pi（OMP）、OpenCode 的任务完成�
 
 ## 效果图
 
-<p><img src="tests/visual/baselines/simple-1.png" width="420" alt="OMP 浅色完成卡：状态、会话、模型与耗时"> <img src="tests/visual/baselines/dark/simple-1.png" width="420" alt="OMP 深色完成卡"></p>
+<p><img src="https://raw.githubusercontent.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/main/tests/visual/baselines/simple-1.png" width="420" alt="OMP 浅色完成卡：状态、会话、模型与耗时"> <img src="https://raw.githubusercontent.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/main/tests/visual/baselines/dark/simple-1.png" width="420" alt="OMP 深色完成卡"></p>
 
 <details>
 <summary>展开查看多代理与等待时间线</summary>
 
-![OMP 多代理与交互观察时间线](tests/visual/baselines/timeline-2.png)
+![OMP 多代理与交互观察时间线](https://raw.githubusercontent.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/main/tests/visual/baselines/timeline-2.png)
 
 </details>
 
-以上为合成数据的实际渲染基准图，不含真实会话或凭据。Release ZIP 不含视觉测试图片，可在[仓库首页](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier#效果图)查看。
+以上为合成数据的实际渲染基准图，不含真实会话或凭据。
 
 ---
 
