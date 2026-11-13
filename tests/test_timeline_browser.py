@@ -8,8 +8,12 @@ from typing import cast
 import pytest
 from PIL import Image
 
-from core.renderer import render_subagent_timeline
+from core.renderer import (
+    _build_subagent_timeline_view,
+    render_subagent_timeline,
+)
 from tests.browser_timeline_smoke import capture_timeline_browser_geometry
+from tests.test_omp_timeline import _omp_run_event, _omp_subagent, _omp_wait
 from tests.test_renderer import (
     _timeline_event,
     _timeline_item,
@@ -471,3 +475,128 @@ def test_long_timeline_identity_wraps_without_clipping_at_minimum_width(
         assert metrics["scrollWidth"] <= metrics["clientWidth"]
         assert metrics["scrollHeight"] == metrics["clientHeight"]
         assert metrics["clientHeight"] > 40
+
+
+def _folded_omp_browser_scenario():
+    total_ms = (18 * 60 + 13) * 60_000
+    h = 3_600_000
+    m = 60_000
+    return _omp_run_event(
+        duration_ms=total_ms,
+        session_name="长 Ask 等待时间线断轴折叠验收",
+        items=[
+            _omp_subagent(1, 4 * m, 52 * m, name="扫描仓库结构与时间线渲染入口"),
+            _omp_subagent(2, 18 * m, 96 * m, name="梳理 OMP 交互与子代理区间边界"),
+            _omp_subagent(3, 55 * m, 115 * m, name="推导分段线性比例尺与刻度约束"),
+            _omp_subagent(4, 5 * h + 10 * m, 6 * h + 35 * m, name="实现断轴折叠映射与模板样式"),
+            _omp_subagent(5, 6 * h + 5 * m, 7 * h + 45 * m, status="failed", name="验证深浅主题与刻度防重叠"),
+            _omp_subagent(6, 15 * h + 12 * m, 17 * h + 5 * m, name="补充服务端回归测试与视觉验收"),
+            _omp_subagent(7, 16 * h + 30 * m, 18 * h + 2 * m, name="整理变更说明与交付证据"),
+        ],
+        waits=[
+            _omp_wait(1, "ask", 1 * h + 30 * m, 4 * h + 55 * m),
+            _omp_wait(2, "approval", 5 * h + 25 * m, 5 * h + 55 * m),
+            _omp_wait(3, "ask", 8 * h, 15 * h),
+        ],
+    )
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_omp_folded_timeline_browser_geometry_and_themes(
+    tmp_path: Path, theme: str
+):
+    event = _folded_omp_browser_scenario()
+    rendered = render_subagent_timeline(event, theme=theme)
+    unfolded_view = _build_subagent_timeline_view(event, allow_fold=False)
+    folded_view = _build_subagent_timeline_view(event, allow_fold=True)
+    assert rendered is not None and folded_view is not None and unfolded_view is not None
+    assert folded_view["axis_folded"] is True
+    assert folded_view["linear_px_per_ms"] > unfolded_view["linear_px_per_ms"] * 1.95
+
+    geometry, screenshot_path, _ = capture_timeline_browser_geometry(
+        rendered.html,
+        viewport_width=rendered.layout.viewport_width,
+        viewport_height=rendered.layout.viewport_height,
+        output_dir=tmp_path,
+        name=f"omp-folded-{theme}",
+    )
+    document = geometry["document"]
+    assert document["scrollWidth"] == rendered.layout.viewport_width
+    assert document["scrollHeight"] <= rendered.layout.viewport_height
+
+    banner = geometry["foldBanner"]
+    assert banner is not None
+    assert "已折叠 2 段交互等待，共 10 小时" in banner["text"]
+    assert banner["scrollWidth"] <= banner["clientWidth"]
+
+    axis_folds = geometry["axisFolds"]
+    assert len(axis_folds) == 2
+    assert "3小时" in axis_folds[0]["text"] and "折叠" in axis_folds[0]["text"]
+    assert "7小时" in axis_folds[1]["text"] and "折叠" in axis_folds[1]["text"]
+    for fold in axis_folds:
+        assert fold["scrollWidth"] <= fold["clientWidth"] + 1
+        assert fold["scrollHeight"] <= fold["clientHeight"] + 1
+
+    ticks = geometry["ticks"]
+    assert len(ticks) >= 4
+    for tick in ticks:
+        t_rect = tick["rect"]
+        for fold in axis_folds:
+            f_rect = fold["rect"]
+            assert t_rect["right"] <= f_rect["left"] + 0.5 or t_rect["left"] >= f_rect["right"] - 0.5
+    for left_tick, right_tick in zip(ticks, ticks[1:]):
+        assert right_tick["rect"]["left"] >= left_tick["rect"]["right"] + 4.0
+
+    with Image.open(screenshot_path) as screenshot:
+        assert screenshot.width >= document["scrollWidth"]
+        assert screenshot.height >= document["scrollHeight"]
+        pixels = screenshot.convert("RGB")
+        bg = _rgb_pixel(pixels, (2, 2))
+        if theme == "dark":
+            assert max(bg) <= 36
+        else:
+            assert min(bg) >= 230
+
+
+def test_omp_short_wait_smoke_timeline_stays_unfolded(tmp_path: Path):
+    items = []
+    for index, (begin, finish) in enumerate(((2000, 14_000), (6000, 20_000))):
+        ref = f"{index + 100:032x}"
+        items.append(
+            {
+                "ref": ref,
+                "cycleRef": ref,
+                "parentRef": "3" * 32,
+                "depth": 1,
+                "attempt": 1,
+                "status": "completed",
+                "name": f"冒烟子代理 {index + 1}",
+                "timingQuality": "observed",
+                "startOffsetMs": begin,
+                "endOffsetMs": finish,
+                "durationMs": finish - begin,
+            }
+        )
+    event = _omp_run_event(
+        duration_ms=30_000,
+        session_name="[视觉基准] 多代理时间线",
+        items=items,
+        waits=[_omp_wait(1, "ask", 21_000, 25_000)],
+    )
+    for theme in ("light", "dark"):
+        folded_enabled = render_subagent_timeline(event, theme=theme)
+        unfolded_view = _build_subagent_timeline_view(event, allow_fold=False)
+        folded_view = _build_subagent_timeline_view(event, allow_fold=True)
+        assert folded_enabled is not None and folded_view == unfolded_view
+        assert folded_view["axis_folded"] is False
+        assert 'class="fold-banner"' not in folded_enabled.html
+        assert 'class="axis-fold"' not in folded_enabled.html
+        assert 'class="track-fold"' not in folded_enabled.html
+        geometry, _, _ = capture_timeline_browser_geometry(
+            folded_enabled.html,
+            viewport_width=folded_enabled.layout.viewport_width,
+            viewport_height=folded_enabled.layout.viewport_height,
+            output_dir=tmp_path,
+            name=f"omp-unfolded-{theme}",
+        )
+        assert geometry["foldBanner"] is None
+        assert geometry["axisFolds"] == []

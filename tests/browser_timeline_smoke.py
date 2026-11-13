@@ -149,6 +149,9 @@ async def _capture_with_cdp(
               const timeline = document.querySelector('.timeline');
               const axis = document.querySelector('.axis');
               const axisTrack = document.querySelector('.axis-track');
+              const foldBanner = document.querySelector('.fold-banner');
+              const axisFolds = [...document.querySelectorAll('.axis-fold')];
+              const ticks = [...document.querySelectorAll('.axis-track .tick')];
               const waitRow = document.querySelector('.wait-row');
               const waitTask = waitRow ? waitRow.querySelector('.wait-task') : null;
               const waitTrack = waitRow ? waitRow.querySelector('.wait-track') : null;
@@ -190,6 +193,28 @@ async def _capture_with_cdp(
                   axis: visualStyle(axis),
                   axisTrack: visualStyle(axisTrack)
                 },
+                foldBanner: foldBanner ? {
+                  rect: rect(foldBanner),
+                  text: foldBanner.textContent,
+                  scrollWidth: foldBanner.scrollWidth,
+                  clientWidth: foldBanner.clientWidth,
+                  style: visualStyle(foldBanner)
+                } : null,
+                axisFolds: axisFolds.map((fold) => ({
+                  rect: rect(fold),
+                  text: fold.textContent,
+                  title: fold.title,
+                  scrollWidth: fold.scrollWidth,
+                  clientWidth: fold.clientWidth,
+                  scrollHeight: fold.scrollHeight,
+                  clientHeight: fold.clientHeight,
+                  style: visualStyle(fold)
+                })),
+                ticks: ticks.map((tick) => ({
+                  rect: rect(tick),
+                  text: tick.textContent,
+                  className: tick.className
+                })),
                 wait: waitRow ? {
                   row: rect(waitRow), task: rect(waitTask), plot: rect(waitTrack),
                   state: rect(waitState),

@@ -58,6 +58,11 @@ SUBAGENT_TIMELINE_MIN_BAR_WIDTH = 8
 SUBAGENT_TIMELINE_SOFT_HEIGHT = 3000
 SUBAGENT_TIMELINE_MAX_TIMEOUT_MS = 15000
 SUBAGENT_TIMELINE_SESSION_CONTEXT_HEIGHT = 74
+SUBAGENT_TIMELINE_FOLD_WIDTH_PX = 88
+SUBAGENT_TIMELINE_FOLD_MIN_DURATION_MS = 180_000
+SUBAGENT_TIMELINE_FOLD_MIN_RATIO = 0.12
+SUBAGENT_TIMELINE_FOLD_BANNER_HEIGHT = 48
+_OMP_FOLDABLE_WAIT_KINDS = ("ask", "approval", "plan_review")
 CSP_META = (
     '<meta http-equiv="Content-Security-Policy" '
     "content=\"default-src 'none'; base-uri 'none'; form-action 'none'; "
@@ -1405,6 +1410,20 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       --legend-partial-border: #7e8fa3;
       --legend-censored: #f1d9ca;
       --legend-censored-border: #a47457;
+      --fold-banner-border: rgba(100,116,139,.24);
+      --fold-banner-bg: linear-gradient(90deg, rgba(236,242,248,.92), rgba(251,243,235,.82));
+      --fold-banner-text: #33465d;
+      --fold-banner-detail: #607086;
+      --fold-axis-bg: repeating-linear-gradient(135deg, rgba(174,107,50,.13) 0, rgba(174,107,50,.13) 5px, rgba(255,251,247,.84) 5px, rgba(255,251,247,.84) 10px);
+      --fold-axis-border: rgba(174,107,50,.56);
+      --fold-axis-tag: #8a5224;
+      --fold-axis-time: #4c2f19;
+      --fold-track-bg: repeating-linear-gradient(135deg, rgba(100,116,139,.085) 0, rgba(100,116,139,.085) 5px, rgba(255,255,255,.26) 5px, rgba(255,255,255,.26) 10px);
+      --fold-wait-track-bg: repeating-linear-gradient(135deg, rgba(174,107,50,.11) 0, rgba(174,107,50,.11) 5px, rgba(255,250,246,.32) 5px, rgba(255,250,246,.32) 10px);
+      --fold-track-border: rgba(132,148,168,.52);
+      --fold-notch-bg: #fffaf5;
+      --fold-notch-border: rgba(142,84,37,.58);
+      --fold-notch-text: #7a461d;
     }
     :root[data-theme="dark"] {
       --timeline-page: #18191c;
@@ -1475,6 +1494,20 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       --unlocated-border: #4a5563;
       --legend-partial: #4a5563;
       --legend-censored: #4a362a;
+      --fold-banner-border: rgba(217,149,87,.28);
+      --fold-banner-bg: linear-gradient(90deg, rgba(56,69,84,.34), rgba(217,149,87,.14));
+      --fold-banner-text: #e6d5c3;
+      --fold-banner-detail: #aeb7c2;
+      --fold-axis-bg: repeating-linear-gradient(135deg, rgba(217,149,87,.20) 0, rgba(217,149,87,.20) 5px, rgba(31,34,39,.86) 5px, rgba(31,34,39,.86) 10px);
+      --fold-axis-border: rgba(217,149,87,.64);
+      --fold-axis-tag: #ebb684;
+      --fold-axis-time: #f7dfc7;
+      --fold-track-bg: repeating-linear-gradient(135deg, rgba(148,163,184,.10) 0, rgba(148,163,184,.10) 5px, rgba(24,26,30,.24) 5px, rgba(24,26,30,.24) 10px);
+      --fold-wait-track-bg: repeating-linear-gradient(135deg, rgba(217,149,87,.14) 0, rgba(217,149,87,.14) 5px, rgba(33,28,25,.28) 5px, rgba(33,28,25,.28) 10px);
+      --fold-track-border: rgba(148,163,184,.38);
+      --fold-notch-bg: #26211e;
+      --fold-notch-border: rgba(235,182,132,.68);
+      --fold-notch-text: #f3caa2;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -1631,6 +1664,21 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     }
     .wait-overview-main { min-width: 0; font-size: 14px; font-weight: 780; line-height: 1.4; overflow-wrap: anywhere; }
     .wait-overview-detail { min-width: 0; color: var(--wait-overview-detail); font-size: 12px; line-height: 1.4; text-align: right; overflow-wrap: anywhere; }
+    .fold-banner {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      margin-top: 8px;
+      padding: 8px 12px;
+      border: 1px dashed var(--fold-banner-border);
+      border-radius: 11px;
+      color: var(--fold-banner-text);
+      background: var(--fold-banner-bg);
+    }
+    .fold-banner-main { min-width: 0; font-size: 13px; font-weight: 780; line-height: 1.4; overflow-wrap: anywhere; }
+    .fold-banner-mark { display: inline-block; margin-right: 6px; padding: 1px 6px; border: 1px solid var(--fold-axis-border); border-radius: 999px; color: var(--fold-axis-tag); font-size: 11px; font-weight: 800; letter-spacing: .04em; vertical-align: 1px; }
+    .fold-banner-detail { min-width: 0; color: var(--fold-banner-detail); font-size: 12px; line-height: 1.4; text-align: right; overflow-wrap: anywhere; }
     .flags { margin-top: 10px; }
     .flag { margin: 0 6px 4px 0; padding: 3px 8px; color: var(--gray); font-size: 12px; font-weight: 700; }
     .section-label { margin: 20px 0 8px; color: var(--faint); font-size: 13px; font-weight: 750; letter-spacing: .12em; }
@@ -1671,6 +1719,52 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
       bottom: 0;
       width: 1px;
       background: var(--gridline);
+    }
+    .axis-fold {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 2px;
+      padding: 2px 3px;
+      border-left: 1.5px dashed var(--fold-axis-border);
+      border-right: 1.5px dashed var(--fold-axis-border);
+      background: var(--fold-axis-bg);
+      text-align: center;
+      white-space: nowrap;
+    }
+    .axis-fold-head { color: var(--fold-axis-tag); font-size: 10px; font-weight: 800; line-height: 1.1; letter-spacing: .02em; }
+    .axis-fold-slash { margin: 0 2px; opacity: .88; font-weight: 850; }
+    .axis-fold-time { color: var(--fold-axis-time); font-size: 11px; font-weight: 800; line-height: 1.15; font-variant-numeric: tabular-nums; }
+    .track-fold {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      z-index: 0;
+      border-left: 1px dashed var(--fold-track-border);
+      border-right: 1px dashed var(--fold-track-border);
+      background: var(--fold-track-bg);
+    }
+    .wait-track .track-fold { background: var(--fold-wait-track-bg); border-color: var(--fold-axis-border); }
+    .wait-fold-notch {
+      position: absolute;
+      top: 50%;
+      z-index: 2;
+      padding: 0 4px;
+      transform: translate(-50%, -50%);
+      border: 1px solid var(--fold-notch-border);
+      border-radius: 4px;
+      color: var(--fold-notch-text);
+      background: var(--fold-notch-bg);
+      font-size: 9px;
+      font-weight: 850;
+      line-height: 13px;
+      letter-spacing: -.5px;
+      pointer-events: none;
     }
     .row {
       min-height: var(--row-min-height);
@@ -1779,6 +1873,7 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     .density-dense .task-agent { display: none; }
     .bar {
       position: absolute;
+      z-index: 1;
       top: 50%;
       height: var(--bar-height);
       min-width: 0;
@@ -1853,9 +1948,10 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
     .legend-mark.wait-permission, .legend-mark.wait-approval, .legend-mark.wait-plan_review { background: var(--wait-permission); border: 1px solid var(--wait-permission-border); }
     .legend-mark.wait-background_wait { background: var(--timeline-unknown); border: 1px solid var(--timeline-unknown); }
     .legend-mark.wait-censored { background: var(--legend-censored); border: 1px dashed var(--legend-censored-border); }
+    .legend-mark.fold-break { background: var(--fold-axis-bg); border: 1px dashed var(--fold-axis-border); }
     @media (max-width: 1500px) {
-      .wait-overview { grid-template-columns: 1fr; }
-      .wait-overview-detail { text-align: left; }
+      .wait-overview, .fold-banner { grid-template-columns: 1fr; }
+      .wait-overview-detail, .fold-banner-detail { text-align: left; }
     }
   </style>
 </head>
@@ -1873,26 +1969,27 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
         {% for metric in event.metrics %}<div class="metric"><span class="metric-value">{{ metric.value|e }}</span><span class="metric-label">{{ metric.label|e }}</span></div>{% endfor %}
       </div>
       <div class="wait-overview"><div class="wait-overview-main">{{ event.wait_summary_text|e }}</div><div class="wait-overview-detail">{{ event.wait_summary_detail|e }}</div></div>
+      {% if event.axis_folded %}<div class="fold-banner"><div class="fold-banner-main"><span class="fold-banner-mark" aria-hidden="true">//</span>{{ event.fold_summary_text|e }}</div><div class="fold-banner-detail">{{ event.fold_summary_detail|e }}</div></div>{% endif %}
       {% if event.flags %}<div class="flags">{% for flag in event.flags %}<span class="flag">{{ flag|e }}</span>{% endfor %}</div>{% endif %}
 
       <div class="section-label">{{ event.interval_label|e }}</div>
       <section class="timeline">
         <div class="axis">
           <div class="axis-name">{{ event.axis_name|e }}</div>
-          <div class="axis-track">{% for tick in event.axis_ticks %}<span class="tick {{ tick.edge_class }}" style="left: {{ tick.left_px }}px;">{{ tick.label|e }}</span>{% endfor %}</div>
+          <div class="axis-track">{% for fold in event.fold_segments %}<div class="axis-fold" title="{{ fold.break_label|e }}" style="left: {{ fold.left_px }}px; width: {{ fold.width_px }}px;"><span class="axis-fold-head"><span class="axis-fold-slash" aria-hidden="true">//</span>折叠<span class="axis-fold-slash" aria-hidden="true">//</span></span><span class="axis-fold-time">{{ fold.duration_label|e }}</span></div>{% endfor %}{% for tick in event.axis_ticks %}<span class="tick {{ tick.edge_class }}" style="left: {{ tick.left_px }}px;">{{ tick.label|e }}</span>{% endfor %}</div>
           <div class="axis-state">状态 / 耗时</div>
         </div>
         {% for track in event.wait_tracks %}
         <div class="row wait-row" style="min-height: {{ event.wait_row_height }}px;">
           <div class="task wait-task"><div class="wait-task-name">{{ track.label|e }}</div><div class="wait-kind-list">{% for kind in track.kinds %}<span class="wait-kind {{ kind.key }}">{{ kind.label|e }}</span>{% endfor %}</div></div>
-          <div class="track wait-track">{% for line in event.grid_lines %}<span class="gridline" style="left: {{ line.left_px }}px;"></span>{% endfor %}{% for wait in track.intervals %}<span class="wait-bar {{ wait.kind }} {{ wait.state_class }}" title="{{ wait.title|e }}" data-counted-duration="{{ 'true' if wait.counted_duration else 'false' }}" style="left: {{ wait.left_px }}px; width: {{ wait.width_px }}px;"></span>{% endfor %}</div>
+          <div class="track wait-track">{% for fold in event.fold_segments %}<span class="track-fold" style="left: {{ fold.left_px }}px; width: {{ fold.width_px }}px;" aria-hidden="true"></span>{% endfor %}{% for line in event.grid_lines %}<span class="gridline" style="left: {{ line.left_px }}px;"></span>{% endfor %}{% for wait in track.intervals %}<span class="wait-bar {{ wait.kind }} {{ wait.state_class }}{% if wait.spans_fold %} spans-fold{% endif %}" title="{{ wait.title|e }}" data-counted-duration="{{ 'true' if wait.counted_duration else 'false' }}" style="left: {{ wait.left_px }}px; width: {{ wait.width_px }}px;"></span>{% endfor %}{% for notch in track.fold_notches %}<span class="wait-fold-notch" style="left: {{ notch.center_px }}px;" aria-hidden="true">//</span>{% endfor %}</div>
           <div class="state wait-state"><span class="state-label{% if event.wait_partial or event.wait_truncated %} running{% endif %}">{{ track.state_label|e }}</span><span class="state-time">{{ track.state_time|e }}</span></div>
         </div>
         {% endfor %}
         {% for item in event.gantt_items %}
         <div class="row timeline-row" style="min-height: {{ item.estimated_row_height }}px;">
           <div class="task depth-{{ item.depth_class }}"><div class="task-name">{{ item.name|e }}</div>{% if item.identity %}<div class="task-agent">{{ item.identity|e }}</div>{% endif %}</div>
-          <div class="track">{% for line in event.grid_lines %}<span class="gridline" style="left: {{ line.left_px }}px;"></span>{% endfor %}<span class="bar {{ item.status_class }}{% if item.partial_interval %} partial{% endif %}{% if item.minimum_width_applied %} minimum-width{% endif %}" style="left: {{ item.left_px }}px; width: {{ item.width_px }}px;"></span></div>
+          <div class="track">{% for fold in event.fold_segments %}<span class="track-fold" style="left: {{ fold.left_px }}px; width: {{ fold.width_px }}px;" aria-hidden="true"></span>{% endfor %}{% for line in event.grid_lines %}<span class="gridline" style="left: {{ line.left_px }}px;"></span>{% endfor %}<span class="bar {{ item.status_class }}{% if item.partial_interval %} partial{% endif %}{% if item.minimum_width_applied %} minimum-width{% endif %}" style="left: {{ item.left_px }}px; width: {{ item.width_px }}px;"></span></div>
           <div class="state"><span class="state-label {{ item.status_class }}">{{ item.status_symbol|e }} {{ item.status_label|e }}</span><span class="state-time">{{ item.timing_label|e }}</span></div>
         </div>
         {% endfor %}
@@ -1912,6 +2009,7 @@ SUBAGENT_TIMELINE_HTML_TEMPLATE = """\
         <span class="legend-item"><span class="legend-mark partial"></span>区间不完整</span>
         {% for kind in event.wait_kinds %}<span class="legend-item"><span class="legend-mark wait-{{ kind.key }}"></span>{{ kind.legend|e }}</span>{% endfor %}
         <span class="legend-item"><span class="legend-mark wait-censored"></span>边界可见但不计时</span>
+        {% if event.axis_folded %}<span class="legend-item"><span class="legend-mark fold-break"></span>断轴折叠（无子代理交互等待）</span>{% endif %}
       </div>
     </div>
   </main>
@@ -2294,6 +2392,7 @@ def _build_subagent_timeline_layout(
     max_depth: int,
     extra_located_rows_height: int = 0,
     include_session_context: bool = False,
+    include_fold_banner: bool = False,
 ) -> SubagentTimelineLayout:
     item_count = len(item_views)
     density = _timeline_density(item_count)
@@ -2393,9 +2492,12 @@ def _build_subagent_timeline_layout(
             unlocated_height += estimated_row_height
 
     located_height += max(0, extra_located_rows_height)
-    vertical_chrome_height = 760 + int(density_view["axis_height"])
+    axis_height = int(density_view["axis_height"]) + (8 if include_fold_banner else 0)
+    vertical_chrome_height = 760 + axis_height
     if include_session_context:
         vertical_chrome_height += SUBAGENT_TIMELINE_SESSION_CONTEXT_HEIGHT
+    if include_fold_banner:
+        vertical_chrome_height += SUBAGENT_TIMELINE_FOLD_BANNER_HEIGHT
     estimated_height = vertical_chrome_height + located_height
     if unlocated_height:
         estimated_height += 60 + unlocated_height
@@ -2427,7 +2529,7 @@ def _build_subagent_timeline_layout(
         task_line_height=line_height,
         task_padding_y=padding_y,
         bar_height=int(density_view["bar_height"]),
-        axis_height=int(density_view["axis_height"]),
+        axis_height=axis_height,
         tick_target_count=tick_target_count,
         located_rows_height=located_height,
         unlocated_rows_height=unlocated_height,
@@ -2441,7 +2543,365 @@ def _build_subagent_timeline_layout(
 
 
 _TIMELINE_NICE_STEP_FACTORS = (1.0, 2.0, 2.5, 5.0)
+_TIMELINE_FOLDED_STEP_FACTORS = (1.0, 1.5, 2.0, 2.5, 3.0, 5.0)
+_TIMELINE_HUMAN_CLOCK_STEPS_MS = (
+    1000.0,
+    2000.0,
+    5000.0,
+    10_000.0,
+    15_000.0,
+    30_000.0,
+    60_000.0,
+    120_000.0,
+    300_000.0,
+    600_000.0,
+    900_000.0,
+    1_800_000.0,
+    3_600_000.0,
+    5_400_000.0,
+    7_200_000.0,
+    10_800_000.0,
+    14_400_000.0,
+    21_600_000.0,
+)
 _TIMELINE_TICK_SAFETY_GAP_PX = 12.0
+_TIMELINE_FOLD_TICK_GAP_PX = 8.0
+
+
+@dataclass(frozen=True)
+class _TimelineAxisSegment:
+    kind: str
+    start_ms: float
+    end_ms: float
+    px_start: float
+    px_end: float
+
+    @property
+    def duration_ms(self) -> float:
+        return self.end_ms - self.start_ms
+
+    @property
+    def width_px(self) -> float:
+        return self.px_end - self.px_start
+
+
+@dataclass(frozen=True)
+class _TimelinePiecewiseAxis:
+    timeline_end_ms: float
+    plot_width: int
+    linear_px_per_ms: float
+    segments: tuple[_TimelineAxisSegment, ...]
+    folds: tuple[_TimelineAxisSegment, ...]
+
+    @property
+    def folded(self) -> bool:
+        return bool(self.folds)
+
+    @property
+    def folded_duration_ms(self) -> float:
+        return sum(segment.duration_ms for segment in self.folds)
+
+    @property
+    def linear_duration_ms(self) -> float:
+        return max(0.0, self.timeline_end_ms - self.folded_duration_ms)
+
+    @property
+    def linear_width_px(self) -> float:
+        return sum(
+            segment.width_px for segment in self.segments if segment.kind == "linear"
+        )
+
+    def contains_in_fold(self, value_ms: float) -> bool:
+        return any(
+            fold.start_ms <= value_ms <= fold.end_ms for fold in self.folds
+        )
+
+    def linear_segment_for_span(
+        self, start_ms: float, end_ms: float
+    ) -> _TimelineAxisSegment | None:
+        for segment in self.segments:
+            if (
+                segment.kind == "linear"
+                and start_ms >= segment.start_ms - 1e-9
+                and end_ms <= segment.end_ms + 1e-9
+            ):
+                return segment
+        return None
+
+    def map_ms(self, value_ms: float) -> float:
+        if self.timeline_end_ms <= 0:
+            return 0.0
+        if not self.folded:
+            return min(
+                float(self.plot_width),
+                max(0.0, value_ms * self.linear_px_per_ms),
+            )
+        clamped = min(self.timeline_end_ms, max(0.0, value_ms))
+        for index, segment in enumerate(self.segments):
+            if clamped <= segment.end_ms or index == len(self.segments) - 1:
+                if segment.duration_ms <= 0:
+                    return segment.px_start
+                if segment.kind == "linear":
+                    return min(
+                        segment.px_end,
+                        segment.px_start
+                        + (clamped - segment.start_ms) * self.linear_px_per_ms,
+                    )
+                return (
+                    segment.px_start
+                    + (clamped - segment.start_ms)
+                    / segment.duration_ms
+                    * segment.width_px
+                )
+        return float(self.plot_width)
+
+
+def _merge_sorted_spans(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    cleaned = sorted((start, end) for start, end in spans if end > start)
+    if not cleaned:
+        return []
+    merged: list[tuple[float, float]] = [cleaned[0]]
+    for start, end in cleaned[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _subtract_spans(
+    base_spans: list[tuple[float, float]],
+    cut_spans: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    if not base_spans or not cut_spans:
+        return list(base_spans)
+    remaining: list[tuple[float, float]] = []
+    cut_index = 0
+    cut_count = len(cut_spans)
+    for base_start, base_end in base_spans:
+        while cut_index < cut_count and cut_spans[cut_index][1] <= base_start:
+            cut_index += 1
+        cursor = base_start
+        probe = cut_index
+        while probe < cut_count and cut_spans[probe][0] < base_end:
+            cut_start, cut_end = cut_spans[probe]
+            if cut_start > cursor:
+                remaining.append((cursor, min(base_end, cut_start)))
+            cursor = max(cursor, cut_end)
+            if cursor >= base_end:
+                break
+            probe += 1
+        if cursor < base_end:
+            remaining.append((cursor, base_end))
+    return remaining
+
+
+def _compute_omp_fold_intervals(
+    *,
+    omp: bool,
+    timeline_available: bool,
+    indexed_items: list[tuple[int, dict[str, Any]]],
+    wait_intervals: list[dict[str, Any]],
+    timeline_end_ms: float,
+) -> list[tuple[float, float]]:
+    if not omp or not timeline_available or timeline_end_ms <= 0:
+        return []
+
+    eligible_raw: list[tuple[float, float]] = []
+    blocking_raw: list[tuple[float, float]] = []
+
+    for interval in wait_intervals:
+        kind = interval.get("kind")
+        if kind in _OMP_FOLDABLE_WAIT_KINDS:
+            complete = _user_wait_complete_interval(interval)
+            if complete is None:
+                continue
+            clipped_start, clipped_end = _timeline_clip_span(
+                complete[0], complete[1], axis_end_ms=timeline_end_ms
+            )
+            if clipped_end > clipped_start:
+                eligible_raw.append((clipped_start, clipped_end))
+        elif kind == "background_wait":
+            complete = _user_wait_complete_interval(interval)
+            state = interval.get("intervalState")
+            if complete is not None:
+                b_start, b_end = _timeline_clip_span(
+                    complete[0], complete[1], axis_end_ms=timeline_end_ms
+                )
+            elif state == "right_censored":
+                boundary = _user_wait_boundary(interval)
+                b_start, b_end = _timeline_clip_span(
+                    boundary if boundary is not None else 0.0,
+                    timeline_end_ms,
+                    axis_end_ms=timeline_end_ms,
+                )
+            elif state == "left_censored":
+                boundary = _user_wait_boundary(interval)
+                b_start, b_end = _timeline_clip_span(
+                    0.0,
+                    boundary if boundary is not None else 0.0,
+                    axis_end_ms=timeline_end_ms,
+                )
+            else:
+                b_start, b_end = 0.0, timeline_end_ms
+            if b_end == b_start:
+                b_start = max(0.0, b_start - 0.5)
+                b_end = min(timeline_end_ms, b_end + 0.5)
+            if b_end > b_start:
+                blocking_raw.append((b_start, b_end))
+
+    eligible_waits = _merge_sorted_spans(eligible_raw)
+    if not eligible_waits:
+        return []
+
+    for _, item in indexed_items:
+        raw_start = item.get("startOffsetMs")
+        raw_end = item.get("endOffsetMs")
+        valid_start = (
+            float(raw_start) if _is_finite_timeline_number(raw_start) else None
+        )
+        valid_end = float(raw_end) if _is_finite_timeline_number(raw_end) else None
+        if valid_start is not None and valid_end is not None:
+            if valid_end < valid_start:
+                b_start, b_end = 0.0, timeline_end_ms
+            else:
+                b_start, b_end = _timeline_clip_span(
+                    valid_start, valid_end, axis_end_ms=timeline_end_ms
+                )
+        elif valid_start is not None:
+            b_start, b_end = _timeline_clip_span(
+                valid_start, timeline_end_ms, axis_end_ms=timeline_end_ms
+            )
+        elif valid_end is not None:
+            b_start, b_end = _timeline_clip_span(
+                0.0, valid_end, axis_end_ms=timeline_end_ms
+            )
+        else:
+            b_start, b_end = 0.0, timeline_end_ms
+        if b_end == b_start:
+            b_start = max(0.0, b_start - 0.5)
+            b_end = min(timeline_end_ms, b_end + 0.5)
+        if b_end > b_start:
+            blocking_raw.append((b_start, b_end))
+
+    merged_blocks = _merge_sorted_spans(blocking_raw)
+    candidates = _subtract_spans(eligible_waits, merged_blocks)
+    selected = [
+        (start, end)
+        for start, end in candidates
+        if (end - start) >= SUBAGENT_TIMELINE_FOLD_MIN_DURATION_MS
+        and ((end - start) / timeline_end_ms) + 1e-12 >= SUBAGENT_TIMELINE_FOLD_MIN_RATIO
+    ]
+    if not selected:
+        return []
+    folded_ms = sum(end - start for start, end in selected)
+    if timeline_end_ms - folded_ms <= 0:
+        return []
+    return selected
+
+
+def _build_piecewise_timeline_axis(
+    *,
+    timeline_end_ms: float,
+    plot_scale_end_ms: float,
+    plot_width: int,
+    fold_intervals: list[tuple[float, float]],
+) -> _TimelinePiecewiseAxis:
+    default_scale = plot_width / plot_scale_end_ms
+    if not fold_intervals or timeline_end_ms <= 0:
+        single = _TimelineAxisSegment(
+            kind="linear",
+            start_ms=0.0,
+            end_ms=max(0.0, timeline_end_ms),
+            px_start=0.0,
+            px_end=float(plot_width),
+        )
+        return _TimelinePiecewiseAxis(
+            timeline_end_ms=timeline_end_ms,
+            plot_width=plot_width,
+            linear_px_per_ms=default_scale,
+            segments=(single,),
+            folds=(),
+        )
+
+    fold_width_px = float(SUBAGENT_TIMELINE_FOLD_WIDTH_PX)
+    total_fold_px = len(fold_intervals) * fold_width_px
+    linear_width_px = float(plot_width) - total_fold_px
+    folded_ms = sum(end - start for start, end in fold_intervals)
+    linear_ms = timeline_end_ms - folded_ms
+    if (
+        linear_width_px < 120.0
+        or linear_ms <= 0
+        or linear_width_px / linear_ms <= default_scale
+    ):
+        return _build_piecewise_timeline_axis(
+            timeline_end_ms=timeline_end_ms,
+            plot_scale_end_ms=plot_scale_end_ms,
+            plot_width=plot_width,
+            fold_intervals=[],
+        )
+
+    linear_px_per_ms = linear_width_px / linear_ms
+    segments: list[_TimelineAxisSegment] = []
+    folds: list[_TimelineAxisSegment] = []
+    cursor_ms = 0.0
+    cursor_px = 0.0
+    for fold_start, fold_end in fold_intervals:
+        if fold_start > cursor_ms:
+            seg_width = (fold_start - cursor_ms) * linear_px_per_ms
+            segments.append(
+                _TimelineAxisSegment(
+                    kind="linear",
+                    start_ms=cursor_ms,
+                    end_ms=fold_start,
+                    px_start=cursor_px,
+                    px_end=cursor_px + seg_width,
+                )
+            )
+            cursor_px += seg_width
+        fold_seg = _TimelineAxisSegment(
+            kind="folded",
+            start_ms=fold_start,
+            end_ms=fold_end,
+            px_start=cursor_px,
+            px_end=cursor_px + fold_width_px,
+        )
+        segments.append(fold_seg)
+        folds.append(fold_seg)
+        cursor_px += fold_width_px
+        cursor_ms = fold_end
+
+    if cursor_ms < timeline_end_ms:
+        segments.append(
+            _TimelineAxisSegment(
+                kind="linear",
+                start_ms=cursor_ms,
+                end_ms=timeline_end_ms,
+                px_start=cursor_px,
+                px_end=float(plot_width),
+            )
+        )
+    elif segments:
+        last = segments[-1]
+        resolved_last = _TimelineAxisSegment(
+            kind=last.kind,
+            start_ms=last.start_ms,
+            end_ms=last.end_ms,
+            px_start=last.px_start,
+            px_end=float(plot_width),
+        )
+        segments[-1] = resolved_last
+        if folds and folds[-1] == last:
+            folds[-1] = resolved_last
+
+    return _TimelinePiecewiseAxis(
+        timeline_end_ms=timeline_end_ms,
+        plot_width=plot_width,
+        linear_px_per_ms=linear_px_per_ms,
+        segments=tuple(segments),
+        folds=tuple(folds),
+    )
 
 
 def _timeline_decimal_places(value: float, *, maximum: int = 6) -> int:
@@ -2486,6 +2946,292 @@ def _format_timeline_tick(value_ms: float, step_ms: float) -> str:
         return f"+{text}秒"
     return f"+{_format_timeline_scale(value)}"
 
+
+
+def _format_folded_timeline_tick(value_ms: float, step_ms: float) -> str:
+    value = max(0.0, value_ms)
+    if value < 60_000:
+        return _format_timeline_tick(value, step_ms)
+    total_seconds_float = value / 1000.0
+    has_fractional_second = step_ms < 1000 or not math.isclose(
+        total_seconds_float,
+        round(total_seconds_float),
+        rel_tol=0,
+        abs_tol=1e-6,
+    )
+    if has_fractional_second:
+        whole_minutes = int(value // 60_000)
+        rem_seconds = (value - whole_minutes * 60_000) / 1000.0
+        days, rem_day_minutes = divmod(whole_minutes, 24 * 60)
+        hours, minutes = divmod(rem_day_minutes, 60)
+        parts: list[str] = []
+        if days:
+            parts.append(f"{days}天")
+        if hours:
+            parts.append(f"{hours}小时")
+        if minutes or not parts:
+            parts.append(f"{minutes}分")
+        if rem_seconds > 1e-9:
+            decimals = max(
+                _timeline_decimal_places(step_ms / 1000.0),
+                _timeline_decimal_places(rem_seconds),
+            )
+            parts.append(f"{_format_timeline_decimal(rem_seconds, decimals)}秒")
+        return "+" + "".join(parts)
+
+    total_seconds = int(round(total_seconds_float))
+    total_minutes, remaining_seconds = divmod(total_seconds, 60)
+    if total_minutes < 60:
+        return (
+            f"+{total_minutes}分{remaining_seconds}秒"
+            if remaining_seconds
+            else f"+{total_minutes}分"
+        )
+    days, rem_day_minutes = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(rem_day_minutes, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours:
+        parts.append(f"{hours}小时")
+    if minutes or (remaining_seconds and (days or hours)):
+        parts.append(f"{minutes}分")
+    if remaining_seconds and (step_ms < 60_000 or not days):
+        parts.append(f"{remaining_seconds}秒")
+    return "+" + ("".join(parts) or "0分")
+
+
+def _folded_tick_box(
+    position_px: float, label_width_px: float, plot_width: int
+) -> tuple[str, float, float]:
+    if position_px < label_width_px / 2:
+        return "first", position_px, position_px + label_width_px
+    if position_px > plot_width - label_width_px / 2:
+        return "last", position_px - label_width_px, position_px
+    return "", position_px - label_width_px / 2, position_px + label_width_px / 2
+
+
+def _folded_tick_is_clear(
+    value_ms: float,
+    *,
+    step_ms: float,
+    axis: _TimelinePiecewiseAxis,
+) -> tuple[bool, str, float, float, str, float, float]:
+    if value_ms < -1e-9 or value_ms > axis.timeline_end_ms + 1e-9:
+        return False, "", 0.0, 0.0, "", 0.0, 0.0
+    clamped = min(axis.timeline_end_ms, max(0.0, value_ms))
+    if axis.contains_in_fold(clamped):
+        return False, "", 0.0, 0.0, "", 0.0, 0.0
+    label = _format_folded_timeline_tick(clamped, step_ms)
+    width = _timeline_tick_label_width(label)
+    pos = axis.map_ms(clamped)
+    edge_class, box_left, box_right = _folded_tick_box(pos, width, axis.plot_width)
+    if box_left < -1e-6 or box_right > axis.plot_width + 1e-6:
+        return False, label, pos, width, edge_class, box_left, box_right
+    for fold in axis.folds:
+        if not (
+            box_right + _TIMELINE_FOLD_TICK_GAP_PX <= fold.px_start
+            or box_left - _TIMELINE_FOLD_TICK_GAP_PX >= fold.px_end
+        ):
+            return False, label, pos, width, edge_class, box_left, box_right
+    return True, label, pos, width, edge_class, box_left, box_right
+
+
+def _folded_tick_geometry(
+    values: list[float],
+    *,
+    axis: _TimelinePiecewiseAxis,
+    step_ms: float,
+) -> tuple[list[str], list[float], list[str], int, float]:
+    labels: list[str] = []
+    positions: list[float] = []
+    edge_classes: list[str] = []
+    boxes: list[tuple[float, float]] = []
+    overlap_count = 0
+    minimum_slack = math.inf
+    for value in values:
+        ok, label, pos, _, edge_class, box_left, box_right = _folded_tick_is_clear(
+            value, step_ms=step_ms, axis=axis
+        )
+        if not ok:
+            overlap_count += 1
+        labels.append(label)
+        positions.append(pos)
+        edge_classes.append(edge_class)
+        boxes.append((box_left, box_right))
+    for index in range(len(values) - 1):
+        slack = (
+            boxes[index + 1][0] - boxes[index][1] - _TIMELINE_TICK_SAFETY_GAP_PX
+        )
+        minimum_slack = min(minimum_slack, slack)
+        if slack < 0:
+            overlap_count += 1
+    return labels, positions, edge_classes, overlap_count, minimum_slack
+
+
+def _folded_tick_values_for_step(
+    axis: _TimelinePiecewiseAxis, *, step_ms: float
+) -> list[float]:
+    if step_ms <= 0 or axis.linear_duration_ms / step_ms > 36:
+        return []
+    linear_segments = [
+        seg for seg in axis.segments if seg.kind == "linear" and seg.duration_ms > 0
+    ]
+    if not linear_segments:
+        return []
+
+    candidates: list[float] = []
+    for seg in linear_segments:
+        if seg.start_ms == 0.0:
+            candidates.append(0.0)
+        start_idx = int(math.ceil(seg.start_ms / step_ms))
+        end_idx = int(math.floor(seg.end_ms / step_ms))
+        if end_idx - start_idx > 40:
+            return []
+        for idx in range(start_idx, end_idx + 1):
+            val = idx * step_ms
+            if math.isclose(val, axis.timeline_end_ms, rel_tol=1e-12, abs_tol=1e-9):
+                val = axis.timeline_end_ms
+            candidates.append(val)
+
+    deduped: list[float] = []
+    for val in sorted(candidates):
+        if deduped and math.isclose(val, deduped[-1], rel_tol=1e-12, abs_tol=1e-9):
+            continue
+        ok, *_ = _folded_tick_is_clear(val, step_ms=step_ms, axis=axis)
+        if ok:
+            deduped.append(val)
+
+    terminal = axis.timeline_end_ms
+    terminal_ok, *_ = _folded_tick_is_clear(terminal, step_ms=step_ms, axis=axis)
+    if terminal_ok and (
+        not deduped
+        or not math.isclose(deduped[-1], terminal, rel_tol=1e-12, abs_tol=1e-9)
+    ):
+        appended = [*deduped, terminal]
+        a_labels, _, _, a_overlaps, _ = _folded_tick_geometry(
+            appended, axis=axis, step_ms=step_ms
+        )
+        appended_valid = a_overlaps == 0 and len(a_labels) == len(set(a_labels))
+        if not deduped:
+            return [terminal] if appended_valid else []
+        remainder = terminal - deduped[-1]
+        if appended_valid and remainder >= step_ms / 1.75:
+            return appended
+        if len(deduped) > 1 or linear_segments[-1].start_ms <= deduped[-1]:
+            replaced = [*deduped[:-1], terminal]
+            r_labels, _, _, r_overlaps, _ = _folded_tick_geometry(
+                replaced, axis=axis, step_ms=step_ms
+            )
+            if r_overlaps == 0 and len(r_labels) == len(set(r_labels)):
+                return replaced
+        if appended_valid:
+            return appended
+    return deduped
+
+
+def _folded_nice_tick_values(
+    axis: _TimelinePiecewiseAxis, layout: SubagentTimelineLayout
+) -> tuple[list[float], float]:
+    linear_ms = max(1e-6, axis.linear_duration_ms)
+    target_count = max(
+        3, min(10, int(round(axis.linear_width_px / 175.0)) + 1)
+    )
+    raw_step = linear_ms / max(1, target_count - 1)
+    if raw_step >= 86_400_000:
+        unit_ms = 86_400_000.0
+    elif raw_step >= 3_600_000:
+        unit_ms = 3_600_000.0
+    elif raw_step >= 60_000:
+        unit_ms = 60_000.0
+    elif raw_step >= 1000:
+        unit_ms = 1000.0
+    else:
+        unit_ms = 1.0
+    scaled_raw = raw_step / unit_ms
+    exponent = math.floor(math.log10(scaled_raw)) if scaled_raw > 0 else 0
+
+    step_pool: set[float] = set()
+    for power in range(exponent - 2, exponent + 4):
+        magnitude = 10.0**power * unit_ms
+        for factor in _TIMELINE_FOLDED_STEP_FACTORS:
+            step = factor * magnitude
+            if step > 0:
+                step_pool.add(step)
+    for human_step in _TIMELINE_HUMAN_CLOCK_STEPS_MS:
+        if 0.15 <= linear_ms / human_step <= 36:
+            step_pool.add(human_step)
+
+    wide_linear_segments = [
+        seg
+        for seg in axis.segments
+        if seg.kind == "linear" and seg.width_px >= 190.0
+    ]
+    candidates: list[tuple[tuple[float, ...], list[float], float]] = []
+    for step in sorted(step_pool):
+        values = _folded_tick_values_for_step(axis, step_ms=step)
+        if not values:
+            continue
+        labels, positions, _, overlap_count, minimum_slack = _folded_tick_geometry(
+            values, axis=axis, step_ms=step
+        )
+        duplicate_count = len(labels) - len(set(labels))
+        non_monotonic = sum(
+            right <= left for left, right in zip(positions, positions[1:])
+        )
+        empty_wide = sum(
+            1
+            for seg in wide_linear_segments
+            if not any(seg.start_ms <= v <= seg.end_ms for v in values)
+        )
+        count = len(values)
+        min_desired = min(4, max(2, len(wide_linear_segments) + 1))
+        range_penalty = float(max(0, min_desired - count) + max(0, count - 10))
+        target_penalty = float(abs(count - target_count))
+        step_penalty = abs(math.log10(step / raw_step)) if raw_step > 0 else 0.0
+        candidates.append(
+            (
+                (
+                    float(overlap_count + duplicate_count + non_monotonic),
+                    float(empty_wide),
+                    range_penalty,
+                    max(0.0, -minimum_slack),
+                    target_penalty,
+                    step_penalty,
+                ),
+                values,
+                step,
+            )
+        )
+
+    valid_candidates = [item for item in candidates if item[0][0] == 0.0]
+    if valid_candidates:
+        chosen = min(valid_candidates, key=lambda item: item[0])
+        return chosen[1], chosen[2]
+
+    fallback_step = max(1.0, raw_step)
+    anchor_candidates: list[float] = [0.0, axis.timeline_end_ms]
+    for seg in sorted(
+        (s for s in axis.segments if s.kind == "linear" and s.duration_ms > 0),
+        key=lambda item: item.width_px,
+        reverse=True,
+    ):
+        anchor_candidates.append((seg.start_ms + seg.end_ms) / 2.0)
+    kept: list[float] = []
+    for candidate in anchor_candidates:
+        if any(math.isclose(candidate, prev, rel_tol=1e-12, abs_tol=1e-9) for prev in kept):
+            continue
+        trial = sorted([*kept, candidate])
+        t_labels, t_pos, _, t_overlaps, _ = _folded_tick_geometry(
+            trial, axis=axis, step_ms=fallback_step
+        )
+        if (
+            t_overlaps == 0
+            and len(t_labels) == len(set(t_labels))
+            and all(right > left for left, right in zip(t_pos, t_pos[1:]))
+        ):
+            kept = trial
+    return kept, fallback_step
 
 def _timeline_tick_label_width(label: str) -> float:
     return max(16.0, _timeline_visual_units(label) * 11.5 + 8.0)
@@ -2635,12 +3381,37 @@ def _timeline_nice_tick_values(
 
 
 def _build_timeline_ticks(
-    timeline_end_ms: float, layout: SubagentTimelineLayout
+    timeline_end_ms: float,
+    layout: SubagentTimelineLayout,
+    *,
+    axis: _TimelinePiecewiseAxis | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if axis is not None and axis.folded:
+        values, step_ms = _folded_nice_tick_values(axis, layout)
+        ticks: list[dict[str, Any]] = []
+        grid_lines: list[dict[str, Any]] = []
+        for value in values:
+            ok, label, left_px, width, edge_class, _, _ = _folded_tick_is_clear(
+                value, step_ms=step_ms, axis=axis
+            )
+            if not ok:
+                continue
+            tick = {
+                "value_ms": value,
+                "left_px": f"{left_px:.2f}".rstrip("0").rstrip("."),
+                "edge_class": edge_class,
+                "label": label,
+                "label_width_px": width,
+            }
+            ticks.append(tick)
+            if 0.5 < left_px < layout.plot_width - 0.5:
+                grid_lines.append({"left_px": tick["left_px"]})
+        return ticks, grid_lines
+
     values, step_ms = _timeline_nice_tick_values(timeline_end_ms, layout)
 
-    ticks: list[dict[str, Any]] = []
-    grid_lines: list[dict[str, Any]] = []
+    ticks = []
+    grid_lines = []
     for index, value in enumerate(values):
         left_px = min(
             layout.plot_width, max(0.0, value / timeline_end_ms * layout.plot_width)
@@ -2693,7 +3464,9 @@ def _timeline_session_name(event: NormalizedEvent) -> str:
     return ""
 
 
-def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | None:
+def _build_subagent_timeline_view(
+    event: NormalizedEvent, *, allow_fold: bool = True
+) -> dict[str, Any] | None:
     """Build one root-cycle view from independent subagent and user-wait data."""
 
     if not _timeline_is_root_completion(event):
@@ -3011,14 +3784,48 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     wait_row_height = 70 if mode == "complex" else 0
     observed_kinds = [kind for kind in kind_keys if any(interval.get("kind") == kind for interval in wait_intervals)]
     wait_track_count = max(1, len(observed_kinds)) if omp else 1
+    fold_intervals = (
+        _compute_omp_fold_intervals(
+            omp=omp,
+            timeline_available=isinstance(timeline, dict),
+            indexed_items=indexed_items,
+            wait_intervals=wait_intervals,
+            timeline_end_ms=timeline_end_ms,
+        )
+        if allow_fold and mode == "complex"
+        else []
+    )
     layout = _build_subagent_timeline_layout(
         item_views,
         timeline_end_ms=plot_scale_end_ms,
         max_depth=max_depth,
         extra_located_rows_height=wait_row_height * wait_track_count,
         include_session_context=bool(session_name),
+        include_fold_banner=bool(fold_intervals),
     )
-    px_per_ms = layout.plot_width / plot_scale_end_ms
+    axis = _build_piecewise_timeline_axis(
+        timeline_end_ms=timeline_end_ms,
+        plot_scale_end_ms=plot_scale_end_ms,
+        plot_width=layout.plot_width,
+        fold_intervals=fold_intervals,
+    )
+    if not axis.folded and fold_intervals:
+        layout = _build_subagent_timeline_layout(
+            item_views,
+            timeline_end_ms=plot_scale_end_ms,
+            max_depth=max_depth,
+            extra_located_rows_height=wait_row_height * wait_track_count,
+            include_session_context=bool(session_name),
+            include_fold_banner=False,
+        )
+        axis = _build_piecewise_timeline_axis(
+            timeline_end_ms=timeline_end_ms,
+            plot_scale_end_ms=plot_scale_end_ms,
+            plot_width=layout.plot_width,
+            fold_intervals=[],
+        )
+    linear_px_per_ms = axis.linear_px_per_ms
+    px_per_ms: float | None = None if axis.folded else linear_px_per_ms
     for item in item_views:
         interval_start = item.pop("interval_start", None)
         interval_end = item.pop("interval_end", None)
@@ -3030,18 +3837,37 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
                 float(interval_end),
                 axis_end_ms=timeline_end_ms,
             )
-            actual_left_px = clipped_start * px_per_ms
             duration_ms = clipped_end - clipped_start
-            actual_width_px = duration_ms * px_per_ms
+            if axis.folded:
+                actual_left_px = axis.map_ms(clipped_start)
+                actual_width_px = axis.map_ms(clipped_end) - actual_left_px
+            else:
+                actual_left_px = clipped_start * linear_px_per_ms
+                actual_width_px = duration_ms * linear_px_per_ms
             visual_width_px = (
                 max(float(SUBAGENT_TIMELINE_MIN_BAR_WIDTH), actual_width_px)
                 if duration_ms > 0
                 else 2.0
             )
             visual_width_px = min(float(layout.plot_width), visual_width_px)
-            visual_left_px = min(
-                actual_left_px, max(0.0, layout.plot_width - visual_width_px)
+            linear_seg = (
+                axis.linear_segment_for_span(clipped_start, clipped_end)
+                if axis.folded and duration_ms > 0
+                else None
             )
+            if (
+                linear_seg is not None
+                and actual_width_px < SUBAGENT_TIMELINE_MIN_BAR_WIDTH
+                and linear_seg.width_px >= visual_width_px
+            ):
+                visual_left_px = max(
+                    linear_seg.px_start,
+                    min(actual_left_px, linear_seg.px_end - visual_width_px),
+                )
+            else:
+                visual_left_px = min(
+                    actual_left_px, max(0.0, layout.plot_width - visual_width_px)
+                )
             item["left_px"] = f"{visual_left_px:.2f}".rstrip("0").rstrip(".")
             item["width_px"] = f"{visual_width_px:.2f}".rstrip("0").rstrip(".")
             item["minimum_width_applied"] = (
@@ -3111,9 +3937,17 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         clipped_start, clipped_end = _timeline_clip_span(
             visual_start, visual_end, axis_end_ms=timeline_end_ms
         )
-        actual_left_px = clipped_start * px_per_ms
         visual_span_ms = clipped_end - clipped_start
-        actual_width_px = visual_span_ms * px_per_ms
+        if axis.folded:
+            actual_left_px = axis.map_ms(clipped_start)
+            actual_width_px = axis.map_ms(clipped_end) - actual_left_px
+        else:
+            actual_left_px = clipped_start * linear_px_per_ms
+            actual_width_px = visual_span_ms * linear_px_per_ms
+        spans_fold = axis.folded and any(
+            max(clipped_start, fold.start_ms) < min(clipped_end, fold.end_ms)
+            for fold in axis.folds
+        )
         minimum = (
             6.0 if state_class != "complete" else float(SUBAGENT_TIMELINE_MIN_BAR_WIDTH)
         )
@@ -3133,6 +3967,9 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
                 "left_px": f"{visual_left_px:.2f}".rstrip("0").rstrip("."),
                 "width_px": f"{visual_width_px:.2f}".rstrip("0").rstrip("."),
                 "counted_duration": state_class == "complete",
+                "spans_fold": spans_fold,
+                "_clipped_start_ms": clipped_start,
+                "_clipped_end_ms": clipped_end,
             }
         )
 
@@ -3360,7 +4197,9 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     gantt_displayed_count = len(item_views)
     observation_subtitle = " · 指标按已观测范围计算" if observation_limited else ""
     if timeline_end_ms > 0:
-        axis_ticks, grid_lines = _build_timeline_ticks(timeline_end_ms, layout)
+        axis_ticks, grid_lines = _build_timeline_ticks(
+            timeline_end_ms, layout, axis=axis
+        )
     else:
         axis_ticks = [
             {
@@ -3372,6 +4211,41 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
             }
         ]
         grid_lines = []
+    fold_segment_views = [
+        {
+            "start_ms": fold.start_ms,
+            "end_ms": fold.end_ms,
+            "duration_ms": fold.duration_ms,
+            "left_px": f"{fold.px_start:.2f}".rstrip("0").rstrip("."),
+            "width_px": f"{fold.width_px:.2f}".rstrip("0").rstrip("."),
+            "center_px": f"{(fold.px_start + fold.width_px / 2):.2f}".rstrip("0").rstrip("."),
+            "duration_label": _format_timeline_scale(fold.duration_ms),
+            "break_label": f"折叠 {_format_timeline_scale(fold.duration_ms)}",
+        }
+        for fold in axis.folds
+    ]
+    axis_segment_views = [
+        {
+            "kind": segment.kind,
+            "start_ms": segment.start_ms,
+            "end_ms": segment.end_ms,
+            "duration_ms": segment.duration_ms,
+            "left_px": f"{segment.px_start:.2f}".rstrip("0").rstrip("."),
+            "width_px": f"{segment.width_px:.2f}".rstrip("0").rstrip("."),
+        }
+        for segment in axis.segments
+    ]
+    fold_total_ms = axis.folded_duration_ms
+    fold_summary_text = (
+        f"已折叠 {len(fold_segment_views)} 段交互等待，共 {format_duration_ms(fold_total_ms)}"
+        if axis.folded
+        else ""
+    )
+    fold_summary_detail = (
+        "仅折叠无子代理并发的完整交互等待 · 其余时段保持统一线性比例尺"
+        if axis.folded
+        else ""
+    )
     subtitle = (
         f"观测 {observed_count} 个 · 本图展示 {gantt_displayed_count} 个"
         f" · 时间相对根任务起点{observation_subtitle}"
@@ -3380,8 +4254,23 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
     )
     if wait_available:
         subtitle += " · 含交互／后台观察轨道" if omp else " · 含用户等待轨道"
+
+    def _track_fold_notches(intervals: list[dict[str, Any]]) -> list[dict[str, str]]:
+        if not axis.folded:
+            return []
+        notches: list[dict[str, str]] = []
+        for fold, fold_view in zip(axis.folds, fold_segment_views):
+            if any(
+                max(float(item["_clipped_start_ms"]), fold.start_ms)
+                < min(float(item["_clipped_end_ms"]), fold.end_ms)
+                for item in intervals
+            ):
+                notches.append({"center_px": fold_view["center_px"]})
+        return notches
+
     wait_tracks = [{
         "label": wait_label, "kinds": wait_kinds, "intervals": wait_interval_views,
+        "fold_notches": _track_fold_notches(wait_interval_views),
         "state_label": wait_state_label, "state_time": wait_state_time,
     }]
     wait_visible = not omp or not wait_available or bool(observed_kinds) or wait_observation_limited
@@ -3390,17 +4279,21 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         for kind in observed_kinds:
             counted = wait_kind_intervals[kind]
             measured = _timeline_interval_union_ms(counted, axis_end_ms=timeline_end_ms)
+            track_intervals = [item for item in wait_interval_views if item["kind"] == kind]
             wait_tracks.append({
                 "label": f"{_USER_WAIT_KIND_VIEW[kind][0]}观察",
                 "kinds": [item for item in wait_kinds if item["key"] == kind],
-                "intervals": [item for item in wait_interval_views if item["kind"] == kind],
+                "intervals": track_intervals,
+                "fold_notches": _track_fold_notches(track_intervals),
                 "state_label": "观察受限" if wait_observation_limited else "已观测区间",
                 "state_time": (("至少 " if wait_observation_limited else "") + format_duration_ms(measured))
                 if counted else "未计时",
             })
+    for wait_item in wait_interval_views:
+        wait_item.pop("_clipped_start_ms", None)
+        wait_item.pop("_clipped_end_ms", None)
     if not wait_visible:
         wait_tracks = []
-
     return {
         "mode": mode,
         "observation_only": omp,
@@ -3444,6 +4337,14 @@ def _build_subagent_timeline_view(event: NormalizedEvent) -> dict[str, Any] | No
         if axis_uses_root_duration
         else "observed_boundary",
         "px_per_ms": px_per_ms,
+        "linear_px_per_ms": linear_px_per_ms,
+        "axis_folded": axis.folded,
+        "axis_segments": axis_segment_views,
+        "fold_segments": fold_segment_views,
+        "fold_count": len(fold_segment_views),
+        "fold_total_ms": fold_total_ms,
+        "fold_summary_text": fold_summary_text,
+        "fold_summary_detail": fold_summary_detail,
         "axis_ticks": axis_ticks,
         "grid_lines": grid_lines,
         "gantt_items": located_items,
