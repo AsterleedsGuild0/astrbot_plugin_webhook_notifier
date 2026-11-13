@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -636,6 +637,9 @@ class EndpointRegistry:
             raise RegistryPersistenceError(f"{label} parent fsync 失败: {exc}") from exc
 
     def _fsync_parent_best_effort(self, label: str) -> None:
+        # Windows 的 os.open 无法打开目录；文件 fsync 和 replace 仍会执行。
+        if sys.platform == "win32":
+            return
         try:
             self._fsync_parent_required(label)
         except RegistryPersistenceError as exc:
