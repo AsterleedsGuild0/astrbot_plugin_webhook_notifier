@@ -27,7 +27,7 @@ flowchart LR
 
 职责边界如下：
 
-- oh-my-pi（OMP）提供公开 ExtensionAPI 事件与扩展加载机制；`session_stop` 不等于最终成功。
+- oh-my-pi（OMP）提供公开 ExtensionAPI 事件与扩展加载机制；
 - 本仓库 [`integrations/omp/`](../integrations/omp/) 客户端包负责把事件转换为 HTTP POST；它不是 OMP 原生 Webhook。
 - HTTPS 反向代理负责公网入口、TLS 和访问日志，不负责插件 Token 鉴权。
 - Webhook Notifier 负责 Endpoint 查找、Bearer 鉴权、OMP V1/V2 标准化、渲染和 AstrBot 投递。
@@ -42,6 +42,8 @@ flowchart LR
 OMP 与 AstrBot 在同一主机时，可以直接访问 `http://127.0.0.1:18080`。在严格受控的内网中也可以直接使用 HTTP，但插件必须只绑定受控接口，网络访问必须受防火墙或等效策略限制。无论是否使用 HTTPS，都必须配置独立 Bearer Token。
 
 直连适合一次性验证或可信网络，不应把 `127.0.0.1` Base URL 误认为其他主机可以访问的地址。
+
+---
 
 ### 跨主机或公网访问
 

@@ -48,7 +48,8 @@ AstrBot Webhook 通知插件：将 Oh My Pi（OMP）、OpenCode 的任务完成�
 
 | 方式 | 操作 |
 | --- | --- |
-| Release ZIP（推荐） | 从 [最新 Release](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/latest) 下载插件 ZIP，在 WebUI 选择“从文件安装” |
+| 从插件市场安装（推荐） | 插件市场搜索 Webhook Notifier 进行安装 |
+| Release ZIP | 从 [最新 Release](https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier/releases/latest) 下载插件 ZIP，在 WebUI 选择“从文件安装” |
 | WebUI 仓库 URL | 在 URL 安装入口填写 `https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier` |
 | 源码安装 | 执行下方命令，将插件放入 `AstrBot/data/plugins` |
 
@@ -118,6 +119,8 @@ JSON
 ## 支持范围
 
 以下为已有验证范围，不表示允许无限制主动发送；其他 adapter 未验证，不承诺支持。
+
+由于日常 Coding 基本都是多开 AGENT 协同工作因此私聊消息会很多，不建议使用 `aiocqhttp` 大量主动发送私聊消息， 用官方的 WebSocket Bot 更合适。
 
 | 平台 / 场景 | 状态 | 当前边界 |
 | --- | --- | --- |
