@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import inspect
 import os
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import core.registry as registry_module
 from core.models import EndpointStatus
 from core.registry import (
     REGISTRY_FILENAME,
@@ -398,6 +401,7 @@ def test_create_persistence_failure_does_not_publish_memory_or_token(
 def test_rotate_persistence_failure_keeps_old_disk_memory_and_token(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(registry_module, "sys", SimpleNamespace(platform="win32"))
     registry = EndpointRegistry(tmp_path)
     record, old_token = registry.create_private_endpoint(
         PLATFORM, "owner", "name", "aiocqhttp:FriendMessage:1"
@@ -416,9 +420,61 @@ def test_rotate_persistence_failure_keeps_old_disk_memory_and_token(
     assert registry.authenticate_delivery(record.path, f"Bearer {old_token}").authorized
 
 
-def test_create_parent_fsync_failure_publishes_disk_memory_and_reload(
-    tmp_path, monkeypatch
+def test_windows_create_delete_and_recreate_without_directory_fsync_warning(
+    tmp_path, monkeypatch, caplog
 ):
+    monkeypatch.setattr(registry_module, "sys", SimpleNamespace(platform="win32"))
+    real_open = os.open
+
+    def open_without_directories(path, *args, **kwargs):
+        if path == tmp_path:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_without_directories)
+    caplog.set_level(logging.WARNING, logger="astrbot")
+    registry = EndpointRegistry(tmp_path)
+    first, old_token = registry.create_private_endpoint(
+        PLATFORM, "owner", "name", "aiocqhttp:FriendMessage:1"
+    )
+    assert registry.revoke_endpoint(PLATFORM, "owner", "name")[0]
+    assert registry.delete_endpoint(PLATFORM, "owner", "name") == ("deleted", "revoked")
+    assert EndpointRegistry(tmp_path).get_scoped(PLATFORM, "owner", "name") is None
+
+    recreated, new_token = registry.create_private_endpoint(
+        PLATFORM, "owner", "name", "aiocqhttp:FriendMessage:1"
+    )
+    reloaded = EndpointRegistry(tmp_path)
+    assert reloaded.get_scoped(PLATFORM, "owner", "name") == recreated
+    assert reloaded.authenticate_delivery(first.path, f"Bearer {new_token}").authorized
+    assert not reloaded.authenticate_delivery(first.path, f"Bearer {old_token}").authorized
+    assert "parent fsync" not in caplog.text
+
+
+def test_windows_migration_still_requires_parent_fsync(tmp_path, monkeypatch):
+    original = _write_legacy(tmp_path, {"legacy": _legacy_record()})
+    monkeypatch.setattr(registry_module, "sys", SimpleNamespace(platform="win32"))
+    if not hasattr(os, "fchmod"):
+        monkeypatch.setattr(os, "fchmod", lambda *_: None, raising=False)
+    monkeypatch.setattr(
+        EndpointRegistry,
+        "_fsync_parent_required",
+        lambda *_: (_ for _ in ()).throw(
+            RegistryPersistenceError("injected parent fsync failure")
+        ),
+    )
+
+    with pytest.raises(RegistryLoadError):
+        EndpointRegistry(tmp_path)
+    assert (tmp_path / REGISTRY_FILENAME).read_bytes() == original
+    assert not (tmp_path / f"{REGISTRY_FILENAME}.v1.bak").exists()
+
+
+def test_create_parent_fsync_failure_publishes_disk_memory_and_reload(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(registry_module, "sys", SimpleNamespace(platform="linux"))
+    caplog.set_level(logging.WARNING, logger="astrbot")
     registry = EndpointRegistry(tmp_path)
     monkeypatch.setattr(
         EndpointRegistry,
@@ -436,11 +492,14 @@ def test_create_parent_fsync_failure_publishes_disk_memory_and_reload(
 
     assert memory == record == reloaded
     assert registry.authenticate_delivery(record.path, f"Bearer {token}").authorized
+    assert "injected parent fsync failure" in caplog.text
+    assert "replace 已成功" in caplog.text
 
 
 def test_rotate_parent_fsync_failure_publishes_disk_memory_and_reload(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(registry_module, "sys", SimpleNamespace(platform="linux"))
     registry = EndpointRegistry(tmp_path)
     record, old_token = registry.create_private_endpoint(
         PLATFORM, "owner", "rotated", "aiocqhttp:FriendMessage:1"
