@@ -9,8 +9,8 @@
     "description": "默认渲染模式",
     "type": "string",
     "options": ["text", "html_image"],
-    "hint": "MS2 支持 text 和 html_image。html_image 使用 HTML 模板渲染卡片并截图发送；渲染失败时可按 fallback_to_text 设置降级为纯文本。",
-    "default": "text"
+    "hint": "html_image（默认）使用 HTML 模板渲染卡片并截图发送，渲染失败时按 fallback_to_text 降级为纯文本；text 直接发送纯文本。图片由 AstrBot 文转图服务渲染：未自建 T2I 时使用 AstrBot 默认的公共渲染服务，通知内容会发送到该服务，介意时请自建 T2I 或改用 text。",
+    "default": "html_image"
   },
   "enable_private_notifications": {
     "description": "是否允许 Webhook 私聊主动通知",

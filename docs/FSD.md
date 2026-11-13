@@ -1348,7 +1348,7 @@ MVP 可以串行发送。
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | 是否启用插件 |
 | `enable_private_notifications` | bool | `false` | 是否允许 Webhook 状态通知投递到 `FriendMessage`；不影响命令、Token 流程、endpoint 与群聊通知 |
-| `render_mode` | string | `text` | `text` 或 `html_image` |
+| `render_mode` | string | `html_image` | `text` 或 `html_image` |
 | `fallback_to_text` | bool | `true` | HTML 渲染失败是否降级文本 |
 | `auth_mode` | string | `managed` | 预留字段；MVP 只支持 `managed`，不支持 `simple` |
 | `targets` | yaml text | 示例注释 | 推送目标列表 |
@@ -1752,7 +1752,7 @@ FSD v0.1.0 对 MVP 功能契约作出以下决策：
 | Endpoint Registry 存储 | 使用插件数据目录下的 JSON 文件，例如 `data/webhook_tokens.json`；token 只存哈希 | endpoint 数量、审计或并发写入需求上升后评估 SQLite |
 | UMO 校验 | 启动或配置加载时校验 UMO 字符串格式；实际可达性在发送时确认 | 后续如 AstrBot 提供会话探测 API，可增加主动校验 |
 | HTML 静态资源 | MVP 默认模板自包含，不支持任意本地静态资源目录 | 后续可设计受限资源目录和路径白名单 |
-| 默认渲染模式 | 默认 `text`；`html_image` 必须由管理员显式开启；MVP 全局生效 | 后续如需 endpoint 级覆盖，应重新设计独立 override 字段，不复用旧 `render_mode` |
+| 默认渲染模式 | 默认 `html_image`，渲染失败按 `fallback_to_text` 降级为纯文本；未自建 T2I 时图片由 AstrBot 默认公共渲染服务生成，管理员可改用 `text`；MVP 全局生效 | 后续如需 endpoint 级覆盖，应重新设计独立 override 字段，不复用旧 `render_mode` |
 | Request ID | 每个 Webhook 请求生成 request id，并贯穿响应、日志、渲染和发送结果 | 后续可接入持久化审计日志 |
 | Token 哈希 | 使用 `HMAC-SHA256(server_secret, token)`，token 明文只展示一次 | 后续如需要更强抗暴力破解能力，可评估 Argon2/bcrypt，但需考虑依赖和性能 |
 | 群聊验证码 | `request_id` 使用 UUID4，`code` 使用 6 位小写十六进制，默认 10 分钟有效且一次性使用 | 后续可按风险增加速率限制和验证码长度 |

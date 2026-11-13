@@ -508,9 +508,16 @@ class TestGetRenderMode:
         )
         assert srv._get_render_mode() == "text"
 
-    def test_global_text_default(self, server: WebhookServer):
-        """默认插件配置 text 应生效。"""
-        assert server._get_render_mode() == "text"
+    def test_missing_render_mode_defaults_to_html_image(self):
+        """配置缺少 render_mode 时按默认 html_image 处理。"""
+        srv = WebhookServer(
+            config=ServerConfig(),
+            registry=FakeRegistry(),
+            sender=FakeSender(),
+            html_render=None,
+            plugin_config={},
+        )
+        assert srv._get_render_mode() == "html_image"
 
 
 # ─── _get_fallback_to_text ─────────────────────────────────

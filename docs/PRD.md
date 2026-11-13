@@ -602,7 +602,7 @@ HTML 模板只允许来自插件侧受信任配置：
 
 ## 配置设计
 
-示例配置如下。这里显式选择 `html_image` 用于展示 HTML 图片模式；实际默认 `render_mode` 仍为 `text`：
+示例配置如下，`render_mode` 使用默认值 `html_image`：
 
 ```yaml
 enabled: true

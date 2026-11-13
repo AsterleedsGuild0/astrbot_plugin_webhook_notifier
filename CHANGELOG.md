@@ -5,10 +5,12 @@
 - #45 修复 OMP 18.18.3 起问题卡不显示题目和选项：OMP 把 `ask` 参数从 `questions[]` 改为 HTML 表单 `{ html }`，客户端原先只读取 `questions[]`。客户端改用宿主 OMP 自带的表单解析（`@oh-my-pi/pi-tui` 的 `html-form`）提取带名字段的题干与选项，预选的唯一选项标为推荐；不发送说明段落、默认值、占位文字和选项 value。旧版 OMP 的 `questions[]` 参数照常支持；宿主没有表单解析模块时省略题目，不影响待处理通知本身。
 - #41 OMP 问题卡区分单选与多选：V2 `interaction.questions[].multi` 新增可选字段，只接受 `true`；客户端取旧参数的 `multi` 或 HTML 表单中的多选 checkbox 组／`<select multiple>`。默认卡片在多选题标题旁显示“可多选”并改用方框序号，纯文本输出“选择方式：可多选”和 `[ ]` 前缀；自定义模板可读取 `event.action_view.blocks[].multi`。单选题和 OpenCode 问题卡不变。
 - #42 OMP 运行观察时间线折叠长交互等待：一段 Ask／审批／计划审阅等待完整、期间没有子代理运行，且至少 3 分钟并占根窗口 12% 以上时，按断轴折叠为固定宽度并标出真实时长；主代理工作、`background_wait`、与子代理重叠或不完整的区间不折叠，OpenCode 时间线不变。所有统计、耗时与刻度文字不受影响。模板变量 `subagent_timeline_view.px_per_ms` 在折叠时为 `None`，另提供 `linear_px_per_ms`、`axis_folded`、`fold_segments` 等字段。
+- 默认渲染模式由 `text` 改为 `html_image`：新安装默认发送图片卡片，渲染或发送失败时按 `fallback_to_text`（默认开启）降级为纯文本。配置提示删除早期里程碑说法，并说明未自建 T2I 时图片由 AstrBot 默认的公共渲染服务生成、通知内容会发往该服务。
 
 ### 升级须知
 
 - 先升级插件服务端，再升级 OMP 客户端：旧服务端会拒收带 `multi` 字段的问题卡。只修复 #45 的题目显示不需要新字段，但客户端发出多选题时会带上它。
+- 默认渲染模式只对新安装生效：AstrBot 首次加载插件时已把当时的默认值 `text` 写入配置，升级不会改动；想用图片卡片请在插件配置中把 `render_mode` 改为 `html_image`。需要通知内容不出本机时，自建 T2I 或保持 `text`。
 
 ## v2.5.2 - 2026-11-13
 

@@ -1734,11 +1734,7 @@ class WebhookNotifierPlugin(Star):
             logger.error(f"[WebhookNotifier] 启动 HTTP 服务失败: {e}")
 
     def _get_render_mode(self) -> str:
-        mode = self.config.get("render_mode", "text")
-        if mode == "html_image":
-            logger.info("[WebhookNotifier] render_mode 配置为 html_image（MS2 支持）。")
-            return "html_image"
-        return mode
+        return self.config.get("render_mode", "html_image")
 
     @staticmethod
     def _is_private(event: AstrMessageEvent) -> bool:

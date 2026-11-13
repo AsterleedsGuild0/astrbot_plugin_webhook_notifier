@@ -221,7 +221,7 @@ class WebhookServer:
         MVP 阶段 render_mode 为全局配置，所有 endpoint 共享。
         endpoint 级渲染模式已在 EndpointRecord 中移除。
         """
-        pm = str(self._plugin_config.get("render_mode", "text"))
+        pm = str(self._plugin_config.get("render_mode", "html_image"))
         return pm if pm in ("text", "html_image") else "text"
 
     def _get_fallback_to_text(self) -> bool:
