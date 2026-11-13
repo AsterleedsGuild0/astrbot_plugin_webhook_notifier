@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## v2.6.0 - 2026-11-13
 
 - #45 修复 OMP 18.18.3 起问题卡不显示题目和选项：OMP 把 `ask` 参数从 `questions[]` 改为 HTML 表单 `{ html }`，客户端原先只读取 `questions[]`。客户端改用宿主 OMP 自带的表单解析（`@oh-my-pi/pi-tui` 的 `html-form`）提取带名字段的题干与选项，预选的唯一选项标为推荐；不发送说明段落、默认值、占位文字和选项 value。旧版 OMP 的 `questions[]` 参数照常支持；宿主没有表单解析模块时省略题目，不影响待处理通知本身。
 - #41 OMP 问题卡区分单选与多选：V2 `interaction.questions[].multi` 新增可选字段，只接受 `true`；客户端取旧参数的 `multi` 或 HTML 表单中的多选 checkbox 组／`<select multiple>`。默认卡片在多选题标题旁显示“可多选”并改用方框序号，纯文本输出“选择方式：可多选”和 `[ ]` 前缀；自定义模板可读取 `event.action_view.blocks[].multi`。单选题和 OpenCode 问题卡不变。

@@ -8,7 +8,7 @@
 
 `v1.3.0` 历史发布范围与证据保留在对应章节，不将 2.0 新默认倒灌为历史 ZIP 的行为。各版本的验收范围见 [CHANGELOG](../CHANGELOG.md) 与[发布流程](release.md)；插件市场安装／更新尚未验证。
 
-## 未发布：默认渲染模式改为 `html_image`
+## v2.6.0：默认渲染模式改为 `html_image`
 
 - `_conf_schema.json` 的 `render_mode` 默认值由 `text` 改为 `html_image`；配置缺少该键时服务端同样按 `html_image` 处理，非法值仍按 `text` 处理。`fallback_to_text` 仍默认开启，图片渲染或发送失败时降级为纯文本。
 - 图片由 AstrBot 文转图服务渲染。未自建 T2I 时，AstrBot 使用其默认的公共渲染服务，通知内容（会话名、项目目录名、交互摘要等）会发送到该服务；需要内容不出本机时，自建 T2I 或改用 `text`。
@@ -152,7 +152,7 @@ URL 与 Token 任一缺失／非法均不发送，日志只含固定分类、HTT
 
 以下行为属于 v1.0 公共契约：
 
-- `_conf_schema.json` 暴露的配置字段、类型、默认值及默认安全语义，特别是 `enable_private_notifications=false`、Endpoint 级 Bearer 鉴权与本地监听默认值。`render_mode` 默认值的变化见上文“未发布”一节。
+- `_conf_schema.json` 暴露的配置字段、类型、默认值及默认安全语义，特别是 `enable_private_notifications=false`、Endpoint 级 Bearer 鉴权与本地监听默认值。`render_mode` 默认值的变化见上文 v2.6.0 一节。
 - `<唤醒词>whn` 命令族的行为、owner scope、私聊限制、群验证流程及全局超级管理员权限边界。
 - Registry v2 的持久化格式版本、managed/pending scope、v1 透明迁移、quarantine、原子提交、fail-closed 和离线 rebind 语义。
 - Webhook HTTP JSON 请求、Bearer Token、OMP version 1 兼容解析，以及 `ok`、`skipped`、`partial_delivery`、`partial_failure`、`targets`、可选 `send_results`、`delivered`、`rendered`、`retryable` 与 `skip_reason` 响应语义。
