@@ -340,11 +340,15 @@ def _ask_fields(interaction: dict, kind: str) -> list[dict]:
     if count > 1:
         fields.append({"label": "questionCount", "value": str(count), "short": True})
     for index, question in enumerate(questions, start=1):
-        _object(question, {"text"}, {"header", "options"})
+        _object(question, {"text"}, {"header", "multi", "options"})
         _bounded_text(question["text"], 300)
+        if "multi" in question and question["multi"] is not True:
+            raise ValueError("interaction_questions")
         if "header" in question:
             _bounded_text(question["header"], 40)
             fields.append({"label": f"question[{index}].header", "value": question["header"], "short": True})
+        if question.get("multi") is True:
+            fields.append({"label": f"question[{index}].multi", "value": True, "short": True})
         fields.append({"label": f"question[{index}]", "value": question["text"], "short": False})
         if "options" not in question:
             continue

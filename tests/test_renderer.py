@@ -750,6 +750,35 @@ class TestRenderHtmlData:
         assert dev < recommended < html.index("prod<span") < html.index("live</div>")
         assert '<div class="action-block-title">' not in html
 
+    def test_custom_template_reads_omp_question_multi_and_opencode_stays_unchanged(self):
+        omp_event = _make_event()
+        omp_event.provider = "omp"
+        omp_event.event = "omp.action_required"
+        omp_event.version = 2
+        omp_event.status = "action_required"
+        omp_event.summary = "等待问题回答"
+        omp_event.fields = [
+            {"label": "sessionName", "value": "多选模板测试"},
+            {"label": "question[1]", "value": "单选问题？"},
+            {"label": "question[1].options", "value": [{"label": "甲"}, {"label": "乙"}]},
+            {"label": "question[2].multi", "value": True},
+            {"label": "question[2]", "value": "多选问题？"},
+            {"label": "question[2].options", "value": [{"label": "丙"}, {"label": "丁"}]},
+        ]
+        custom = (
+            "{% for b in event.action_view.blocks %}"
+            "<div>{{ b.text }}={{ 'multi' if b.multi else 'single' }}</div>"
+            "{% endfor %}"
+            "{% for f in event.fields %}{% if f.label == '问题 2 选择方式' %}<span>{{ f.value }}</span>{% endif %}{% endfor %}"
+        )
+        rendered = render_html(omp_event, custom)
+        assert "<div>单选问题？=single</div>" in rendered
+        assert "<div>多选问题？=multi</div>" in rendered
+        assert "<span>可多选</span>" in rendered
+        text = render_text(omp_event)
+        assert "问题 1 选择方式" not in text
+        assert "问题 2 选择方式: 可多选" in text or "问题 2 选择方式：可多选" in text
+
     def test_legacy_card_without_root_name_does_not_add_hierarchy_row(self):
         event = _make_event(
             fields=[{"label": "sessionName", "value": "Legacy child session"}]

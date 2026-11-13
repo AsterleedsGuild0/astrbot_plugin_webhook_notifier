@@ -348,6 +348,10 @@ DEFAULT_HTML_TEMPLATE = """\
       --option-tag: #7a5c00;
       --action-detail: #2e3239;
       --action-label: #6b707a;
+      --multi-text: #24578a;
+      --multi-bg: #e7f0fb;
+      --multi-border: rgba(36, 87, 138, 0.28);
+      --multi-box-border: rgba(36, 87, 138, 0.34);
     }
 
     :root[data-theme="dark"] {
@@ -441,6 +445,10 @@ DEFAULT_HTML_TEMPLATE = """\
       --option-tag: #f0c445;
       --action-detail: #c9cdd3;
       --action-label: #9a9ea7;
+      --multi-text: #9bc3f2;
+      --multi-bg: rgba(58, 114, 178, 0.24);
+      --multi-border: rgba(138, 184, 238, 0.38);
+      --multi-box-border: rgba(138, 184, 238, 0.42);
     }
 
     * {
@@ -1066,6 +1074,20 @@ DEFAULT_HTML_TEMPLATE = """\
     .action-block { margin-top: 24px; padding: 24px; border-radius: 16px; background: var(--block-bg); }
     .action-block + .action-block { margin-top: 14px; }
     .action-block-title { margin-bottom: 6px; color: var(--block-title); font-size: 19px; font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
+    .action-block-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+    .action-multi-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 10px;
+      border: 1px solid var(--multi-border);
+      border-radius: 999px;
+      background: var(--multi-bg);
+      color: var(--multi-text);
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.35;
+      letter-spacing: 0.01em;
+    }
     .action-block-text { margin: 0; font-size: 25px; font-weight: 700; line-height: 1.42; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
     .action-options { margin: 16px 0 0; padding: 0; list-style: none; }
     .action-option { display: flex; gap: 14px; padding: 16px 18px; border-radius: 12px; background: var(--option-bg); }
@@ -1083,6 +1105,12 @@ DEFAULT_HTML_TEMPLATE = """\
       text-align: center;
     }
     .action-option-recommended .action-option-number { color: var(--rec-number-text); background: var(--rec-number-bg); }
+    .action-options-multi .action-option-number {
+      border-radius: 9px;
+      border: 1.5px solid var(--multi-box-border);
+      line-height: 31px;
+    }
+    .action-options-multi .action-option-recommended .action-option-number { border-color: transparent; }
     .action-option-main { min-width: 0; }
     .action-option-label { font-size: 22px; font-weight: 700; line-height: 1.42; overflow-wrap: anywhere; }
     .action-option-tag { margin-left: 10px; color: var(--option-tag); font-size: 18px; font-weight: 800; }
@@ -1127,13 +1155,13 @@ DEFAULT_HTML_TEMPLATE = """\
       {% endif %}
       {% for block in action.blocks %}
       <section class="action-block">
-        {% if block.title %}<div class="action-block-title">{{ block.title|e }}</div>{% endif %}
+        {% if block.title and block.multi %}<div class="action-block-title action-block-head"><span>{{ block.title|e }}</span><span class="action-multi-badge">可多选</span></div>{% elif block.title %}<div class="action-block-title">{{ block.title|e }}</div>{% elif block.multi %}<div class="action-block-title action-block-head"><span class="action-multi-badge">可多选</span></div>{% endif %}
         {% if block.text %}<p class="action-block-text">{{ block.text|inline_code }}</p>{% endif %}
         {% for detail in block.details %}
         <div class="action-detail"><span class="action-detail-label">{{ detail.label|e }}：</span>{{ detail.value|inline_code }}</div>
         {% endfor %}
         {% if block.options %}
-        <ol class="action-options">
+        <ol class="action-options{% if block.multi %} action-options-multi{% endif %}">
           {% for option in block.options %}
           <li class="action-option{% if option.recommended %} action-option-recommended{% endif %}">
             <div class="action-option-number">{{ loop.index }}</div>

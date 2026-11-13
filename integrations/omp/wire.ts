@@ -6,7 +6,7 @@ export type Reason = "missing_start" | "session_changed" | "shutdown" | "expired
 export type Session = { ref: string; scope: "root" | "subagent" | "unknown"; name?: string; cwdName?: string; agent?: string; rootName?: string; createdAt?: string };
 export type Cycle = { ref: string; partial: boolean; reasons: Reason[]; timeBasis: "receipt_monotonic"; startedAt?: string; endedAt?: string; durationMs?: number; model?: string; thinking?: string; metadataChanged?: boolean };
 export type AskOption = { label: string; description?: string; recommended?: true };
-export type AskQuestion = { text: string; header?: string; options?: AskOption[] };
+export type AskQuestion = { text: string; header?: string; multi?: true; options?: AskOption[] };
 export type InteractionDetail = { title?: string; questionCount?: number; questions?: AskQuestion[] };
 /** 错误分类只来自结构化字段：最终 assistant 的 errorStatus／stopReason 与 auto_retry_end.success。 */
 export type ErrorCategory = "auth" | "rate_limit" | "server" | "request" | "truncated" | "retry_exhausted";

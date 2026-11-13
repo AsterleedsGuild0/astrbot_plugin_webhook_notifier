@@ -81,7 +81,7 @@ _FIELD_LABELS = {
 }
 
 _QUESTION_LABEL_RE = re.compile(
-    r"^question\[(\d+)\](?:\.(header|options|recommended))?$"
+    r"^question\[(\d+)\](?:\.(header|multi|options|recommended))?$"
 )
 _PERMISSION_LABEL_RE = re.compile(
     r"^permission\[(\d+)\]\.(category|summary|title|description|action|target|patterns)$"
@@ -192,6 +192,8 @@ def localize_field_label(label: Any) -> str:
         index, suffix = match.groups()
         if suffix == "header":
             return f"问题 {index} 标题"
+        if suffix == "multi":
+            return f"问题 {index} 选择方式"
         if suffix == "options":
             return f"问题 {index} 选项"
         if suffix == "recommended":
@@ -418,11 +420,12 @@ def _option_items(value: Any) -> list[dict[str, Any]]:
     return items
 
 
-def _format_option_lines(value: Any) -> Any:
+def _format_option_lines(value: Any, *, multi: bool = False) -> Any:
     lines: list[str] = []
     for index, item in enumerate(_option_items(value), start=1):
         marker = "（推荐）" if item["recommended"] else ""
-        lines.append(f"{index}. {item['label']}{marker}")
+        prefix = f"{index}. [ ] " if multi else f"{index}. "
+        lines.append(f"{prefix}{item['label']}{marker}")
         if item["description"]:
             lines.append(f"   {item['description']}")
     return "\n".join(lines) if lines else value
@@ -484,10 +487,13 @@ def prepare_display_fields(
         and _PERMISSION_LABEL_RE.match(str(field.get("label", "")))
     ]
     question_texts: list[Any] = []
+    multi_questions: set[str] = set()
     for field in question_details:
         match = _QUESTION_LABEL_RE.match(str(field.get("label", "")))
         if match and match.group(2) is None:
             question_texts.append(field.get("value", ""))
+        elif match and match.group(2) == "multi" and field.get("value") is True:
+            multi_questions.add(match.group(1))
     summary_values = [
         field.get("value", "")
         for field in fields
@@ -517,6 +523,11 @@ def prepare_display_fields(
             continue
         if raw_label == "durationMs" and has_duration:
             continue
+        question_match = _QUESTION_LABEL_RE.match(raw_label)
+        if question_match and question_match.group(2) == "multi":
+            if value is not True:
+                continue
+            value = "可多选"
         item = dict(field)
         item["label"] = (
             "模型提供方"
@@ -544,7 +555,12 @@ def prepare_display_fields(
         }:
             value = format_timestamp(value, display_context)
         if "options" in raw_label:
-            value = _format_option_lines(value)
+            is_multi = bool(
+                question_match
+                and question_match.group(2) == "options"
+                and question_match.group(1) in multi_questions
+            )
+            value = _format_option_lines(value, multi=is_multi)
         item["value"] = value if value is not None else ""
         result.append(item)
     return result
@@ -637,13 +653,16 @@ def _action_questions(
             continue
         index, suffix = int(match.group(1)), match.group(2)
         question = grouped.setdefault(
-            index, {"header": "", "text": "", "options": [], "recommended": None}
+            index,
+            {"header": "", "text": "", "options": [], "recommended": None, "multi": False},
         )
         value = field.get("value")
         if suffix is None:
             question["text"] = "" if value is None else str(value).strip()
         elif suffix == "header":
             question["header"] = "" if value is None else str(value).strip()
+        elif suffix == "multi":
+            question["multi"] = value is True
         elif suffix == "options":
             question["options"] = _option_items(value)
         else:
@@ -676,6 +695,7 @@ def _action_questions(
             {
                 "title": title,
                 "text": question["text"],
+                "multi": question["multi"],
                 "options": question["options"],
                 "details": [],
             }
@@ -708,6 +728,7 @@ def _action_permissions(raw_fields: list[Any]) -> list[dict[str, Any]]:
                 "title": parts.get("category")
                 or (f"权限 {index}" if len(grouped) > 1 else ""),
                 "text": parts[text_key] if text_key else "",
+                "multi": False,
                 "options": [],
                 "details": details,
             }
@@ -747,7 +768,7 @@ def _build_action_view(
     fields = raw_fields if isinstance(raw_fields, list) else []
     question_blocks, extras = _action_questions(fields)
     subject_blocks = [
-        {"title": label, "text": str(by_label[label]), "options": [], "details": []}
+        {"title": label, "text": str(by_label[label]), "multi": False, "options": [], "details": []}
         for label in _ACTION_SUBJECT_LABELS
         if by_label.get(label)
     ]

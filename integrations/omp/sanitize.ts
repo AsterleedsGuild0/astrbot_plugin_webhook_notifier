@@ -1,6 +1,22 @@
 /** 出站内容的公共清洗与匿名化：只产出白名单字段需要的有界文本。 */
 import { createHmac, randomBytes } from "node:crypto";
+import type { ChoiceField, FormField, FormSpan, HtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import type { AskOption, AskQuestion, InteractionDetail } from "./wire.ts";
+
+let htmlForm: {
+  parseHtmlForm: (html: string) => HtmlForm;
+  spansText: (spans: readonly FormSpan[]) => string;
+  fieldQuestions: (form: HtmlForm) => Map<FormField, string>;
+  isArrayChoice: (field: ChoiceField) => boolean;
+} | undefined;
+try {
+  const [{ parseHtmlForm, spansText }, { fieldQuestions, isArrayChoice }] = await Promise.all([
+    import("@oh-my-pi/pi-tui/html-form/parse"),
+    import("@oh-my-pi/pi-tui/html-form/data"),
+  ]);
+  htmlForm = { parseHtmlForm, spansText, fieldQuestions, isArrayChoice };
+} catch { /* OMP < 18.18.3 或无 pi-tui 的纯回环环境：保留 questions[] 路径。 */ }
+export const hasHtmlForm = htmlForm !== undefined;
 
 /** 进程内随机盐：同一进程的多个会话工厂共享，用于匿名关联会话与代理身份。 */
 const salt = randomBytes(32);
@@ -19,23 +35,63 @@ export function text(value: unknown, limit = 96, model = false): string | undefi
   if (!clean || /^[…\s]+$/.test(clean) || ABSOLUTE_OR_URL.test(clean)) return;
   return Array.from(clean).slice(0, limit).join("").trim() || undefined;
 }
-/** ask 与 OpenCode 问题卡一致：发送题干、标题、选项标签、描述和推荐项；最多 4 题、每题 8 个选项。不读取答案。 */
+/** ask 与 OpenCode 问题卡一致：兼容 OMP < 18.18.3 的 questions[] 与 >= 18.18.3 的 HTML 表单；最多 4 题、每题 8 个选项，不读取答案。 */
 export function askDetail(input: unknown): InteractionDetail | undefined {
-  const raw = (input as { questions?: unknown } | undefined)?.questions;
-  if (!Array.isArray(raw) || !raw.length) return;
-  const questions: AskQuestion[] = [];
-  for (const item of raw.slice(0, 4) as { question?: unknown; header?: unknown; options?: unknown; recommended?: unknown }[]) {
-    const questionText = text(item?.question, 300);
-    if (!questionText) continue;
-    const header = text(item.header, 40);
-    const options: AskOption[] = [];
-    if (Array.isArray(item.options)) item.options.slice(0, 8).forEach((option, index) => {
-      const label = text((option as { label?: unknown } | undefined)?.label, 80);
-      if (!label || options.some(existing => existing.label === label)) return;
-      const description = text((option as { description?: unknown }).description, 200);
-      options.push({ label, ...(description ? { description } : {}), ...(item.recommended === index ? { recommended: true as const } : {}) });
-    });
-    questions.push({ text: questionText, ...(header ? { header } : {}), ...(options.length ? { options } : {}) });
+  if (typeof input !== "object" || input === null) return;
+  const raw = "questions" in input ? input.questions : undefined;
+  if (Array.isArray(raw)) {
+    if (!raw.length) return;
+    const questions: AskQuestion[] = [];
+    for (const item of raw.slice(0, 4)) {
+      if (typeof item !== "object" || item === null) continue;
+      const questionText = text("question" in item ? item.question : undefined, 300);
+      if (!questionText) continue;
+      const header = text("header" in item ? item.header : undefined, 40);
+      const multi = "multi" in item && item.multi === true;
+      const options: AskOption[] = [];
+      const rawOptions = "options" in item ? item.options : undefined;
+      const recommended = "recommended" in item ? item.recommended : undefined;
+      if (Array.isArray(rawOptions)) rawOptions.slice(0, 8).forEach((option, index) => {
+        if (typeof option !== "object" || option === null) return;
+        const label = text("label" in option ? option.label : undefined, 80);
+        if (!label || options.some(existing => existing.label === label)) return;
+        const description = text("description" in option ? option.description : undefined, 200);
+        options.push({ label, ...(description ? { description } : {}), ...(recommended === index ? { recommended: true as const } : {}) });
+      });
+      questions.push({ text: questionText, ...(header ? { header } : {}), ...(multi ? { multi: true as const } : {}), ...(options.length ? { options } : {}) });
+    }
+    return questions.length ? { questionCount: Math.min(raw.length, 99), questions } : undefined;
   }
-  return questions.length ? { questionCount: Math.min(raw.length, 99), questions } : undefined;
+  const html = "html" in input ? input.html : undefined;
+  if (typeof html !== "string" || !html.trim() || !htmlForm) return;
+  try {
+    const form = htmlForm.parseHtmlForm(html);
+    const named = form.fields.filter(field => Boolean(field.name));
+    if (!named.length) return;
+    const labels = htmlForm.fieldQuestions(form);
+    const questions: AskQuestion[] = [];
+    for (const field of named.slice(0, 4)) {
+      const questionText = text(labels.get(field) ?? field.name, 300);
+      if (!questionText) continue;
+      if (field.kind !== "choice") {
+        questions.push({ text: questionText });
+        continue;
+      }
+      const enabled = field.options.filter(option => !option.disabled);
+      const checked = enabled.filter(option => option.checked);
+      const recommendedOption = checked.length === 1 ? checked[0] : undefined;
+      const options: AskOption[] = [];
+      for (const option of enabled) {
+        if (options.length >= 8) break;
+        const label = text(htmlForm.spansText(option.label), 80);
+        if (!label || options.some(existing => existing.label === label)) continue;
+        options.push({ label, ...(option === recommendedOption ? { recommended: true as const } : {}) });
+      }
+      const multi = htmlForm.isArrayChoice(field);
+      questions.push({ text: questionText, ...(multi ? { multi: true as const } : {}), ...(options.length ? { options } : {}) });
+    }
+    return questions.length ? { questionCount: Math.min(named.length, 99), questions } : undefined;
+  } catch {
+    return;
+  }
 }

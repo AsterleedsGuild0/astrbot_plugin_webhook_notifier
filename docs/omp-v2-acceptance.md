@@ -163,8 +163,8 @@
 
 | 层级 | 场景与预期 | 实际结果 | 证据入口 |
 | --- | --- | --- | --- |
-| Bun 行为回归 | 断言不改，覆盖全部既有行为 | OMP 68 项、OpenCode 279 项，共 347 项通过 | `bun test integrations/omp integrations/opencode` |
-| 类型检查 | 以 OMP 18.12.6 发布包的类型声明检查 6 个模块（strict、`noUnusedLocals`） | 客户端模块 0 错误 | `tmp/omp-types/`（本地，不入库） |
+| Bun 行为回归 | 断言不改，覆盖全部既有行为；HTML 表单测试在未提供本地 `@oh-my-pi/pi-tui` 映射时自动跳过 | OMP 68 项、OpenCode 279 项，共 347 项通过；后续新增 HTML 表单回归用 `--tsconfig-override tmp/omp-types/tsconfig.json` 执行 | `bun test integrations/omp integrations/opencode`、`bun test --tsconfig-override tmp/omp-types/tsconfig.json integrations/omp` |
+| 类型检查 | 以本地提取的 OMP 发布包类型声明检查客户端模块（strict、`noUnusedLocals`） | 客户端模块 0 错误 | `./tmp/omp-types/node_modules/.bin/tsc -p tmp/omp-types/tsconfig.json`（本地，不入库） |
 | 出站一致性 | 同一回环 HTTP smoke 分别驱动 v2.1.0 单文件与新包入口，归一化随机引用与时间戳后逐字节比较请求体 | 17 个场景的请求体完全一致；结果分类、请求次数与重试同 ID 均一致 | `tmp/compare-32/`（本地） |
 | 回环 HTTP | 包入口与测试 ZIP 解压出的包目录 | 两者 17 场景均通过 | `scripts/smoke_omp_hook.py --package …` |
 | Python 全仓 | 打包契约、同步器目录形态回归 | 1383 项通过，Ruff 通过 | `uv run --frozen pytest -q` |

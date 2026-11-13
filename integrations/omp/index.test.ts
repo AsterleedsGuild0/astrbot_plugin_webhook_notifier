@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import register, { type Envelope } from "./index.ts";
+import { hasHtmlForm } from "./sanitize.ts";
 
 type Event = Record<string, unknown>;
 type Handler = (event: Event, context: ExtensionContext) => unknown;
@@ -209,6 +210,117 @@ describe("交互请求观察", () => {
     expect(byKind.approval).toMatchObject({ title: "bash" });
     expect(byKind.plan_review).toMatchObject({ title: "迁移计划" });
     expect(JSON.stringify(requests.map(row => row.body))).not.toContain(SENTINEL);
+  });
+  it("旧 questions[] 的 multi: true 发送多选标记；缺失、false 或非布尔值不发送", async () => {
+    const c = client(); c.emit("agent_start");
+    c.emit("tool_call", { toolName: "ask", toolCallId: "q-multi", input: { questions: [
+      { id: "q1", header: "检查项", question: "提交前跑哪些检查？", multi: true, recommended: 1, options: [{ label: "Ruff" }, { label: "Bun" }] },
+      { id: "q2", question: "发布渠道？", multi: false, options: [{ label: "测试" }, { label: "正式" }] },
+      { id: "q3", question: "需要回执？", multi: "true", options: [{ label: "是" }] },
+    ] } });
+    await advance(150);
+    expect(requests[0].body.interaction).toMatchObject({
+      questionCount: 3,
+      questions: [
+        { text: "提交前跑哪些检查？", header: "检查项", multi: true, options: [{ label: "Ruff" }, { label: "Bun", recommended: true }] },
+        { text: "发布渠道？", options: [{ label: "测试" }, { label: "正式" }] },
+        { text: "需要回执？", options: [{ label: "是" }] },
+      ],
+    });
+    expect(requests[0].body.interaction?.questions?.[1]).not.toHaveProperty("multi");
+    expect(requests[0].body.interaction?.questions?.[2]).not.toHaveProperty("multi");
+  });
+  it.skipIf(!hasHtmlForm)("OMP >= 18.18.3 HTML 表单（需本地 @oh-my-pi/pi-tui 映射）：按 parseHtmlForm 与 fieldQuestions 提取题干、选项、推荐与多选，过滤隐藏／未命名／说明／超限／敏感路径", async () => {
+    const c = client(); c.emit("agent_start");
+    const tenOptions = Array.from({ length: 10 }, (_, idx) => `<option value="${SENTINEL}-${idx}"${idx === 2 ? " selected" : ""}>区域 ${idx + 1}</option>`).join("");
+    const html = `<form>
+      <p>背景说明：${SENTINEL} 不应作为单独段落发送</p>
+      <table><tr><th>列</th><td>${SENTINEL}</td></tr></table>
+      <img src="https://example.invalid/${SENTINEL}.png" alt="${SENTINEL}">
+      <input type="hidden" name="csrf" value="${SENTINEL}">
+      <input type="text" value="${SENTINEL}" placeholder="${SENTINEL}">
+      <fieldset>
+        <legend>会话存储方案</legend>
+        <label><input type="radio" name="store" value="${SENTINEL}-sqlite" checked> SQLite：本地文件 /private/${SENTINEL}/db.sqlite</label>
+        <label><input type="radio" name="store" value="${SENTINEL}-redis"> Redis：见 https://redis.invalid/${SENTINEL}</label>
+        <label><input type="radio" name="store" value="${SENTINEL}-dup"> Redis：见 https://other.invalid/${SENTINEL}</label>
+        <label><input type="radio" name="store" value="${SENTINEL}-only-url"> https://only.invalid/${SENTINEL}</label>
+      </fieldset>
+      <fieldset>
+        <legend>这次要运行哪些门禁？</legend>
+        <label><input type="checkbox" name="gates" value="${SENTINEL}-ruff" checked> Ruff 检查</label>
+        <label><input type="checkbox" name="gates" value="${SENTINEL}-pytest" checked> Pytest 回归</label>
+        <label><input type="checkbox" name="gates" value="${SENTINEL}-bun"> Bun 测试</label>
+      </fieldset>
+      <label>部署区域
+        <select name="region">
+          <option value="${SENTINEL}-placeholder" disabled>请选择</option>
+          ${tenOptions}
+        </select>
+      </label>
+      <label>备注说明 <textarea name="notes" placeholder="${SENTINEL}-ph">${SENTINEL}-default</textarea></label>
+      <label>额外输入五 <input type="text" name="extra5" value="${SENTINEL}-5" placeholder="${SENTINEL}-p5"></label>
+      <label><input type="checkbox" name="lone"> 完成后清理临时目录</label>
+    </form>`;
+    c.emit("tool_call", { toolName: "ask", toolCallId: "q-html", input: { html } });
+    await advance(150);
+    const interaction = requests[0].body.interaction!;
+    expect(interaction.questionCount).toBe(6);
+    expect(interaction.questions).toEqual([
+      {
+        text: "会话存储方案",
+        options: [
+          { label: "SQLite：本地文件 …", recommended: true },
+          { label: "Redis：见 …" },
+        ],
+      },
+      {
+        text: "这次要运行哪些门禁？",
+        multi: true,
+        options: [
+          { label: "Ruff 检查" },
+          { label: "Pytest 回归" },
+          { label: "Bun 测试" },
+        ],
+      },
+      {
+        text: "部署区域",
+        options: Array.from({ length: 8 }, (_, idx) => ({
+          label: `区域 ${idx + 1}`,
+          ...(idx === 2 ? { recommended: true as const } : {}),
+        })),
+      },
+      { text: "备注说明" },
+    ]);
+    expect(JSON.stringify(requests[0].body)).not.toContain(SENTINEL);
+    expect(JSON.stringify(requests[0].body)).not.toContain("Other");
+  });
+  it.skipIf(!hasHtmlForm)("OMP >= 18.18.3 HTML 表单（需本地 @oh-my-pi/pi-tui 映射）：单个 checkbox、单选 select 与文本题不标 multi；checkbox 组（含单个预选）与 select multiple 标 multi；无可用题目时省略 questions", async () => {
+    const c = client(); c.emit("agent_start");
+    c.emit("tool_call", {
+      toolName: "ask",
+      toolCallId: "q-modes",
+      input: {
+        html: `<form>
+          <label><input type="checkbox" name="confirm" value="yes"> 确认继续</label>
+          <label>目标平台 <select name="targets" multiple><option value="qq" selected>QQ</option><option value="tg">Telegram</option></select></label>
+          <label>超时秒数 <input type="number" name="timeout" value="30"></label>
+        </form>`,
+      },
+    });
+    c.emit("tool_call", {
+      toolName: "ask",
+      toolCallId: "q-empty",
+      input: { html: `<form><p>只有说明段落</p><input type="hidden" name="h" value="${SENTINEL}"></form>` },
+    });
+    await advance(150);
+    expect(requests[0].body.interaction?.questions).toEqual([
+      { text: "确认继续", options: [{ label: "确认继续" }] },
+      { text: "目标平台", multi: true, options: [{ label: "QQ", recommended: true }, { label: "Telegram" }] },
+      { text: "超时秒数" },
+    ]);
+    expect(Object.keys(requests[1].body.interaction!).sort()).toEqual(["kind", "ref"]);
+    expect(JSON.stringify(requests.map(r => r.body))).not.toContain(SENTINEL);
   });
   it("eval 参数不是 ask 观察来源，只有实际间接工具事件才触发", async () => {
     const c = client(); c.emit("agent_start"); c.emit("tool_call", { toolName: "eval", toolCallId: "eval", input: { code: "tool.ask(PRIVATE_SENTINEL)" } }); await advance(1000); expect(requests).toEqual([]);

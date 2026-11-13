@@ -9,7 +9,7 @@ import pytest
 from core.omp import OmpProviderAdapter, is_omp_session_stop
 from core.notification_policy import should_filter_by_duration, should_notify
 from core.providers import ProviderError
-from core.renderer import render_html_default, render_image_caption, render_text_default
+from core.renderer import DEFAULT_HTML_TEMPLATE, render_html_data, render_html_default, render_html_template, render_image_caption, render_text_default
 
 
 def envelope(status="completed"):
@@ -144,6 +144,79 @@ def test_ask_interaction_renders_like_opencode_question_card():
     assert recommended < html.index("手动复制，本机导入") < html.index(">推荐<") < html.index("临时 MITM 捕获")
 
 
+def test_ask_mixed_single_and_multi_select_rendering_and_html_form_wire_shape():
+    single_only = envelope("action_required")
+    single_only["interaction"].update(questionCount=1, questions=[ask_questions()[0]])
+    single_html = render_html_default(parse(single_only))
+    single_body = single_html.split("<body>", 1)[1]
+    single_text = render_text_default(parse(single_only))
+    assert "可多选" not in single_body and 'class="action-options action-options-multi"' not in single_body
+    assert "选择方式" not in single_text and "[ ]" not in single_text
+
+    mixed = envelope("action_required")
+    mixed["interaction"].update(
+        questionCount=6,
+        questions=[
+            ask_questions()[0],
+            {
+                "text": "这次要运行哪些门禁？",
+                "header": "检查项",
+                "multi": True,
+                "options": [
+                    {"label": "Ruff 检查", "recommended": True},
+                    {"label": "Pytest 回归"},
+                    {"label": "Bun 测试"},
+                ],
+            },
+            {"text": "备注说明"},
+        ],
+    )
+    event = parse(mixed)
+    text = render_text_default(event)
+    html_light = render_html_default(event)
+    html_dark = render_html_template(DEFAULT_HTML_TEMPLATE, render_html_data(event, theme="dark")["event"])
+
+    assert "问题 1 选择方式" not in text
+    assert "问题 1 选项：1. 手动复制，本机导入（推荐）\n   你在浏览器中复制 Cookie 后告知\n2. 临时 MITM 捕获" in text
+    assert "问题 2 标题：检查项" in text
+    assert "问题 2 选择方式：可多选" in text
+    assert "问题 2 选项：1. [ ] Ruff 检查（推荐）\n2. [ ] Pytest 回归\n3. [ ] Bun 测试" in text
+
+    for html in (html_light, html_dark):
+        body_html = html.split("<body>", 1)[1]
+        assert '<div class="action-block-title">取得方式</div>' in body_html
+        assert body_html.count('class="action-multi-badge">可多选</span>') == 1
+        assert body_html.count('class="action-options action-options-multi"') == 1
+        q1_block = html.split('<section class="action-block">')[1].split("</section>")[0]
+        q2_block = html.split('<section class="action-block">')[2].split("</section>")[0]
+        assert "可多选" not in q1_block and "action-options-multi" not in q1_block
+        assert "检查项" in q2_block and "可多选" in q2_block and "action-options-multi" in q2_block
+
+    # 单题 HTML 表单没有 header 时，多选题同样显示“可多选”标识
+    lone_multi = envelope("action_required")
+    lone_multi["interaction"].update(
+        questionCount=1,
+        questions=[{"text": "需要启用哪些通知渠道？", "multi": True, "options": [{"label": "私聊"}, {"label": "群聊"}]}],
+    )
+    lone_html = render_html_default(parse(lone_multi))
+    assert '<div class="action-block-title action-block-head"><span class="action-multi-badge">可多选</span></div>' in lone_html
+    assert "action-options-multi" in lone_html
+
+    # 客户端 HTML 表单映射结果（6 个带名字段取前 4 题、radio 预选、checkbox 组、8 项 select、文本题、URL/绝对路径清洗）通过 V2 校验
+    html_mapped = envelope("action_required")
+    html_mapped["interaction"].update(
+        questionCount=6,
+        questions=[
+            {"text": "会话存储方案", "options": [{"label": "SQLite：本地文件 …", "recommended": True}, {"label": "Redis：见 …"}]},
+            {"text": "这次要运行哪些门禁？", "multi": True, "options": [{"label": "Ruff 检查"}, {"label": "Pytest 回归"}, {"label": "Bun 测试"}]},
+            {"text": "部署区域", "options": [{"label": f"区域 {idx + 1}", **({"recommended": True} if idx == 2 else {})} for idx in range(8)]},
+            {"text": "备注说明"},
+        ],
+    )
+    mapped_event = parse(html_mapped)
+    assert "区域 3（推荐）" in render_text_default(mapped_event)
+
+
 def test_image_caption_names_status_session_and_pending_action():
     assert render_image_caption(parse(envelope("completed"))) == "【已完成】测试会话"
     assert render_image_caption(parse(envelope("action_required"))) == "【待处理】测试会话 · 等待问题回答"
@@ -173,6 +246,10 @@ def test_approval_and_plan_titles_are_shown(kind, label):
     lambda i: i.update(questionCount=1, questions=[{"text": "q", "options": [{"label": "a"}, {"label": "a"}]}]),
     lambda i: i.update(questionCount=1, questions=[{"text": "q", "options": [{"label": "a", "recommended": True}, {"label": "b", "recommended": True}]}]),
     lambda i: i.update(questionCount=1, questions=[{"text": "q", "options": [{"label": "a", "description": "x" * 201}]}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "multi": False, "options": [{"label": "a"}, {"label": "b"}]}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "multi": 1, "options": [{"label": "a"}, {"label": "b"}]}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "multi": "PRIVATE_SENTINEL", "options": [{"label": "a"}, {"label": "b"}]}]),
+    lambda i: i.update(questionCount=1, questions=[{"text": "q", "multi": None}]),
     lambda i: i.update(title="PRIVATE_SENTINEL"),
     lambda i: i.update(kind="approval", questionCount=1, questions=[{"text": "q"}]),
     lambda i: i.update(kind="approval", title="x" * 201),

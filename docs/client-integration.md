@@ -45,7 +45,7 @@ OMP 自带 Bun/TypeScript 运行能力，客户端包没有运行依赖，不需
 | `transport.ts` | 读取环境变量配置；有界队列、并发、重试和 HTTP／业务结果分类 |
 | `state.ts` | 运行、交互与会话绑定状态，最终状态映射，子代理父子关联 |
 | `timeline.ts` | 根运行收束时的子代理观察段与用户等待区间 |
-| `sanitize.ts` | 名称与交互内容的清洗、截断和匿名化 |
+| `sanitize.ts` | 名称与交互内容的清洗、截断、匿名化，以及 `ask`（`questions[]` 与 HTML `<form>`）提取 |
 | `wire.ts` | V2 出站字段类型 |
 
 模块之间只用相对路径导入，不依赖仓库其他位置；整个目录复制到任何位置都能独立加载。
@@ -156,7 +156,7 @@ omp -e /path/to/integrations/omp
 
 ### 更新策略
 
-先升级服务端，再更新客户端；协议新增字段时旧服务端会拒绝，不自动回退。升级客户端时整目录替换（先删除旧目录再复制），然后重启 OMP。保留单一生效入口，不恢复旧 `onebot.ts` 或单文件 `webhook-notifier.ts` 为第二入口。测试包、切换门禁及客户端回滚步骤见[发布流程](release.md)。
+先升级服务端，再更新客户端；协议新增字段（如多选题标记 `interaction.questions[].multi`）时旧服务端会拒绝，不自动回退。升级客户端时整目录替换（先删除旧目录再复制），然后重启 OMP。保留单一生效入口，不恢复旧 `onebot.ts` 或单文件 `webhook-notifier.ts` 为第二入口。测试包、切换门禁及客户端回滚步骤见[发布流程](release.md)。
 
 ---
 
@@ -219,6 +219,8 @@ v2.4.0 起本次运行用量另带估算费用与速度，默认发送、没有�
 - 费用只读 OMP 自己的估算值（`sessionManager.getUsageStatistics()` 的 `cost`／`subagentCost`，与 OMP 界面 `$… this turn` 同源，按模型目录价格计算），插件不维护价格表，也不读取 CPA 或 Keeper 的价格。主会话通知合计主会话与已关联子代理（task、eval `agent()`、workpool）的费用；关联不完整时整体不发，不发部分合计。目录没有定价的模型费用为 0，不发送。
 - 速度来自 OMP 在每条助手消息上记录的 `ttft`、`duration` 与输出 token：首字延迟取中位数，输出速度按首字之后的生成时间计算。首字延迟是客户端测得的时间，含到 CPA 等代理的连接开销；OpenAI Codex 传输优先走 WebSocket，回退 HTTP 前的握手超时也会计入。
 
+`ask` 待处理提醒兼容 OMP 18.18.3 之前的 `questions[]` 参数与 OMP ≥ 18.18.3 的 HTML 表单 `{ html }`（调用宿主 `@oh-my-pi/pi-tui/html-form/parse` 与 `html-form/data` 解析）：发送最多 4 道带名字段的题干、最多 8 个去重选项标签、唯一预选项的推荐标记，以及多选题的 `multi: true`（旧参数 `questions[].multi === true`，HTML 表单的 checkbox 组与 `<select multiple>` 且选项多于一个）；单选题省略 `multi`。表单说明段落、表格、图片、隐藏／未命名字段、默认值、占位文字、选项 `value`、自动 “Other” 与用户回答均不发送。启用带 `multi: true` 的新客户端前必须先升级 AstrBot 服务端。
+
 禁止出站或日志出现正文、完整路径、原始 ID、工具参数、计划、原始错误、凭据身份（邮箱、账号、组织、凭据行 ID）和原始对象。OMP Sender 只记录固定失败分类，不保留异常正文与 traceback。V1 继续接收，但标准化不再透出旧完整路径、raw 元数据或原始 ID；`error`／`aborted` 纠正，普通 `stop` 缺最终证据时为 `unknown`。
 
 ## 本地验证与层级
@@ -227,6 +229,8 @@ v2.4.0 起本次运行用量另带估算费用与速度，默认发送、没有�
 
 ```bash
 bun test integrations/omp integrations/opencode
+bun test --tsconfig-override tmp/omp-types/tsconfig.json integrations/omp  # 本地已提取 OMP >= 18.18.3 包时运行 HTML 表单测试
+./tmp/omp-types/node_modules/.bin/tsc -p tmp/omp-types/tsconfig.json       # 本地类型检查（tmp/ 不入库）
 uv run pytest -q
 uv run ruff check .
 uv run python scripts/smoke_omp_hook.py
