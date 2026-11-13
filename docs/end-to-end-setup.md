@@ -107,7 +107,7 @@ Caddy 与 AstrBot 不同机时，插件不能继续只监听 loopback；应绑�
 
 其他重要默认值：
 
-- `render_mode` 的实际默认值是 `text`。
+- `render_mode` 新安装的默认值是 `html_image`，渲染失败按 `fallback_to_text` 降级为纯文本；已安装过旧版本的实例保留原来的 `text`，需要时在插件配置中手动修改。
 - `enable_private_notifications` 的实际默认值是 `false`；私聊 Endpoint 可以创建和鉴权，但通知会返回 `skipped`，直至管理员在评估平台风险后显式开启并重载插件。
 
 ---

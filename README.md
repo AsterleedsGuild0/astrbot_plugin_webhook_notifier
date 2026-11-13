@@ -62,7 +62,7 @@ git clone https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier.gi
 
 ### 2. 最小配置与 Endpoint
 
-- 进入 **AstrBot WebUI → 插件管理 → Webhook Notifier → 配置**，保持 `enabled: true`、`render_mode: text`。
+- 进入 **AstrBot WebUI → 插件管理 → Webhook Notifier → 配置**，保持 `enabled: true`。`render_mode` 新安装默认 `html_image`（图片卡片，失败降级纯文本）；未自建 T2I 时图片由 AstrBot 默认的公共渲染服务生成，介意内容外发可改为 `text`。
 - `server` 默认监听 `127.0.0.1:18080`，`base_path` 为 `/webhook`。按部署方式设置 `host`、`port` 与含 base path 的 `public_base_url`；同机可直连，跨主机或公网建议 HTTPS 反向代理。步骤见[端到端部署](docs/end-to-end-setup.md)。
 - 私聊主动通知默认关闭。首次可保留此安全默认值验证 `skipped`；确认平台规则和风险后，才设 `enable_private_notifications: true` 并重载，以验证实际送达。
 
@@ -156,7 +156,7 @@ JSON
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
 | `enabled` | `true` | 启用插件；创建可投递 Endpoint 后自动启动 HTTP 服务 |
-| `render_mode` | `text` | 选择 `text` 或 `html_image`，使用纯文本或 HTML 图片 |
+| `render_mode` | `html_image` | 选择 `html_image` 或 `text`，使用 HTML 图片卡片或纯文本；已安装旧版的实例保留原值 |
 | `notification_mode` | `focused` | 仅抑制成功完成的子代理／辅助会话；`all` 发送全部通知 |
 | `min_completion_duration_seconds` | `15` | 可靠耗时低于阈值的成功任务不通知；`0` 关闭过滤 |
 | `enable_private_notifications` | `false` | 是否允许 Webhook 主动投递到私聊目标 |
