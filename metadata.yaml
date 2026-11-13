@@ -8,7 +8,7 @@ tags:
   - coding-agent
   - oh-my-pi
   - opencode
-version: v2.5.1
+version: v2.5.2
 author: AsterleedsGuild0
 repo: https://github.com/AsterleedsGuild0/astrbot_plugin_webhook_notifier
 astrbot_version: ">=4.26.8"
